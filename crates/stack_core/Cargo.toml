@@ -1,0 +1,33 @@
+[package]
+name = "stack_core"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+
+[lib]
+name = "stack_core"
+# staticlib → iOS xcframework; cdylib → host bindgen (library mode); lib → tests + embedded bindgen bin.
+crate-type = ["staticlib", "cdylib", "lib"]
+
+[features]
+# Enables the embedded uniffi-bindgen binary without pulling clap into the iOS staticlib.
+cli = ["uniffi/cli"]
+
+[[bin]]
+name = "uniffi-bindgen"
+path = "src/bin/uniffi-bindgen.rs"
+required-features = ["cli"]
+
+[dependencies]
+uniffi = { workspace = true }
+reqwest = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+jsonwebtoken = { workspace = true }
+tokio = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+wiremock = "0.6"

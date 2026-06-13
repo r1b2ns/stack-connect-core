@@ -1,0 +1,27 @@
+[workspace]
+resolver = "2"
+members = ["crates/stack_core"]
+
+[workspace.package]
+edition = "2021"
+version = "0.1.0"
+license = "MIT"
+rust-version = "1.88"
+repository = "https://github.com/rubensmachion/stack-connect-core"
+
+[workspace.dependencies]
+uniffi = { version = "0.31", features = ["tokio"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+jsonwebtoken = "9"
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "sync", "macros", "time"] }
+time = { version = "0.3", features = ["serde", "parsing", "formatting"] }
+thiserror = "2"
+base64 = "0.22"
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+strip = true
