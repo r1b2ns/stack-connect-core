@@ -19,6 +19,7 @@ tokio = { version = "1", features = ["rt", "rt-multi-thread", "sync", "macros", 
 time = { version = "0.3", features = ["serde", "parsing", "formatting"] }
 thiserror = "2"
 base64 = "0.22"
+async-trait = "0.1"
 
 [profile.release]
 opt-level = "z"

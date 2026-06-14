@@ -1,12 +1,4 @@
-mod jwt;
-mod oauth;
-mod service_account;
+//! Pluggable authenticators. Each external service that needs a distinct signing
+//! scheme gets a module here; App Store Connect uses ES256 team JWTs.
 
-pub(crate) use oauth::GoogleAuthenticator;
-pub(crate) use service_account::ServiceAccount;
-
-/// Default OAuth scopes for the Google Play provider (androidpublisher + reporting).
-pub(crate) const PLAY_SCOPES: &[&str] = &[
-    "https://www.googleapis.com/auth/androidpublisher",
-    "https://www.googleapis.com/auth/playdeveloperreporting",
-];
+pub(crate) mod es256;

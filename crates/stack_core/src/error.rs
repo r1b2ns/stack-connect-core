@@ -18,6 +18,9 @@ pub enum StackError {
 
     #[error("network error: {message}")]
     Network { message: String },
+
+    #[error("unsupported capability: {message}")]
+    Unsupported { message: String },
 }
 
 impl StackError {
@@ -41,6 +44,13 @@ impl StackError {
 
     pub(crate) fn network(message: impl Into<String>) -> Self {
         Self::Network {
+            message: message.into(),
+        }
+    }
+
+    #[allow(dead_code)] // exercised once a provider reports a missing capability
+    pub(crate) fn unsupported(message: impl Into<String>) -> Self {
+        Self::Unsupported {
             message: message.into(),
         }
     }

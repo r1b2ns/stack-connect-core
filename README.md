@@ -12,17 +12,17 @@ for the full plan and roadmap.
 um serviço não toca o núcleo nem o facade UniFFI — ver [RUST_CORE_PLAN.md](RUST_CORE_PLAN.md)
 (§3 contrato, §4 como adicionar um serviço).
 
-**Phase 0 — esqueleto + prova de binding ✅ concluída.** Workspace Cargo, facade
-UniFFI, callback `CredentialStore`, erro tipado `StackError`, xcframework (iOS
-device/sim) + smoke Swift e XCTest no simulador cruzando a fronteira — verdes.
+**Phase 0 — esqueleto + prova de binding ✅.** Workspace Cargo, facade UniFFI,
+callback `CredentialStore`, `StackError`, xcframework (iOS device/sim) + smoke/XCTest.
 
-> A prova de binding usa um provedor de exemplo descartável (`PlayProvider`); a
-> esteira é agnóstica de API e será **substituída pelo contrato de serviço**
-> (`Provider`/`ServiceKind`/`connect`) na Fase 1.
+**Phase 1 — contrato de serviço + 1º plugin (App Store Connect) ✅.** `service::{provider,
+kind, registry}` (`Provider`/`ServiceKind`/`Capability`/`CredentialField`), `auth::es256`
+(`.p8`/P-256), `providers/appstore` (`validate` + `fetch_apps` via `GET /v1/apps`,
+paginação `links.next`), facade `connect()`/`credential_schema()`/`available_services()`.
+Sample Google removido. **17 testes Rust** + host smoke + XCTest no simulador iOS — verdes.
 
-Próximo: **Fase 1 — contrato de serviço + 1º plugin (App Store Connect)**: trait
-`Provider`, `registry`, `auth::es256`, `connect()`/`credential_schema()`/
-`available_services()`, e `providers/appstore` com `validate` + `fetch_apps`.
+Próximo: **Fase 2** — plugar o App Store Connect no app iOS (strangler) + capacidades
+ASC completas (~31 recursos) + `SyncService` sobre `BlobStore`.
 
 ## Layout
 

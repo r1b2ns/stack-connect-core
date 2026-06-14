@@ -1,6 +1,6 @@
 /// Secure-credential storage implemented natively (Keychain on iOS) and injected
-/// across the FFI boundary as a foreign trait. Phase 0 uses it to read the Google
-/// service-account JSON; later phases add the per-provider secrets.
+/// across the FFI boundary as a foreign trait. Each provider declares the keys it
+/// reads via its `credential_schema` (see `service::registry`).
 #[uniffi::export(with_foreign)]
 pub trait CredentialStore: Send + Sync {
     /// Returns the secret stored for `(account_id, key)`, if present.
@@ -10,6 +10,3 @@ pub trait CredentialStore: Send + Sync {
     /// Removes every secret associated with `account_id`.
     fn delete(&self, account_id: String);
 }
-
-/// Conventional key under which the Google service-account JSON is stored.
-pub(crate) const SERVICE_ACCOUNT_KEY: &str = "serviceAccountJson";

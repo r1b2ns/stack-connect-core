@@ -1,21 +1,44 @@
 //! Smoke tests over the public (UniFFI-exported) surface — the same entry points
-//! Swift will call. Network paths are covered by the in-crate wiremock tests.
+//! Swift will call. No network: provider network paths are covered by the
+//! in-crate wiremock tests.
 
 use std::sync::Arc;
+use std::sync::Mutex;
 
-use stack_core::{CredentialStore, PlayProvider, StackError};
+use stack_core::{
+    available_services, connect, credential_schema, CredentialStore, ServiceKind, StackError,
+};
 
 #[test]
-fn new_rejects_invalid_json() {
-    // Avoid unwrap_err(): the Ok type Arc<PlayProvider> is not Debug.
-    let result = PlayProvider::new("not json".into());
-    assert!(matches!(result, Err(StackError::InvalidCredentials { .. })));
+fn available_services_is_not_empty() {
+    let services = available_services();
+    assert!(services.contains(&ServiceKind::AppStoreConnect));
 }
 
-struct EmptyStore;
+#[test]
+fn appstore_schema_exposes_three_fields() {
+    let schema = credential_schema(ServiceKind::AppStoreConnect);
+    let keys: Vec<&str> = schema.iter().map(|f| f.key.as_str()).collect();
+    assert_eq!(keys, vec!["issuerId", "keyId", "privateKeyP8"]);
+}
+
+/// A `CredentialStore` that always returns `None` and records its lookups, so the
+/// test can assert the facade consulted it (and in which order).
+struct EmptyStore {
+    calls: Mutex<Vec<(String, String)>>,
+}
+
+impl EmptyStore {
+    fn new() -> Self {
+        Self {
+            calls: Mutex::new(Vec::new()),
+        }
+    }
+}
 
 impl CredentialStore for EmptyStore {
-    fn secret(&self, _account_id: String, _key: String) -> Option<String> {
+    fn secret(&self, account_id: String, key: String) -> Option<String> {
+        self.calls.lock().unwrap().push((account_id, key));
         None
     }
     fn set_secret(&self, _account_id: String, _key: String, _value: String) {}
@@ -23,8 +46,16 @@ impl CredentialStore for EmptyStore {
 }
 
 #[test]
-fn with_credentials_errors_when_secret_missing() {
-    let store: Arc<dyn CredentialStore> = Arc::new(EmptyStore);
-    let result = PlayProvider::with_credentials(store, "acct-1".into());
+fn connect_errors_and_queries_store_in_order() {
+    let recording = Arc::new(EmptyStore::new());
+    let store: Arc<dyn CredentialStore> = recording.clone();
+
+    let result = connect(ServiceKind::AppStoreConnect, "acct-1".into(), store);
     assert!(matches!(result, Err(StackError::InvalidCredentials { .. })));
+
+    let calls = recording.calls.lock().unwrap();
+    assert_eq!(
+        calls.first(),
+        Some(&("acct-1".to_string(), "issuerId".to_string()))
+    );
 }
