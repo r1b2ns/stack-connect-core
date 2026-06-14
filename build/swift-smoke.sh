@@ -14,12 +14,12 @@ echo "==> Generating Swift bindings"
 WORK="target/swift-smoke"
 rm -rf "$WORK"
 mkdir -p "$WORK/Headers"
-cp build/generated/swift/StackCoreFFI.h build/generated/swift/module.modulemap "$WORK/Headers/"
-cp build/generated/swift/StackCore.swift "$WORK/"
+cp build/generated/swift/StackCoreRustFFI.h build/generated/swift/module.modulemap "$WORK/Headers/"
+cp build/generated/swift/StackCoreRust.swift "$WORK/"
 
 echo "==> Compiling + running smoke"
 swiftc -I "$WORK/Headers" \
-  "$WORK/StackCore.swift" bindings/swift/smoke/main.swift \
+  "$WORK/StackCoreRust.swift" bindings/swift/smoke/main.swift \
   -L target/aarch64-apple-darwin/release -lstack_core \
   -framework CoreFoundation -framework Security -framework SystemConfiguration \
   -o "$WORK/smoke"

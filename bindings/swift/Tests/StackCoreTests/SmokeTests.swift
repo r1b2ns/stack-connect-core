@@ -1,6 +1,6 @@
 import XCTest
 
-@testable import StackCore
+@testable import StackCoreRust
 
 // Cross-FFI smoke for `swift test` / xcodebuild on an iOS simulator (the xcframework
 // carries iOS slices). The host equivalent lives in ../../smoke/main.swift.

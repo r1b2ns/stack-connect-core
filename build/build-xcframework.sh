@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
-# Builds StackCore.xcframework for iOS (device + simulator) plus the Swift bindings.
+# Builds StackCoreRust.xcframework for iOS (device + simulator) plus the Swift bindings.
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
 LIB="libstack_core.a"
-OUT="bindings/swift/StackCore.xcframework"
+OUT="bindings/swift/StackCoreRust.xcframework"
 HEADERS="build/generated/headers"
 
 IOS_DEVICE="aarch64-apple-ios"

@@ -21,9 +21,9 @@ cargo run --release --features cli --bin uniffi-bindgen -- generate \
 find "$OUT" -name '*FFI.modulemap' -exec sh -c 'mv "$1" "$(dirname "$1")/module.modulemap"' _ {} \;
 
 # Mirror the generated wrapper into the consumable SwiftPM package.
-PKG_SRC="bindings/swift/Sources/StackCore"
+PKG_SRC="bindings/swift/Sources/StackCoreRust"
 mkdir -p "$PKG_SRC"
-cp "$OUT/StackCore.swift" "$PKG_SRC/StackCore.swift"
+cp "$OUT/StackCoreRust.swift" "$PKG_SRC/StackCoreRust.swift"
 
 echo "Swift bindings written to $OUT (wrapper mirrored to $PKG_SRC)"
 ls -1 "$OUT"

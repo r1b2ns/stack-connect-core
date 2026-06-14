@@ -2,26 +2,28 @@
 import PackageDescription
 
 // Consumable SwiftPM package for the iOS app. The xcframework and the generated
-// StackCore.swift are produced by `./build/build-xcframework.sh` (both gitignored).
+// StackCoreRust.swift are produced by `./build/build-xcframework.sh` (both gitignored).
+// The module is named `StackCoreRust` to avoid colliding with the app's native
+// `StackCore` Swift package.
 let package = Package(
-    name: "StackCore",
+    name: "StackCoreRust",
     platforms: [.iOS(.v17), .macOS(.v14)],
     products: [
-        .library(name: "StackCore", targets: ["StackCore"]),
+        .library(name: "StackCoreRust", targets: ["StackCoreRust"]),
     ],
     targets: [
         .binaryTarget(
             name: "StackCoreFFI",
-            path: "StackCore.xcframework"
+            path: "StackCoreRust.xcframework"
         ),
         .target(
-            name: "StackCore",
+            name: "StackCoreRust",
             dependencies: ["StackCoreFFI"],
-            path: "Sources/StackCore"
+            path: "Sources/StackCoreRust"
         ),
         .testTarget(
             name: "StackCoreTests",
-            dependencies: ["StackCore"],
+            dependencies: ["StackCoreRust"],
             path: "Tests/StackCoreTests"
         ),
     ]
