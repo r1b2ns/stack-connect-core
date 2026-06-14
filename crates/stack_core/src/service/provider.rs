@@ -4,14 +4,17 @@ use async_trait::async_trait;
 
 use crate::domain::AppInfo;
 use crate::error::StackError;
+use crate::service::capabilities::reviews::Reviews;
 use crate::service::kind::ServiceKind;
 
 /// A capability a provider may expose. The host calls [`Provider::capabilities`]
 /// to learn what a connected account can do; capabilities a provider lacks make
-/// the corresponding methods return [`StackError::Unsupported`]. Grows over time.
+/// the corresponding accessor (e.g. [`Provider::reviews`]) return `None`. Grows
+/// over time.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, uniffi::Enum)]
 pub enum Capability {
     Apps,
+    Reviews,
 }
 
 /// Internal, non-exported contract every concrete plugin implements. Kept off the
@@ -33,6 +36,12 @@ pub(crate) trait ProviderImpl: Send + Sync {
 
     /// Lists the apps visible to the connected account.
     async fn fetch_apps(&self) -> Result<Vec<AppInfo>, StackError>;
+
+    /// The Reviews capability handle, or `None` if this provider lacks
+    /// [`Capability::Reviews`]. Default `None` so providers opt in explicitly.
+    fn reviews(&self) -> Option<Arc<Reviews>> {
+        None
+    }
 }
 
 /// UniFFI-exported provider handle. A thin, binding-friendly wrapper around a
@@ -61,6 +70,13 @@ impl Provider {
     /// The capabilities exposed for the connected account.
     pub fn capabilities(&self) -> Vec<Capability> {
         self.inner.capabilities()
+    }
+
+    /// The Reviews capability handle, or `None` when this provider does not
+    /// expose [`Capability::Reviews`]. This is the discovery mechanism: the host
+    /// calls `provider.reviews()` and gets `None` when reviews are unsupported.
+    pub fn reviews(&self) -> Option<Arc<Reviews>> {
+        self.inner.reviews()
     }
 }
 
