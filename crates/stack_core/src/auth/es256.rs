@@ -25,14 +25,63 @@ struct TeamClaims {
     aud: &'static str,
 }
 
+/// PKCS#8 PEM header line.
+const PEM_BEGIN: &str = "-----BEGIN PRIVATE KEY-----";
+/// PKCS#8 PEM footer line.
+const PEM_END: &str = "-----END PRIVATE KEY-----";
+/// Standard PEM base64 line width.
+const PEM_LINE_WIDTH: usize = 64;
+
+/// Normalizes a `.p8` private key into a full PKCS#8 PEM that
+/// [`EncodingKey::from_ec_pem`] accepts.
+///
+/// App Store Connect keys legitimately reach the core in two shapes:
+/// 1. The full PEM the developer downloads (`-----BEGIN PRIVATE KEY-----` …).
+/// 2. The bare base64 PKCS#8 body with PEM headers and newlines stripped — the
+///    shape the legacy AppStoreConnect-Swift-SDK persists and the iOS host
+///    forwards.
+///
+/// A full PEM is detected by the presence of `BEGIN` and returned untouched.
+/// Otherwise every ASCII whitespace byte is removed and the remaining base64 is
+/// re-wrapped at [`PEM_LINE_WIDTH`] chars between the standard header/footer.
+/// No base64 decoding happens here; `from_ec_pem` performs validation and decode,
+/// so non-base64 garbage still fails there (preserving the rejection contract).
+fn normalize_p8_pem(raw: &[u8]) -> Vec<u8> {
+    let text = String::from_utf8_lossy(raw);
+    if text.contains("BEGIN") {
+        return raw.to_vec();
+    }
+
+    let body: String = text.split_whitespace().collect();
+
+    let mut pem = String::with_capacity(body.len() + PEM_BEGIN.len() + PEM_END.len() + 8);
+    pem.push_str(PEM_BEGIN);
+    pem.push('\n');
+    for chunk in body.as_bytes().chunks(PEM_LINE_WIDTH) {
+        // SAFETY of from_utf8: `body` came from a UTF-8 `String` and base64 is
+        // ASCII; chunking on a byte boundary of ASCII content stays valid UTF-8.
+        // We use the checked variant anyway and fall back to skipping malformed
+        // chunks so this never panics on adversarial input.
+        if let Ok(line) = std::str::from_utf8(chunk) {
+            pem.push_str(line);
+            pem.push('\n');
+        }
+    }
+    pem.push_str(PEM_END);
+    pem.push('\n');
+
+    pem.into_bytes()
+}
+
 /// Signs an ES256 App Store Connect team JWT.
 ///
 /// `now` is the Unix time in seconds, injected so golden tests are deterministic.
-/// `private_key_p8` is the raw `.p8` the developer downloads from App Store
-/// Connect — PEM PKCS#8 EC (`-----BEGIN PRIVATE KEY-----`).
+/// `private_key_p8` is the developer's `.p8` from App Store Connect. Both a full
+/// PKCS#8 PEM (`-----BEGIN PRIVATE KEY-----`) and a bare base64 PKCS#8 body (no
+/// headers/newlines) are accepted; see [`normalize_p8_pem`].
 ///
 /// # Errors
-/// [`StackError::Auth`] if the key is not a valid P-256 PKCS#8 PEM or signing fails.
+/// [`StackError::Auth`] if the key is not a valid P-256 PKCS#8 key or signing fails.
 pub(crate) fn sign_team_token(
     issuer_id: &str,
     key_id: &str,
@@ -50,7 +99,7 @@ pub(crate) fn sign_team_token(
     header.typ = Some("JWT".to_string());
     header.kid = Some(key_id.to_string());
 
-    let key = EncodingKey::from_ec_pem(private_key_p8)
+    let key = EncodingKey::from_ec_pem(&normalize_p8_pem(private_key_p8))
         .map_err(|e| StackError::auth(format!("invalid .p8 private key: {e}")))?;
 
     encode(&header, &claims, &key).map_err(|e| StackError::auth(format!("JWT signing failed: {e}")))
@@ -131,12 +180,20 @@ mod tests {
         aud: String,
     }
 
-    #[test]
-    fn signs_verifiable_es256_team_token() {
-        let now = 1_700_000_000;
-        let jwt = sign_team_token("issuer-123", "KEYID4567", PRIVATE_P8, now).unwrap();
+    /// Strips the BEGIN/END lines and all newlines from a PEM, yielding the bare
+    /// base64 body the legacy iOS host forwards.
+    fn strip_pem_headers(pem: &[u8]) -> Vec<u8> {
+        String::from_utf8_lossy(pem)
+            .lines()
+            .filter(|line| !line.contains("BEGIN") && !line.contains("END"))
+            .collect::<String>()
+            .into_bytes()
+    }
 
-        let header = decode_header(&jwt).unwrap();
+    /// Decodes a JWT against the fixture public key and asserts the standard
+    /// team-token claims/header, regardless of the input key shape.
+    fn assert_valid_team_token(jwt: &str, now: i64) {
+        let header = decode_header(jwt).unwrap();
         assert_eq!(header.alg, Algorithm::ES256);
         assert_eq!(header.typ.as_deref(), Some("JWT"));
         assert_eq!(header.kid.as_deref(), Some("KEYID4567"));
@@ -146,11 +203,52 @@ mod tests {
         validation.validate_exp = false; // fixed `now` is in the past
         validation.set_audience(&[AUDIENCE]);
 
-        let data = decode::<Decoded>(&jwt, &key, &validation).unwrap();
+        let data = decode::<Decoded>(jwt, &key, &validation).unwrap();
         assert_eq!(data.claims.iss, "issuer-123");
         assert_eq!(data.claims.aud, AUDIENCE);
         assert_eq!(data.claims.iat, now);
         assert_eq!(data.claims.exp, now + TTL_SECS);
+    }
+
+    #[test]
+    fn signs_verifiable_es256_team_token() {
+        let now = 1_700_000_000;
+        let jwt = sign_team_token("issuer-123", "KEYID4567", PRIVATE_P8, now).unwrap();
+        assert_valid_team_token(&jwt, now);
+    }
+
+    #[test]
+    fn signs_verifiable_token_from_headerless_base64_key() {
+        let now = 1_700_000_000;
+        let headerless = strip_pem_headers(PRIVATE_P8);
+        // Sanity: the derived input really is bare base64, no PEM armor.
+        let as_text = String::from_utf8_lossy(&headerless);
+        assert!(!as_text.contains("BEGIN"));
+        assert!(!as_text.contains('\n'));
+
+        let jwt = sign_team_token("issuer-123", "KEYID4567", &headerless, now).unwrap();
+        assert_valid_team_token(&jwt, now);
+    }
+
+    #[test]
+    fn normalize_passes_full_pem_through_unchanged() {
+        // A full PEM must round-trip untouched and stay usable.
+        let normalized = normalize_p8_pem(PRIVATE_P8);
+        assert_eq!(normalized, PRIVATE_P8.to_vec());
+        EncodingKey::from_ec_pem(&normalized).expect("full PEM must remain a valid encoding key");
+    }
+
+    #[test]
+    fn normalize_rebuilds_pem_from_headerless_base64() {
+        let normalized = normalize_p8_pem(&strip_pem_headers(PRIVATE_P8));
+        let text = String::from_utf8_lossy(&normalized);
+        assert!(text.starts_with(PEM_BEGIN));
+        assert!(text.trim_end().ends_with(PEM_END));
+        // Re-wrapped body lines never exceed the standard PEM width.
+        for line in text.lines().filter(|l| !l.contains("PRIVATE KEY")) {
+            assert!(line.len() <= PEM_LINE_WIDTH);
+        }
+        EncodingKey::from_ec_pem(&normalized).expect("rebuilt PEM must be a valid encoding key");
     }
 
     #[test]
