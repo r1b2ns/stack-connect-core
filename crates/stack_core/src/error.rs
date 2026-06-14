@@ -10,6 +10,9 @@ pub enum StackError {
     #[error("authentication failed: {message}")]
     Auth { message: String },
 
+    #[error("pending agreements: {message}")]
+    PendingAgreements { message: String },
+
     #[error("HTTP {status}: {message}")]
     Http { status: u16, message: String },
 
@@ -32,6 +35,12 @@ impl StackError {
 
     pub(crate) fn auth(message: impl Into<String>) -> Self {
         Self::Auth {
+            message: message.into(),
+        }
+    }
+
+    pub(crate) fn pending_agreements(message: impl Into<String>) -> Self {
+        Self::PendingAgreements {
             message: message.into(),
         }
     }

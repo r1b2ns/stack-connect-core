@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 
-use crate::domain::{CustomerReview, ReviewResponse, ReviewSubmission};
+use crate::domain::{CustomerReview, CustomerReviewsPage, ReviewResponse, ReviewSubmission};
 use crate::error::StackError;
 
 /// Internal, non-exported contract for the Reviews capability. Kept off the FFI
@@ -23,6 +23,17 @@ pub(crate) trait ReviewsImpl: Send + Sync {
         &self,
         app_id: String,
     ) -> Result<Vec<CustomerReview>, StackError>;
+
+    /// Fetches a single page of customer reviews for incremental (load-more)
+    /// paging, returning the page's reviews plus an opaque `next_token`.
+    async fn fetch_customer_reviews_page(
+        &self,
+        app_id: String,
+        sort: String,
+        filter_rating: Vec<String>,
+        limit: u32,
+        page_token: Option<String>,
+    ) -> Result<CustomerReviewsPage, StackError>;
 
     /// Lists the review submissions for `app_id`, with resolved version and
     /// submitter where available.
@@ -71,6 +82,33 @@ impl Reviews {
         app_id: String,
     ) -> Result<Vec<CustomerReview>, StackError> {
         self.inner.fetch_customer_reviews(app_id).await
+    }
+
+    /// Fetches a single page of customer reviews for incremental (load-more)
+    /// paging, returning the page's reviews plus an opaque `next_token`.
+    ///
+    /// `sort` is the raw ASC sort value (`-createdDate` | `createdDate` |
+    /// `-rating` | `rating`), passed through unchanged. `filter_rating` is empty
+    /// for no filter, else the ratings to include. `page_token` is `None` for the
+    /// first page; otherwise pass back a previous call's `next_token` verbatim.
+    /// `next_token` is `None` once the last page has been reached.
+    ///
+    /// # Errors
+    /// [`StackError::PendingAgreements`] when App Store Connect reports pending
+    /// agreements, [`StackError::Http`] on any other non-2xx page,
+    /// [`StackError::Decode`] on malformed JSON, or [`StackError::Network`] on
+    /// transport failure.
+    pub async fn fetch_customer_reviews_page(
+        &self,
+        app_id: String,
+        sort: String,
+        filter_rating: Vec<String>,
+        limit: u32,
+        page_token: Option<String>,
+    ) -> Result<CustomerReviewsPage, StackError> {
+        self.inner
+            .fetch_customer_reviews_page(app_id, sort, filter_rating, limit, page_token)
+            .await
     }
 
     /// Lists the review submissions for `app_id`, with resolved version and

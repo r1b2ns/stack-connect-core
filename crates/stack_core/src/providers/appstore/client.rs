@@ -5,7 +5,8 @@ use serde_json::json;
 
 use crate::auth::es256::AppStoreAuthenticator;
 use crate::domain::{
-    AppInfo, AppStoreVersionInfo, CustomerReview, ReviewResponse, ReviewSubmission,
+    AppInfo, AppStoreVersionInfo, CustomerReview, CustomerReviewsPage, ReviewResponse,
+    ReviewSubmission,
 };
 use crate::error::StackError;
 
@@ -490,6 +491,79 @@ impl AppStoreClient {
         Ok(reviews)
     }
 
+    /// Fetches a SINGLE page of customer reviews for incremental (load-more)
+    /// paging, returning the mapped reviews plus an opaque `next_token`.
+    ///
+    /// When `page_token` is `Some(url)` the URL — a prior call's `next_token`,
+    /// itself the JSON:API `links.next` (absolute, already encoding sort/filter/
+    /// cursor) — is fetched verbatim. Otherwise the first page is built from
+    /// `app_id`, `sort` (passed through as the raw ASC value — not remapped),
+    /// `limit`, and, when `filter_rating` is non-empty, a comma-joined
+    /// `filter[rating]`. Unlike [`Self::fetch_customer_reviews`], `links.next` is
+    /// NOT followed — its value is returned as `next_token` (`None` on the last
+    /// page) for the caller to pass back.
+    ///
+    /// # Errors
+    /// [`StackError::PendingAgreements`] when App Store Connect reports pending
+    /// agreements, [`StackError::Http`] on any other non-2xx page,
+    /// [`StackError::Decode`] on malformed JSON, or [`StackError::Network`] on
+    /// transport failure.
+    pub(crate) async fn fetch_customer_reviews_page(
+        &self,
+        app_id: &str,
+        sort: &str,
+        filter_rating: &[String],
+        limit: u32,
+        page_token: Option<&str>,
+    ) -> Result<CustomerReviewsPage, StackError> {
+        let url = match page_token {
+            Some(token) => token.to_string(),
+            None => {
+                let mut url = format!(
+                    "{}/v1/apps/{app_id}/customerReviews?sort={sort}&include=response&limit={limit}",
+                    self.base_url
+                );
+                if !filter_rating.is_empty() {
+                    url.push_str("&filter[rating]=");
+                    url.push_str(&filter_rating.join(","));
+                }
+                url
+            }
+        };
+
+        let body = self.get_page(&url).await?;
+        let page: CustomerReviewsResponse = serde_json::from_str(&body)
+            .map_err(|e| StackError::decode(format!("customer reviews response: {e}")))?;
+
+        // Index responses from `included[]` by id, then attach by relationship.
+        let responses: HashMap<String, ReviewResponse> = page
+            .included
+            .into_iter()
+            .map(|r| (r.id.clone(), r.into_review_response()))
+            .collect();
+
+        let reviews = page
+            .data
+            .into_iter()
+            .map(|review| {
+                let response = review
+                    .relationships
+                    .response
+                    .data
+                    .as_ref()
+                    .and_then(|rel| responses.get(&rel.id).cloned());
+                review.into_customer_review(response)
+            })
+            .collect();
+
+        // `links.next` is the opaque token for the next page; `None` when absent.
+        let next_token = page.links.next.filter(|u| !u.is_empty());
+        Ok(CustomerReviewsPage {
+            reviews,
+            next_token,
+        })
+    }
+
     /// Lists the review submissions for `app_id`, resolving the version string and
     /// submitter from the JSON:API `included[]` section.
     ///
@@ -588,6 +662,9 @@ impl AppStoreClient {
             .await
             .map_err(|e| StackError::network(e.to_string()))?;
         if !status.is_success() {
+            if let Some(err) = pending_agreements_error(status.as_u16(), &response_body) {
+                return Err(err);
+            }
             return Err(StackError::Http {
                 status: status.as_u16(),
                 message: response_body,
@@ -627,6 +704,9 @@ impl AppStoreClient {
             .text()
             .await
             .map_err(|e| StackError::network(e.to_string()))?;
+        if let Some(err) = pending_agreements_error(status.as_u16(), &body) {
+            return Err(err);
+        }
         Err(StackError::Http {
             status: status.as_u16(),
             message: body,
@@ -712,6 +792,9 @@ impl AppStoreClient {
             .await
             .map_err(|e| StackError::network(e.to_string()))?;
         if !status.is_success() {
+            if let Some(err) = pending_agreements_error(status.as_u16(), &response_body) {
+                return Err(err);
+            }
             return Err(StackError::Http {
                 status: status.as_u16(),
                 message: response_body,
@@ -784,6 +867,9 @@ impl AppStoreClient {
             .text()
             .await
             .map_err(|e| StackError::network(e.to_string()))?;
+        if let Some(err) = pending_agreements_error(status.as_u16(), &body) {
+            return Err(err);
+        }
         Err(StackError::Http {
             status: status.as_u16(),
             message: body,
@@ -818,6 +904,9 @@ impl AppStoreClient {
             .text()
             .await
             .map_err(|e| StackError::network(e.to_string()))?;
+        if let Some(err) = pending_agreements_error(status.as_u16(), &body) {
+            return Err(err);
+        }
         Err(StackError::Http {
             status: status.as_u16(),
             message: body,
@@ -842,6 +931,9 @@ impl AppStoreClient {
             .await
             .map_err(|e| StackError::network(e.to_string()))?;
         if !status.is_success() {
+            if let Some(err) = pending_agreements_error(status.as_u16(), &body) {
+                return Err(err);
+            }
             return Err(StackError::Http {
                 status: status.as_u16(),
                 message: body,
@@ -851,17 +943,29 @@ impl AppStoreClient {
     }
 }
 
-/// Maps a non-success `validate` response. A 403 whose body mentions pending
-/// agreements gets a clear, actionable message.
-fn map_error_response(status: u16, body: &str) -> StackError {
+/// Detects an App Store Connect "pending agreements" 403 from a non-2xx
+/// response. Returns `Some(StackError::PendingAgreements)` when `status` is 403
+/// and `body` mentions an agreement/pending; otherwise `None` so the caller
+/// applies its normal mapping.
+fn pending_agreements_error(status: u16, body: &str) -> Option<StackError> {
     if status == 403 {
         let lowered = body.to_lowercase();
         if lowered.contains("agreement") || lowered.contains("pending") {
-            return StackError::auth(
+            return Some(StackError::pending_agreements(
                 "App Store Connect has pending agreements; accept them in the \
                  developer portal before connecting",
-            );
+            ));
         }
+    }
+    None
+}
+
+/// Maps a non-success `validate` response. A 403 whose body mentions pending
+/// agreements becomes a typed [`StackError::PendingAgreements`]; any other
+/// failure becomes [`StackError::Auth`].
+fn map_error_response(status: u16, body: &str) -> StackError {
+    if let Some(err) = pending_agreements_error(status, body) {
+        return err;
     }
     StackError::auth(format!("validation failed ({status}): {body}"))
 }
@@ -981,9 +1085,46 @@ mod tests {
 
         let err = client(server.uri()).validate().await.unwrap_err();
         match err {
-            StackError::Auth { message } => assert!(message.contains("pending agreements")),
-            other => panic!("expected Auth, got {other:?}"),
+            StackError::PendingAgreements { message } => {
+                assert!(message.contains("pending agreements"))
+            }
+            other => panic!("expected PendingAgreements, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn get_page_surfaces_pending_agreements() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v1/apps"))
+            .respond_with(ResponseTemplate::new(403).set_body_json(serde_json::json!({
+                "errors": [{ "detail": "The agreement is pending acceptance." }]
+            })))
+            .mount(&server)
+            .await;
+
+        let err = client(server.uri()).fetch_apps().await.unwrap_err();
+        match err {
+            StackError::PendingAgreements { message } => {
+                assert!(message.contains("pending agreements"))
+            }
+            other => panic!("expected PendingAgreements, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn get_page_403_without_agreement_wording_stays_http() {
+        let server = MockServer::start().await;
+        // A 403 that is NOT about agreements must keep the generic HTTP mapping,
+        // proving the pending-agreements guard is specific to that wording.
+        Mock::given(method("GET"))
+            .and(path("/v1/apps"))
+            .respond_with(ResponseTemplate::new(403).set_body_string("forbidden"))
+            .mount(&server)
+            .await;
+
+        let err = client(server.uri()).fetch_apps().await.unwrap_err();
+        assert!(matches!(err, StackError::Http { status: 403, .. }));
     }
 
     #[tokio::test]
@@ -1078,6 +1219,128 @@ mod tests {
         assert_eq!(without_response.rating, 2);
         assert!(without_response.body.is_none());
         assert!(without_response.response.is_none());
+    }
+
+    #[tokio::test]
+    async fn fetch_customer_reviews_page_first_page_returns_token() {
+        let server = MockServer::start().await;
+        let next = format!("{}/v1/apps/APP1/customerReviews?cursor=PAGE2", server.uri());
+
+        Mock::given(method("GET"))
+            .and(path("/v1/apps/APP1/customerReviews"))
+            .and(wiremock::matchers::query_param_is_missing("cursor"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": [{
+                    "type": "customerReviews",
+                    "id": "rev-1",
+                    "attributes": {
+                        "rating": 5,
+                        "title": "Great app",
+                        "body": "Love it",
+                        "reviewerNickname": "alice",
+                        "createdDate": "2026-01-02T03:04:05Z",
+                        "territory": "USA"
+                    },
+                    "relationships": {
+                        "response": { "data": { "type": "customerReviewResponses", "id": "resp-1" } }
+                    }
+                }],
+                "included": [{
+                    "type": "customerReviewResponses",
+                    "id": "resp-1",
+                    "attributes": {
+                        "responseBody": "Thank you!",
+                        "state": "PUBLISHED",
+                        "lastModifiedDate": "2026-01-03T00:00:00Z"
+                    }
+                }],
+                "links": { "next": next.clone() }
+            })))
+            .mount(&server)
+            .await;
+
+        let page = client(server.uri())
+            .fetch_customer_reviews_page("APP1", "-createdDate", &[], 50, None)
+            .await
+            .unwrap();
+
+        assert_eq!(page.reviews.len(), 1);
+        let review = &page.reviews[0];
+        assert_eq!(review.id, "rev-1");
+        assert_eq!(review.rating, 5);
+        let response = review.response.as_ref().expect("response attached");
+        assert_eq!(response.id, "resp-1");
+        assert_eq!(response.body.as_deref(), Some("Thank you!"));
+        assert_eq!(page.next_token, Some(next));
+    }
+
+    #[tokio::test]
+    async fn fetch_customer_reviews_page_follows_token() {
+        let server = MockServer::start().await;
+        let token = format!("{}/v1/apps/APP1/customerReviews?cursor=PAGE2", server.uri());
+
+        // The exact path/cursor encoded in the token must be fetched verbatim.
+        Mock::given(method("GET"))
+            .and(path("/v1/apps/APP1/customerReviews"))
+            .and(query_param("cursor", "PAGE2"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": [{
+                    "type": "customerReviews",
+                    "id": "rev-2",
+                    "attributes": {
+                        "rating": 2,
+                        "title": "Meh",
+                        "body": null,
+                        "reviewerNickname": "bob",
+                        "createdDate": "2026-01-01T00:00:00Z",
+                        "territory": "GBR"
+                    },
+                    "relationships": { "response": { "data": null } }
+                }],
+                "links": {}
+            })))
+            .mount(&server)
+            .await;
+
+        let page = client(server.uri())
+            .fetch_customer_reviews_page("APP1", "-createdDate", &[], 50, Some(&token))
+            .await
+            .unwrap();
+
+        assert_eq!(page.reviews.len(), 1);
+        assert_eq!(page.reviews[0].id, "rev-2");
+        assert!(page.reviews[0].response.is_none());
+        assert_eq!(page.next_token, None);
+    }
+
+    #[tokio::test]
+    async fn fetch_customer_reviews_page_applies_filter_and_sort() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/v1/apps/APP1/customerReviews"))
+            .and(query_param("sort", "-rating"))
+            .and(query_param("filter[rating]", "4,5"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": [],
+                "links": {}
+            })))
+            .mount(&server)
+            .await;
+
+        let page = client(server.uri())
+            .fetch_customer_reviews_page(
+                "APP1",
+                "-rating",
+                &["4".to_string(), "5".to_string()],
+                50,
+                None,
+            )
+            .await
+            .unwrap();
+
+        assert!(page.reviews.is_empty());
+        assert_eq!(page.next_token, None);
     }
 
     #[tokio::test]

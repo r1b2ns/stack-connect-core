@@ -16,7 +16,10 @@ mod ports;
 mod providers;
 mod service;
 
-pub use domain::{AppInfo, AppStoreVersionInfo, CustomerReview, ReviewResponse, ReviewSubmission};
+pub use domain::{
+    AppInfo, AppStoreVersionInfo, CustomerReview, CustomerReviewsPage, ReviewResponse,
+    ReviewSubmission,
+};
 pub use error::StackError;
 pub use facade::{available_services, connect, credential_schema, make_sync_service};
 pub use ports::{BlobStore, CredentialStore};

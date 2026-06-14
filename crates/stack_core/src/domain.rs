@@ -36,6 +36,15 @@ pub struct CustomerReview {
     pub response: Option<ReviewResponse>,
 }
 
+/// One page of customer reviews plus an opaque token to fetch the next page.
+/// `next_token` is `None` on the last page; otherwise pass it back verbatim as
+/// the next call's `page_token` (it is the JSON:API `links.next` URL).
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct CustomerReviewsPage {
+    pub reviews: Vec<CustomerReview>,
+    pub next_token: Option<String>,
+}
+
 /// A review submission to App Store review (the act of submitting an app version
 /// for review), with the resolved version and submitter where available. Dates
 /// are raw ISO8601 strings; the core does no date parsing.

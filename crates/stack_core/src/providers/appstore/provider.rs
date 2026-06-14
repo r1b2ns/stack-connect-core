@@ -5,7 +5,8 @@ use async_trait::async_trait;
 use super::client::AppStoreClient;
 use crate::auth::es256::AppStoreAuthenticator;
 use crate::domain::{
-    AppInfo, AppStoreVersionInfo, CustomerReview, ReviewResponse, ReviewSubmission,
+    AppInfo, AppStoreVersionInfo, CustomerReview, CustomerReviewsPage, ReviewResponse,
+    ReviewSubmission,
 };
 use crate::error::StackError;
 use crate::service::capabilities::app_store_versions::{AppStoreVersions, AppStoreVersionsImpl};
@@ -80,6 +81,25 @@ impl ReviewsImpl for AppStoreReviews {
         app_id: String,
     ) -> Result<Vec<CustomerReview>, StackError> {
         self.client.fetch_customer_reviews(&app_id).await
+    }
+
+    async fn fetch_customer_reviews_page(
+        &self,
+        app_id: String,
+        sort: String,
+        filter_rating: Vec<String>,
+        limit: u32,
+        page_token: Option<String>,
+    ) -> Result<CustomerReviewsPage, StackError> {
+        self.client
+            .fetch_customer_reviews_page(
+                &app_id,
+                &sort,
+                &filter_rating,
+                limit,
+                page_token.as_deref(),
+            )
+            .await
     }
 
     async fn fetch_review_submissions(
