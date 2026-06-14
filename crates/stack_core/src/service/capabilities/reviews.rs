@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 
-use crate::domain::{CustomerReview, ReviewSubmission};
+use crate::domain::{CustomerReview, ReviewResponse, ReviewSubmission};
 use crate::error::StackError;
 
 /// Internal, non-exported contract for the Reviews capability. Kept off the FFI
@@ -13,8 +13,8 @@ use crate::error::StackError;
 /// `Send + Sync` so a `Box<dyn ReviewsImpl>` can live inside an `Arc<Reviews>`
 /// shared across the tokio runtime.
 ///
-/// Read-only for now; reply/delete are intentionally out of scope (see
-/// RUST_CORE_PLAN.md Phase 2).
+/// Covers both reads (list reviews/submissions) and writes (reply to a review,
+/// delete a response) — see RUST_CORE_PLAN.md Phase 2.
 #[async_trait]
 pub(crate) trait ReviewsImpl: Send + Sync {
     /// Lists the end-user reviews for `app_id`, newest first, including any
@@ -30,6 +30,17 @@ pub(crate) trait ReviewsImpl: Send + Sync {
         &self,
         app_id: String,
     ) -> Result<Vec<ReviewSubmission>, StackError>;
+
+    /// Creates or replaces the developer response for `review_id` with `body`,
+    /// returning the resulting response.
+    async fn reply_to_review(
+        &self,
+        review_id: String,
+        body: String,
+    ) -> Result<ReviewResponse, StackError>;
+
+    /// Deletes the developer response identified by `response_id`.
+    async fn delete_review_response(&self, response_id: String) -> Result<(), StackError>;
 }
 
 /// UniFFI-exported Reviews capability handle. A thin, binding-friendly wrapper
@@ -73,5 +84,29 @@ impl Reviews {
         app_id: String,
     ) -> Result<Vec<ReviewSubmission>, StackError> {
         self.inner.fetch_review_submissions(app_id).await
+    }
+
+    /// Creates or replaces the developer response for `review_id` with `body`,
+    /// returning the resulting response. Posting again for the same review
+    /// replaces the existing response (upsert).
+    ///
+    /// # Errors
+    /// [`StackError::Http`] on a non-2xx response, [`StackError::Decode`] on
+    /// malformed JSON, or [`StackError::Network`] on transport failure.
+    pub async fn reply_to_review(
+        &self,
+        review_id: String,
+        body: String,
+    ) -> Result<ReviewResponse, StackError> {
+        self.inner.reply_to_review(review_id, body).await
+    }
+
+    /// Deletes the developer response identified by `response_id`.
+    ///
+    /// # Errors
+    /// [`StackError::Http`] on a non-2xx response or [`StackError::Network`] on
+    /// transport failure.
+    pub async fn delete_review_response(&self, response_id: String) -> Result<(), StackError> {
+        self.inner.delete_review_response(response_id).await
     }
 }

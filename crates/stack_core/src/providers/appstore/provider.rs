@@ -4,7 +4,7 @@ use async_trait::async_trait;
 
 use super::client::AppStoreClient;
 use crate::auth::es256::AppStoreAuthenticator;
-use crate::domain::{AppInfo, CustomerReview, ReviewSubmission};
+use crate::domain::{AppInfo, CustomerReview, ReviewResponse, ReviewSubmission};
 use crate::error::StackError;
 use crate::service::capabilities::reviews::{Reviews, ReviewsImpl};
 use crate::service::kind::ServiceKind;
@@ -74,6 +74,18 @@ impl ReviewsImpl for AppStoreReviews {
         app_id: String,
     ) -> Result<Vec<ReviewSubmission>, StackError> {
         self.client.fetch_review_submissions(&app_id).await
+    }
+
+    async fn reply_to_review(
+        &self,
+        review_id: String,
+        body: String,
+    ) -> Result<ReviewResponse, StackError> {
+        self.client.reply_to_review(&review_id, &body).await
+    }
+
+    async fn delete_review_response(&self, response_id: String) -> Result<(), StackError> {
+        self.client.delete_review_response(&response_id).await
     }
 }
 

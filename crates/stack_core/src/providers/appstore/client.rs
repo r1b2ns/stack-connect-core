@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 
 use serde::Deserialize;
+use serde_json::json;
 
 use crate::auth::es256::AppStoreAuthenticator;
 use crate::domain::{AppInfo, CustomerReview, ReviewResponse, ReviewSubmission};
@@ -108,6 +109,13 @@ struct ToOneRelationship {
 #[derive(Deserialize)]
 struct ResourceIdentifier {
     id: String,
+}
+
+/// A JSON:API single-resource document wrapping one `customerReviewResponses`,
+/// as returned by the reply (POST) endpoint: `{ "data": { ... } }`.
+#[derive(Deserialize)]
+struct ReviewResponseDocument {
+    data: ReviewResponseResource,
 }
 
 #[derive(Deserialize)]
@@ -472,6 +480,97 @@ impl AppStoreClient {
         Ok(submissions)
     }
 
+    /// Creates or replaces the developer response for `review_id` with `body`.
+    ///
+    /// Apple treats `POST /v1/customerReviewResponses` as an upsert keyed by the
+    /// review relationship: posting again replaces the existing response. Success
+    /// is `201 Created` (any 2xx is accepted); the returned single-resource
+    /// document is mapped into a [`ReviewResponse`].
+    ///
+    /// `POST /v1/customerReviewResponses`.
+    ///
+    /// # Errors
+    /// [`StackError::Http`] on a non-2xx response, [`StackError::Decode`] on
+    /// malformed JSON, or [`StackError::Network`] on transport failure.
+    pub(crate) async fn reply_to_review(
+        &self,
+        review_id: &str,
+        body: &str,
+    ) -> Result<ReviewResponse, StackError> {
+        let url = format!("{}/v1/customerReviewResponses", self.base_url);
+        let token = self.auth.bearer_token().await?;
+        let request_body = json!({
+            "data": {
+                "type": "customerReviewResponses",
+                "attributes": { "responseBody": body },
+                "relationships": {
+                    "review": {
+                        "data": { "type": "customerReviews", "id": review_id }
+                    }
+                }
+            }
+        });
+
+        let response = self
+            .http
+            .post(&url)
+            .bearer_auth(token)
+            .json(&request_body)
+            .send()
+            .await
+            .map_err(|e| StackError::network(e.to_string()))?;
+
+        let status = response.status();
+        let response_body = response
+            .text()
+            .await
+            .map_err(|e| StackError::network(e.to_string()))?;
+        if !status.is_success() {
+            return Err(StackError::Http {
+                status: status.as_u16(),
+                message: response_body,
+            });
+        }
+
+        let document: ReviewResponseDocument = serde_json::from_str(&response_body)
+            .map_err(|e| StackError::decode(format!("review response: {e}")))?;
+        Ok(document.data.into_review_response())
+    }
+
+    /// Deletes the developer response identified by `response_id`.
+    ///
+    /// `DELETE /v1/customerReviewResponses/{response_id}` returns `204 No Content`
+    /// (any 2xx is accepted) with an empty body.
+    ///
+    /// # Errors
+    /// [`StackError::Http`] on a non-2xx response or [`StackError::Network`] on
+    /// transport failure.
+    pub(crate) async fn delete_review_response(&self, response_id: &str) -> Result<(), StackError> {
+        let url = format!("{}/v1/customerReviewResponses/{response_id}", self.base_url);
+        let token = self.auth.bearer_token().await?;
+        let response = self
+            .http
+            .delete(&url)
+            .bearer_auth(token)
+            .send()
+            .await
+            .map_err(|e| StackError::network(e.to_string()))?;
+
+        let status = response.status();
+        if status.is_success() {
+            return Ok(());
+        }
+
+        let body = response
+            .text()
+            .await
+            .map_err(|e| StackError::network(e.to_string()))?;
+        Err(StackError::Http {
+            status: status.as_u16(),
+            message: body,
+        })
+    }
+
     /// Authenticated `GET` of one JSON:API page, returning the raw body or mapping
     /// the failure: non-2xx → [`StackError::Http`], transport → [`StackError::Network`].
     async fn get_page(&self, url: &str) -> Result<String, StackError> {
@@ -823,5 +922,97 @@ mod tests {
             Some("API Key (ABC123)")
         );
         assert!(by_api_key.submitted_by_email.is_none());
+    }
+
+    #[tokio::test]
+    async fn reply_to_review_posts_and_maps_response() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/v1/customerReviewResponses"))
+            // Assert the request carries the body text and the review relationship id,
+            // without over-constraining the rest of the JSON:API envelope.
+            .and(wiremock::matchers::body_partial_json(serde_json::json!({
+                "data": {
+                    "type": "customerReviewResponses",
+                    "attributes": { "responseBody": "Thanks for the feedback!" },
+                    "relationships": {
+                        "review": { "data": { "type": "customerReviews", "id": "rev-1" } }
+                    }
+                }
+            })))
+            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
+                "data": {
+                    "type": "customerReviewResponses",
+                    "id": "resp-1",
+                    "attributes": {
+                        "responseBody": "Thanks for the feedback!",
+                        "state": "PENDING_PUBLISH",
+                        "lastModifiedDate": "2026-03-01T12:00:00Z"
+                    }
+                }
+            })))
+            .mount(&server)
+            .await;
+
+        let response = client(server.uri())
+            .reply_to_review("rev-1", "Thanks for the feedback!")
+            .await
+            .unwrap();
+
+        assert_eq!(response.id, "resp-1");
+        assert_eq!(response.body.as_deref(), Some("Thanks for the feedback!"));
+        assert_eq!(response.state.as_deref(), Some("PENDING_PUBLISH"));
+        assert_eq!(
+            response.last_modified_date.as_deref(),
+            Some("2026-03-01T12:00:00Z")
+        );
+    }
+
+    #[tokio::test]
+    async fn reply_to_review_surfaces_http_error() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/customerReviewResponses"))
+            .respond_with(ResponseTemplate::new(409).set_body_string("conflict"))
+            .mount(&server)
+            .await;
+
+        let err = client(server.uri())
+            .reply_to_review("rev-1", "hi")
+            .await
+            .unwrap_err();
+        assert!(matches!(err, StackError::Http { status: 409, .. }));
+    }
+
+    #[tokio::test]
+    async fn delete_review_response_succeeds_on_204() {
+        let server = MockServer::start().await;
+        Mock::given(method("DELETE"))
+            .and(path("/v1/customerReviewResponses/resp-1"))
+            .respond_with(ResponseTemplate::new(204))
+            .mount(&server)
+            .await;
+
+        assert!(client(server.uri())
+            .delete_review_response("resp-1")
+            .await
+            .is_ok());
+    }
+
+    #[tokio::test]
+    async fn delete_review_response_surfaces_http_error() {
+        let server = MockServer::start().await;
+        Mock::given(method("DELETE"))
+            .and(path("/v1/customerReviewResponses/resp-1"))
+            .respond_with(ResponseTemplate::new(403).set_body_string("forbidden"))
+            .mount(&server)
+            .await;
+
+        let err = client(server.uri())
+            .delete_review_response("resp-1")
+            .await
+            .unwrap_err();
+        assert!(matches!(err, StackError::Http { status: 403, .. }));
     }
 }
