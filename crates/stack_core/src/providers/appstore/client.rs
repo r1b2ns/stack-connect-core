@@ -5,7 +5,7 @@ use serde_json::json;
 
 use crate::auth::es256::AppStoreAuthenticator;
 use crate::domain::{
-    AppInfo, AppStoreVersionInfo, CustomerReview, CustomerReviewsPage, ReviewResponse,
+    AppInfo, AppStoreVersionInfo, BuildInfo, CustomerReview, CustomerReviewsPage, ReviewResponse,
     ReviewSubmission,
 };
 use crate::error::StackError;
@@ -371,6 +371,58 @@ impl AppStoreVersionResource {
             copyright: self.attributes.copyright,
             release_type: self.attributes.release_type,
             created_date: self.attributes.created_date,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Builds (JSON:API)
+// ---------------------------------------------------------------------------
+
+/// A JSON:API document page of `builds` resources.
+#[derive(Deserialize)]
+struct BuildsResponse {
+    #[serde(default)]
+    data: Vec<BuildResource>,
+    #[serde(default)]
+    links: Links,
+}
+
+#[derive(Deserialize)]
+struct BuildResource {
+    id: String,
+    #[serde(default)]
+    attributes: BuildAttributes,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct BuildAttributes {
+    #[serde(default)]
+    version: Option<String>,
+    #[serde(default)]
+    uploaded_date: Option<String>,
+    #[serde(default)]
+    expired: Option<bool>,
+    #[serde(default)]
+    processing_state: Option<String>,
+    #[serde(default)]
+    min_os_version: Option<String>,
+    #[serde(default)]
+    expiration_date: Option<String>,
+}
+
+impl BuildResource {
+    fn into_build_info(self, app_id: &str) -> BuildInfo {
+        BuildInfo {
+            id: self.id,
+            app_id: app_id.to_string(),
+            version: self.attributes.version,
+            uploaded_date: self.attributes.uploaded_date,
+            expired: self.attributes.expired,
+            processing_state: self.attributes.processing_state,
+            min_os_version: self.attributes.min_os_version,
+            expiration_date: self.attributes.expiration_date,
         }
     }
 }
@@ -911,6 +963,39 @@ impl AppStoreClient {
             status: status.as_u16(),
             message: body,
         })
+    }
+
+    /// Lists the builds for `app_id`, newest first (by upload date), mapping each
+    /// into a [`BuildInfo`] with `app_id` set from the parameter.
+    ///
+    /// `GET /v1/builds?filter[app]={app_id}&sort=-uploadedDate&limit={limit}`,
+    /// following `links.next` pagination until exhausted.
+    ///
+    /// # Errors
+    /// [`StackError::Http`] on a non-2xx page, [`StackError::Decode`] on malformed
+    /// JSON, or [`StackError::Network`] on transport failure.
+    pub(crate) async fn fetch_builds(
+        &self,
+        app_id: &str,
+        limit: u32,
+    ) -> Result<Vec<BuildInfo>, StackError> {
+        let mut builds = Vec::new();
+        let mut next_url = Some(format!(
+            "{}/v1/builds?filter[app]={app_id}&sort=-uploadedDate&limit={limit}",
+            self.base_url
+        ));
+
+        while let Some(url) = next_url {
+            let body = self.get_page(&url).await?;
+            let page: BuildsResponse = serde_json::from_str(&body)
+                .map_err(|e| StackError::decode(format!("builds response: {e}")))?;
+            builds.extend(page.data.into_iter().map(|b| b.into_build_info(app_id)));
+
+            // `links.next` is an absolute URL; follow it verbatim until absent.
+            next_url = page.links.next.filter(|u| !u.is_empty());
+        }
+
+        Ok(builds)
     }
 
     /// Authenticated `GET` of one JSON:API page, returning the raw body or mapping
@@ -1756,6 +1841,100 @@ mod tests {
             .await;
 
         let err = client(server.uri()).delete_version("V1").await.unwrap_err();
+        assert!(matches!(err, StackError::Http { status: 403, .. }));
+    }
+
+    #[tokio::test]
+    async fn fetch_builds_maps_and_paginates() {
+        let server = MockServer::start().await;
+        let next = format!("{}/v1/builds?cursor=PAGE2", server.uri());
+
+        // Page 1: a fully-populated build, plus the `links.next` cursor. The first
+        // request must carry the app filter, the newest-first sort, and the limit.
+        Mock::given(method("GET"))
+            .and(path("/v1/builds"))
+            .and(query_param("filter[app]", "APP1"))
+            .and(query_param("sort", "-uploadedDate"))
+            .and(query_param("limit", "20"))
+            .and(wiremock::matchers::query_param_is_missing("cursor"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": [{
+                    "type": "builds",
+                    "id": "build-1",
+                    "attributes": {
+                        "version": "42",
+                        "uploadedDate": "2026-03-01T12:00:00Z",
+                        "expired": false,
+                        "processingState": "VALID",
+                        "minOsVersion": "17.0",
+                        "expirationDate": "2026-06-01T12:00:00Z"
+                    }
+                }],
+                "links": { "next": next }
+            })))
+            .mount(&server)
+            .await;
+
+        // Page 2: a sparse build (only the upload date present) and no further page.
+        Mock::given(method("GET"))
+            .and(path("/v1/builds"))
+            .and(query_param("cursor", "PAGE2"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": [{
+                    "type": "builds",
+                    "id": "build-2",
+                    "attributes": {
+                        "uploadedDate": "2026-02-01T00:00:00Z"
+                    }
+                }],
+                "links": {}
+            })))
+            .mount(&server)
+            .await;
+
+        let builds = client(server.uri()).fetch_builds("APP1", 20).await.unwrap();
+        assert_eq!(builds.len(), 2);
+
+        let first = &builds[0];
+        assert_eq!(first.id, "build-1");
+        assert_eq!(first.app_id, "APP1");
+        assert_eq!(first.version.as_deref(), Some("42"));
+        assert_eq!(first.uploaded_date.as_deref(), Some("2026-03-01T12:00:00Z"));
+        assert_eq!(first.expired, Some(false));
+        assert_eq!(first.processing_state.as_deref(), Some("VALID"));
+        assert_eq!(first.min_os_version.as_deref(), Some("17.0"));
+        assert_eq!(
+            first.expiration_date.as_deref(),
+            Some("2026-06-01T12:00:00Z")
+        );
+
+        let second = &builds[1];
+        assert_eq!(second.id, "build-2");
+        assert_eq!(second.app_id, "APP1");
+        assert_eq!(
+            second.uploaded_date.as_deref(),
+            Some("2026-02-01T00:00:00Z")
+        );
+        assert!(second.version.is_none());
+        assert!(second.expired.is_none());
+        assert!(second.processing_state.is_none());
+        assert!(second.min_os_version.is_none());
+        assert!(second.expiration_date.is_none());
+    }
+
+    #[tokio::test]
+    async fn fetch_builds_surfaces_http_error() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v1/builds"))
+            .respond_with(ResponseTemplate::new(403).set_body_string("forbidden"))
+            .mount(&server)
+            .await;
+
+        let err = client(server.uri())
+            .fetch_builds("APP1", 20)
+            .await
+            .unwrap_err();
         assert!(matches!(err, StackError::Http { status: 403, .. }));
     }
 }

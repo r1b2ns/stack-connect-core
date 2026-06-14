@@ -5,6 +5,7 @@ use async_trait::async_trait;
 use crate::domain::AppInfo;
 use crate::error::StackError;
 use crate::service::capabilities::app_store_versions::AppStoreVersions;
+use crate::service::capabilities::builds::Builds;
 use crate::service::capabilities::reviews::Reviews;
 use crate::service::kind::ServiceKind;
 
@@ -17,6 +18,7 @@ pub enum Capability {
     Apps,
     Reviews,
     AppStoreVersions,
+    Builds,
 }
 
 /// Internal, non-exported contract every concrete plugin implements. Kept off the
@@ -49,6 +51,12 @@ pub(crate) trait ProviderImpl: Send + Sync {
     /// [`Capability::AppStoreVersions`]. Default `None` so providers opt in
     /// explicitly.
     fn app_store_versions(&self) -> Option<Arc<AppStoreVersions>> {
+        None
+    }
+
+    /// The Builds capability handle, or `None` if this provider lacks
+    /// [`Capability::Builds`]. Default `None` so providers opt in explicitly.
+    fn builds(&self) -> Option<Arc<Builds>> {
         None
     }
 }
@@ -94,6 +102,13 @@ impl Provider {
     /// when versions are unsupported.
     pub fn app_store_versions(&self) -> Option<Arc<AppStoreVersions>> {
         self.inner.app_store_versions()
+    }
+
+    /// The Builds capability handle, or `None` when this provider does not expose
+    /// [`Capability::Builds`]. This is the discovery mechanism: the host calls
+    /// `provider.builds()` and gets `None` when builds are unsupported.
+    pub fn builds(&self) -> Option<Arc<Builds>> {
+        self.inner.builds()
     }
 }
 

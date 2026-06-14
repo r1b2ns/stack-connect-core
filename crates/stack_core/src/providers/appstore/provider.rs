@@ -5,11 +5,12 @@ use async_trait::async_trait;
 use super::client::AppStoreClient;
 use crate::auth::es256::AppStoreAuthenticator;
 use crate::domain::{
-    AppInfo, AppStoreVersionInfo, CustomerReview, CustomerReviewsPage, ReviewResponse,
+    AppInfo, AppStoreVersionInfo, BuildInfo, CustomerReview, CustomerReviewsPage, ReviewResponse,
     ReviewSubmission,
 };
 use crate::error::StackError;
 use crate::service::capabilities::app_store_versions::{AppStoreVersions, AppStoreVersionsImpl};
+use crate::service::capabilities::builds::{Builds, BuildsImpl};
 use crate::service::capabilities::reviews::{Reviews, ReviewsImpl};
 use crate::service::kind::ServiceKind;
 use crate::service::provider::{Capability, ProviderImpl};
@@ -44,6 +45,7 @@ impl ProviderImpl for AppStoreProvider {
             Capability::Apps,
             Capability::Reviews,
             Capability::AppStoreVersions,
+            Capability::Builds,
         ]
     }
 
@@ -63,6 +65,12 @@ impl ProviderImpl for AppStoreProvider {
 
     fn app_store_versions(&self) -> Option<Arc<AppStoreVersions>> {
         Some(AppStoreVersions::new(Box::new(AppStoreAppStoreVersions {
+            client: Arc::clone(&self.client),
+        })))
+    }
+
+    fn builds(&self) -> Option<Arc<Builds>> {
+        Some(Builds::new(Box::new(AppStoreBuilds {
             client: Arc::clone(&self.client),
         })))
     }
@@ -174,6 +182,19 @@ impl AppStoreVersionsImpl for AppStoreAppStoreVersions {
     }
 }
 
+/// App Store Connect implementation of the [`BuildsImpl`] capability contract.
+/// Holds a shared [`AppStoreClient`] so it reuses the provider's token cache.
+struct AppStoreBuilds {
+    client: Arc<AppStoreClient>,
+}
+
+#[async_trait]
+impl BuildsImpl for AppStoreBuilds {
+    async fn fetch_builds(&self, app_id: String, limit: u32) -> Result<Vec<BuildInfo>, StackError> {
+        self.client.fetch_builds(&app_id, limit).await
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -195,7 +216,8 @@ mod tests {
             vec![
                 Capability::Apps,
                 Capability::Reviews,
-                Capability::AppStoreVersions
+                Capability::AppStoreVersions,
+                Capability::Builds
             ]
         );
     }
@@ -217,5 +239,12 @@ mod tests {
         assert!(provider()
             .capabilities()
             .contains(&Capability::AppStoreVersions));
+    }
+
+    #[test]
+    fn exposes_builds_capability_handle() {
+        // App Store Connect supports Builds, so the accessor must return `Some`.
+        assert!(provider().builds().is_some());
+        assert!(provider().capabilities().contains(&Capability::Builds));
     }
 }

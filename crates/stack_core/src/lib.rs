@@ -17,13 +17,14 @@ mod providers;
 mod service;
 
 pub use domain::{
-    AppInfo, AppStoreVersionInfo, CustomerReview, CustomerReviewsPage, ReviewResponse,
+    AppInfo, AppStoreVersionInfo, BuildInfo, CustomerReview, CustomerReviewsPage, ReviewResponse,
     ReviewSubmission,
 };
 pub use error::StackError;
 pub use facade::{available_services, connect, credential_schema, make_sync_service};
 pub use ports::{BlobStore, CredentialStore};
 pub use service::capabilities::app_store_versions::AppStoreVersions;
+pub use service::capabilities::builds::Builds;
 pub use service::capabilities::reviews::Reviews;
 pub use service::kind::{CredentialField, ServiceKind};
 pub use service::provider::{Capability, Provider};

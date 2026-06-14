@@ -9,4 +9,5 @@
 //! whose async methods run on the tokio runtime and delegate to the inner impl.
 
 pub(crate) mod app_store_versions;
+pub(crate) mod builds;
 pub(crate) mod reviews;

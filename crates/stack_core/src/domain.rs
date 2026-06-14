@@ -75,3 +75,19 @@ pub struct AppStoreVersionInfo {
     pub release_type: Option<String>,
     pub created_date: Option<String>,
 }
+
+/// A build (TestFlight / App Store Connect) of an app. `version` is the build
+/// number (the ASC `version` attribute, distinct from a version string). Dates
+/// are raw ISO8601 strings; the core does no date parsing (the host owns that).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, uniffi::Record)]
+#[serde(rename_all = "camelCase")]
+pub struct BuildInfo {
+    pub id: String,
+    pub app_id: String,
+    pub version: Option<String>,
+    pub uploaded_date: Option<String>,
+    pub expired: Option<bool>,
+    pub processing_state: Option<String>,
+    pub min_os_version: Option<String>,
+    pub expiration_date: Option<String>,
+}
