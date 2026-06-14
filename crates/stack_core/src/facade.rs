@@ -5,10 +5,11 @@
 use std::sync::Arc;
 
 use crate::error::StackError;
-use crate::ports::CredentialStore;
+use crate::ports::{BlobStore, CredentialStore};
 use crate::service::kind::{CredentialField, ServiceKind};
 use crate::service::provider::Provider;
 use crate::service::registry;
+use crate::service::sync::SyncService;
 
 /// Every service the core can connect today. Drives the host's service picker.
 #[uniffi::export]
@@ -39,4 +40,13 @@ pub fn connect(
 ) -> Result<Arc<Provider>, StackError> {
     let inner = registry::build(kind, &account_id, &store)?;
     Ok(Provider::new(inner))
+}
+
+/// Builds a [`SyncService`] that syncs `provider` into the host `store`.
+///
+/// Synchronous on purpose: it only wires the two handles together. The returned
+/// object does the async work (`sync_apps`).
+#[uniffi::export]
+pub fn make_sync_service(provider: Arc<Provider>, store: Arc<dyn BlobStore>) -> Arc<SyncService> {
+    SyncService::new(provider, store)
 }

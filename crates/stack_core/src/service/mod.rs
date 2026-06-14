@@ -7,3 +7,4 @@ pub(crate) mod capabilities;
 pub(crate) mod kind;
 pub(crate) mod provider;
 pub(crate) mod registry;
+pub(crate) mod sync;

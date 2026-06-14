@@ -10,3 +10,22 @@ pub trait CredentialStore: Send + Sync {
     /// Removes every secret associated with `account_id`.
     fn delete(&self, account_id: String);
 }
+
+/// Durable blob storage implemented natively (SwiftData on iOS, mirroring the
+/// host's `PersistentStorable`) and injected across the FFI boundary as a foreign
+/// trait. The core stays stateless: [`crate::service::sync::SyncService`] pulls
+/// entities from a [`crate::service::provider::Provider`] and persists each as an
+/// opaque JSON blob keyed by `(type_name, id)` — the host owns where and how those
+/// blobs live. `type_name` is a stable, core-defined string (e.g.
+/// [`crate::service::sync::BLOB_TYPE_APP`]) that the host maps to its own entity.
+#[uniffi::export(with_foreign)]
+pub trait BlobStore: Send + Sync {
+    /// Inserts or replaces the JSON blob for `(type_name, id)`.
+    fn save(&self, type_name: String, id: String, json: String);
+    /// Returns the JSON blob for `(type_name, id)`, if present.
+    fn fetch(&self, type_name: String, id: String) -> Option<String>;
+    /// Returns every stored JSON blob of `type_name`.
+    fn fetch_all(&self, type_name: String) -> Vec<String>;
+    /// Removes the blob for `(type_name, id)`.
+    fn delete(&self, type_name: String, id: String);
+}

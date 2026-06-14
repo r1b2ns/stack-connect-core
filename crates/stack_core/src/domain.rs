@@ -1,6 +1,10 @@
 /// Cross-provider app metadata. Mirrors the Swift `AppInfo` from `StackProtocols`,
 /// which is dissolved into the core (see RUST_CORE_PLAN.md §4).
+///
+/// Serializes camelCase (`bundleId`, not `bundle_id`) so persisted blobs match the
+/// iOS-facing contract — see [`crate::service::sync::SyncService`].
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, uniffi::Record)]
+#[serde(rename_all = "camelCase")]
 pub struct AppInfo {
     pub id: String,
     pub name: String,
