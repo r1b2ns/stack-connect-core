@@ -23,4 +23,4 @@ pub use ports::{BlobStore, CredentialStore};
 pub use service::capabilities::reviews::Reviews;
 pub use service::kind::{CredentialField, ServiceKind};
 pub use service::provider::{Capability, Provider};
-pub use service::sync::{SyncService, SyncSummary};
+pub use service::sync::SyncService;

@@ -5,6 +5,7 @@
 
 use std::sync::Arc;
 
+use crate::domain::AppInfo;
 use crate::error::StackError;
 use crate::ports::BlobStore;
 use crate::service::provider::Provider;
@@ -14,11 +15,23 @@ use crate::service::provider::Provider;
 /// mapping.
 pub(crate) const BLOB_TYPE_APP: &str = "app";
 
-/// Outcome of a sync pass. Grows as more capabilities are synced.
-#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
-pub struct SyncSummary {
-    /// How many apps were upserted into the store.
-    pub apps_synced: u32,
+/// Serialize-only view of an [`AppInfo`] plus the owning account, persisted as the
+/// AppModel-compatible base blob. Emits exactly the base fields the core owns plus
+/// `accountId`, in the iOS-facing camelCase contract:
+/// `{"id","name","bundleId","platform","accountId"}`.
+///
+/// The Swift adapter MERGES these base fields into its rich `AppModel`, preserving
+/// enrichment/user-owned fields, and builds the iOS composite key
+/// `"<accountId>.<appId>"` itself from the `accountId` carried in this JSON. The
+/// core therefore keys the blob by the bare app id, never a composite.
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AppBlob<'a> {
+    id: &'a str,
+    name: &'a str,
+    bundle_id: &'a str,
+    platform: Option<&'a str>,
+    account_id: &'a str,
 }
 
 /// Generic sync orchestrator: pulls from a connected [`Provider`] and persists
@@ -30,35 +43,56 @@ pub struct SyncSummary {
 pub struct SyncService {
     provider: Arc<Provider>,
     store: Arc<dyn BlobStore>,
+    account_id: String,
 }
 
 impl SyncService {
-    /// Wires a connected provider to the host store. Synchronous; the returned
-    /// object does the async work.
-    pub(crate) fn new(provider: Arc<Provider>, store: Arc<dyn BlobStore>) -> Arc<Self> {
-        Arc::new(Self { provider, store })
+    /// Wires a connected provider to the host store for the given `account_id`.
+    /// Synchronous; the returned object does the async work.
+    pub(crate) fn new(
+        provider: Arc<Provider>,
+        store: Arc<dyn BlobStore>,
+        account_id: String,
+    ) -> Arc<Self> {
+        Arc::new(Self {
+            provider,
+            store,
+            account_id,
+        })
     }
 }
 
 #[uniffi::export(async_runtime = "tokio")]
 impl SyncService {
-    /// Fetches every visible app and upserts each as a JSON blob under
-    /// [`BLOB_TYPE_APP`], keyed by app id. Returns how many were persisted.
+    /// Fetches every visible app and persists each as an AppModel-compatible base
+    /// blob under [`BLOB_TYPE_APP`], keyed by the bare app id (never a composite
+    /// key). Each blob carries `{id,name,bundleId,platform,accountId}` — the base
+    /// fields the core owns plus this service's `account_id`. Returns the fetched
+    /// apps so the host can drive post-sync enrichment without re-fetching.
+    ///
+    /// The Swift side merges these base fields into its rich `AppModel`, preserving
+    /// enrichment/user-owned fields, and derives the iOS composite key
+    /// `"<accountId>.<appId>"` from the `accountId` carried in the JSON.
     ///
     /// # Errors
     /// Propagates whatever [`Provider::fetch_apps`] returns (HTTP/Decode/Network),
     /// or [`StackError::Decode`] if an app fails to serialize.
-    pub async fn sync_apps(&self) -> Result<SyncSummary, StackError> {
+    pub async fn sync_apps(&self) -> Result<Vec<AppInfo>, StackError> {
         let apps = self.provider.fetch_apps().await?;
-        let mut count: u32 = 0;
         for app in &apps {
-            let json = serde_json::to_string(app)
+            let blob = AppBlob {
+                id: &app.id,
+                name: &app.name,
+                bundle_id: &app.bundle_id,
+                platform: app.platform.as_deref(),
+                account_id: &self.account_id,
+            };
+            let json = serde_json::to_string(&blob)
                 .map_err(|e| StackError::decode(format!("serialize app {}: {e}", app.id)))?;
             self.store
                 .save(BLOB_TYPE_APP.to_string(), app.id.clone(), json);
-            count += 1;
         }
-        Ok(SyncSummary { apps_synced: count })
+        Ok(apps)
     }
 }
 
@@ -70,7 +104,6 @@ mod tests {
     use async_trait::async_trait;
 
     use super::*;
-    use crate::domain::AppInfo;
     use crate::service::kind::ServiceKind;
     use crate::service::provider::{Capability, ProviderImpl};
 
@@ -139,43 +172,64 @@ mod tests {
         }
     }
 
+    const ACCOUNT_ID: &str = "acct-1";
+
     fn service_with(apps: Vec<AppInfo>) -> (Arc<SyncService>, Arc<InMemoryStore>) {
         let provider = Provider::new(Box::new(FakeProvider { apps }));
         let store = Arc::new(InMemoryStore::default());
-        let svc = SyncService::new(provider, store.clone());
+        let svc = SyncService::new(provider, store.clone(), ACCOUNT_ID.to_string());
         (svc, store)
     }
 
     #[tokio::test]
-    async fn persists_each_app_under_app_type_keyed_by_id() {
-        let (svc, store) =
-            service_with(vec![app("1", "Foo", "com.foo"), app("2", "Bar", "com.bar")]);
+    async fn returns_fetched_apps_and_persists_each_keyed_by_id() {
+        let apps = vec![app("1", "Foo", "com.foo"), app("2", "Bar", "com.bar")];
+        let (svc, store) = service_with(apps.clone());
 
-        let summary = svc.sync_apps().await.expect("sync should succeed");
+        let returned = svc.sync_apps().await.expect("sync should succeed");
 
-        assert_eq!(summary, SyncSummary { apps_synced: 2 });
+        // The host drives enrichment from the returned list without re-fetching.
+        assert_eq!(returned, apps);
         assert_eq!(store.fetch_all(BLOB_TYPE_APP.to_string()).len(), 2);
 
+        // Keyed by the bare app id, not a composite "<accountId>.<appId>".
+        assert!(store
+            .fetch(BLOB_TYPE_APP.to_string(), "acct-1.1".to_string())
+            .is_none());
         let blob = store
             .fetch(BLOB_TYPE_APP.to_string(), "1".to_string())
             .expect("app 1 should be persisted");
-        // The persisted JSON must use the iOS-facing camelCase contract.
+
+        // The persisted JSON uses the iOS-facing camelCase contract and carries
+        // the owning account id.
         assert!(blob.contains("\"bundleId\":\"com.foo\""));
+        assert!(blob.contains("\"accountId\":\"acct-1\""));
         assert!(!blob.contains("bundle_id"));
+        assert!(!blob.contains("account_id"));
     }
 
     #[tokio::test]
-    async fn round_trips_through_appinfo_serde() {
-        let original = app("42", "Answer", "com.answer");
-        let (svc, store) = service_with(vec![original.clone()]);
+    async fn persisted_blob_has_exactly_the_appmodel_base_fields() {
+        let (svc, store) = service_with(vec![app("42", "Answer", "com.answer")]);
 
         svc.sync_apps().await.expect("sync should succeed");
 
         let blob = store
             .fetch(BLOB_TYPE_APP.to_string(), "42".to_string())
             .expect("app 42 should be persisted");
-        let decoded: AppInfo = serde_json::from_str(&blob).expect("blob should decode as AppInfo");
-        assert_eq!(decoded, original);
+        let value: serde_json::Value =
+            serde_json::from_str(&blob).expect("blob should be valid JSON");
+        let obj = value.as_object().expect("blob should be a JSON object");
+
+        let mut keys: Vec<&str> = obj.keys().map(String::as_str).collect();
+        keys.sort_unstable();
+        assert_eq!(keys, ["accountId", "bundleId", "id", "name", "platform"]);
+
+        assert_eq!(obj["id"], "42");
+        assert_eq!(obj["name"], "Answer");
+        assert_eq!(obj["bundleId"], "com.answer");
+        assert_eq!(obj["platform"], "IOS");
+        assert_eq!(obj["accountId"], "acct-1");
     }
 
     #[tokio::test]
@@ -188,10 +242,10 @@ mod tests {
         let provider = Provider::new(Box::new(FakeProvider {
             apps: vec![app("1", "New", "com.app")],
         }));
-        let svc2 = SyncService::new(provider, store.clone());
-        let summary = svc2.sync_apps().await.expect("second sync should succeed");
+        let svc2 = SyncService::new(provider, store.clone(), ACCOUNT_ID.to_string());
+        let returned = svc2.sync_apps().await.expect("second sync should succeed");
 
-        assert_eq!(summary, SyncSummary { apps_synced: 1 });
+        assert_eq!(returned.len(), 1);
         assert_eq!(store.fetch_all(BLOB_TYPE_APP.to_string()).len(), 1);
         let blob = store
             .fetch(BLOB_TYPE_APP.to_string(), "1".to_string())
@@ -203,9 +257,9 @@ mod tests {
     async fn empty_provider_persists_nothing() {
         let (svc, store) = service_with(vec![]);
 
-        let summary = svc.sync_apps().await.expect("sync should succeed");
+        let returned = svc.sync_apps().await.expect("sync should succeed");
 
-        assert_eq!(summary, SyncSummary { apps_synced: 0 });
+        assert!(returned.is_empty());
         assert!(store.fetch_all(BLOB_TYPE_APP.to_string()).is_empty());
     }
 }

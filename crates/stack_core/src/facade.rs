@@ -42,11 +42,17 @@ pub fn connect(
     Ok(Provider::new(inner))
 }
 
-/// Builds a [`SyncService`] that syncs `provider` into the host `store`.
+/// Builds a [`SyncService`] that syncs `provider` into the host `store` for
+/// `account_id`. The account id is stamped into every persisted app blob
+/// (`accountId`) so the host can derive its composite key and attribute apps.
 ///
-/// Synchronous on purpose: it only wires the two handles together. The returned
+/// Synchronous on purpose: it only wires the handles together. The returned
 /// object does the async work (`sync_apps`).
 #[uniffi::export]
-pub fn make_sync_service(provider: Arc<Provider>, store: Arc<dyn BlobStore>) -> Arc<SyncService> {
-    SyncService::new(provider, store)
+pub fn make_sync_service(
+    provider: Arc<Provider>,
+    store: Arc<dyn BlobStore>,
+    account_id: String,
+) -> Arc<SyncService> {
+    SyncService::new(provider, store, account_id)
 }
