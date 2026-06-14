@@ -8,4 +8,5 @@
 //! trait (`*Impl`, kept off the FFI) plus a `#[derive(uniffi::Object)]` wrapper
 //! whose async methods run on the tokio runtime and delegate to the inner impl.
 
+pub(crate) mod app_store_versions;
 pub(crate) mod reviews;

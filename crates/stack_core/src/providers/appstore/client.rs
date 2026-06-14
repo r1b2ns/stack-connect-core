@@ -4,7 +4,9 @@ use serde::Deserialize;
 use serde_json::json;
 
 use crate::auth::es256::AppStoreAuthenticator;
-use crate::domain::{AppInfo, CustomerReview, ReviewResponse, ReviewSubmission};
+use crate::domain::{
+    AppInfo, AppStoreVersionInfo, CustomerReview, ReviewResponse, ReviewSubmission,
+};
 use crate::error::StackError;
 
 const DEFAULT_BASE_URL: &str = "https://api.appstoreconnect.apple.com";
@@ -312,6 +314,66 @@ impl ReviewSubmissionResource {
     }
 }
 
+// ---------------------------------------------------------------------------
+// App Store versions (JSON:API)
+// ---------------------------------------------------------------------------
+
+/// A JSON:API document page of `appStoreVersions` resources.
+#[derive(Deserialize)]
+struct AppStoreVersionsResponse {
+    #[serde(default)]
+    data: Vec<AppStoreVersionResource>,
+}
+
+/// A JSON:API single-resource document wrapping one `appStoreVersions`, as
+/// returned by the create (POST) endpoint: `{ "data": { ... } }`.
+#[derive(Deserialize)]
+struct AppStoreVersionDocument {
+    data: AppStoreVersionResource,
+}
+
+#[derive(Deserialize)]
+struct AppStoreVersionResource {
+    id: String,
+    #[serde(default)]
+    attributes: AppStoreVersionResourceAttributes,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct AppStoreVersionResourceAttributes {
+    #[serde(default)]
+    platform: Option<String>,
+    #[serde(default)]
+    app_store_state: Option<String>,
+    #[serde(default)]
+    app_version_state: Option<String>,
+    #[serde(default)]
+    version_string: Option<String>,
+    #[serde(default)]
+    copyright: Option<String>,
+    #[serde(default)]
+    release_type: Option<String>,
+    #[serde(default)]
+    created_date: Option<String>,
+}
+
+impl AppStoreVersionResource {
+    fn into_version_info(self, app_id: &str) -> AppStoreVersionInfo {
+        AppStoreVersionInfo {
+            id: self.id,
+            app_id: app_id.to_string(),
+            platform: self.attributes.platform,
+            app_store_state: self.attributes.app_store_state,
+            app_version_state: self.attributes.app_version_state,
+            version_string: self.attributes.version_string,
+            copyright: self.attributes.copyright,
+            release_type: self.attributes.release_type,
+            created_date: self.attributes.created_date,
+        }
+    }
+}
+
 /// Minimal App Store Connect client: validate credentials and list apps.
 /// `base_url` is injectable so tests can point it at a mock server.
 pub(crate) struct AppStoreClient {
@@ -547,6 +609,197 @@ impl AppStoreClient {
     /// transport failure.
     pub(crate) async fn delete_review_response(&self, response_id: &str) -> Result<(), StackError> {
         let url = format!("{}/v1/customerReviewResponses/{response_id}", self.base_url);
+        let token = self.auth.bearer_token().await?;
+        let response = self
+            .http
+            .delete(&url)
+            .bearer_auth(token)
+            .send()
+            .await
+            .map_err(|e| StackError::network(e.to_string()))?;
+
+        let status = response.status();
+        if status.is_success() {
+            return Ok(());
+        }
+
+        let body = response
+            .text()
+            .await
+            .map_err(|e| StackError::network(e.to_string()))?;
+        Err(StackError::Http {
+            status: status.as_u16(),
+            message: body,
+        })
+    }
+
+    /// Lists the App Store versions for `app_id`, mapping each into an
+    /// [`AppStoreVersionInfo`] with `app_id` set from the parameter.
+    ///
+    /// `GET /v1/apps/{app_id}/appStoreVersions?limit={limit}`. A single page is
+    /// fetched — `links.next` is not followed (mirrors the host behavior, which
+    /// just passes `limit`).
+    ///
+    /// # Errors
+    /// [`StackError::Http`] on a non-2xx page, [`StackError::Decode`] on malformed
+    /// JSON, or [`StackError::Network`] on transport failure.
+    pub(crate) async fn fetch_versions(
+        &self,
+        app_id: &str,
+        limit: u32,
+    ) -> Result<Vec<AppStoreVersionInfo>, StackError> {
+        let url = format!(
+            "{}/v1/apps/{app_id}/appStoreVersions?limit={limit}",
+            self.base_url
+        );
+        let body = self.get_page(&url).await?;
+        let page: AppStoreVersionsResponse = serde_json::from_str(&body)
+            .map_err(|e| StackError::decode(format!("app store versions response: {e}")))?;
+        Ok(page
+            .data
+            .into_iter()
+            .map(|v| v.into_version_info(app_id))
+            .collect())
+    }
+
+    /// Creates a new App Store version for `app_id`.
+    ///
+    /// `POST /v1/appStoreVersions` with a JSON:API body carrying `platform`
+    /// (the raw ASC value: `IOS` / `MAC_OS` / `TV_OS` / `VISION_OS`),
+    /// `versionString`, a `releaseType` of `MANUAL`, and the `app` relationship.
+    /// Success is any 2xx (`201 Created`); the returned single-resource document
+    /// is mapped into an [`AppStoreVersionInfo`] with `app_id` from the parameter.
+    ///
+    /// # Errors
+    /// [`StackError::Http`] on a non-2xx response, [`StackError::Decode`] on
+    /// malformed JSON, or [`StackError::Network`] on transport failure.
+    pub(crate) async fn create_version(
+        &self,
+        app_id: &str,
+        platform: &str,
+        version_string: &str,
+    ) -> Result<AppStoreVersionInfo, StackError> {
+        let url = format!("{}/v1/appStoreVersions", self.base_url);
+        let token = self.auth.bearer_token().await?;
+        let request_body = json!({
+            "data": {
+                "type": "appStoreVersions",
+                "attributes": {
+                    "platform": platform,
+                    "versionString": version_string,
+                    "releaseType": "MANUAL"
+                },
+                "relationships": {
+                    "app": {
+                        "data": { "type": "apps", "id": app_id }
+                    }
+                }
+            }
+        });
+
+        let response = self
+            .http
+            .post(&url)
+            .bearer_auth(token)
+            .json(&request_body)
+            .send()
+            .await
+            .map_err(|e| StackError::network(e.to_string()))?;
+
+        let status = response.status();
+        let response_body = response
+            .text()
+            .await
+            .map_err(|e| StackError::network(e.to_string()))?;
+        if !status.is_success() {
+            return Err(StackError::Http {
+                status: status.as_u16(),
+                message: response_body,
+            });
+        }
+
+        let document: AppStoreVersionDocument = serde_json::from_str(&response_body)
+            .map_err(|e| StackError::decode(format!("app store version response: {e}")))?;
+        Ok(document.data.into_version_info(app_id))
+    }
+
+    /// Updates the App Store version identified by `id`, sending only the
+    /// attributes that are `Some`.
+    ///
+    /// `PATCH /v1/appStoreVersions/{id}`. `earliest_release_date` maps to the
+    /// `earliestReleaseDate` attribute (a raw ISO8601 string passed through
+    /// verbatim — the core does no date parsing). Any 2xx → `Ok(())`.
+    ///
+    /// # Errors
+    /// [`StackError::Http`] on a non-2xx response or [`StackError::Network`] on
+    /// transport failure.
+    pub(crate) async fn update_version(
+        &self,
+        id: &str,
+        version_string: Option<&str>,
+        copyright: Option<&str>,
+        release_type: Option<&str>,
+        earliest_release_date: Option<&str>,
+    ) -> Result<(), StackError> {
+        let url = format!("{}/v1/appStoreVersions/{id}", self.base_url);
+        let token = self.auth.bearer_token().await?;
+
+        let mut attributes = serde_json::Map::new();
+        if let Some(value) = version_string {
+            attributes.insert("versionString".into(), json!(value));
+        }
+        if let Some(value) = copyright {
+            attributes.insert("copyright".into(), json!(value));
+        }
+        if let Some(value) = release_type {
+            attributes.insert("releaseType".into(), json!(value));
+        }
+        if let Some(value) = earliest_release_date {
+            attributes.insert("earliestReleaseDate".into(), json!(value));
+        }
+
+        let request_body = json!({
+            "data": {
+                "type": "appStoreVersions",
+                "id": id,
+                "attributes": attributes
+            }
+        });
+
+        let response = self
+            .http
+            .patch(&url)
+            .bearer_auth(token)
+            .json(&request_body)
+            .send()
+            .await
+            .map_err(|e| StackError::network(e.to_string()))?;
+
+        let status = response.status();
+        if status.is_success() {
+            return Ok(());
+        }
+
+        let body = response
+            .text()
+            .await
+            .map_err(|e| StackError::network(e.to_string()))?;
+        Err(StackError::Http {
+            status: status.as_u16(),
+            message: body,
+        })
+    }
+
+    /// Deletes the App Store version identified by `id`.
+    ///
+    /// `DELETE /v1/appStoreVersions/{id}` returns `204 No Content` (any 2xx is
+    /// accepted) with an empty body.
+    ///
+    /// # Errors
+    /// [`StackError::Http`] on a non-2xx response or [`StackError::Network`] on
+    /// transport failure.
+    pub(crate) async fn delete_version(&self, id: &str) -> Result<(), StackError> {
+        let url = format!("{}/v1/appStoreVersions/{id}", self.base_url);
         let token = self.auth.bearer_token().await?;
         let response = self
             .http
@@ -1013,6 +1266,233 @@ mod tests {
             .delete_review_response("resp-1")
             .await
             .unwrap_err();
+        assert!(matches!(err, StackError::Http { status: 403, .. }));
+    }
+
+    #[tokio::test]
+    async fn fetch_versions_maps_fields() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/v1/apps/APP1/appStoreVersions"))
+            .and(query_param("limit", "20"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": [
+                    {
+                        "type": "appStoreVersions",
+                        "id": "ver-1",
+                        "attributes": {
+                            "platform": "IOS",
+                            "appStoreState": "READY_FOR_SALE",
+                            "appVersionState": "ACCEPTED",
+                            "versionString": "1.4.0",
+                            "copyright": "2026 Acme",
+                            "releaseType": "MANUAL",
+                            "createdDate": "2026-01-02T03:04:05Z"
+                        }
+                    },
+                    {
+                        "type": "appStoreVersions",
+                        "id": "ver-2",
+                        "attributes": {
+                            "platform": "IOS",
+                            "appStoreState": "PREPARE_FOR_SUBMISSION",
+                            "versionString": "1.5.0",
+                            "releaseType": "AFTER_APPROVAL",
+                            "createdDate": "2026-02-02T00:00:00Z"
+                        }
+                    }
+                ]
+            })))
+            .mount(&server)
+            .await;
+
+        let versions = client(server.uri())
+            .fetch_versions("APP1", 20)
+            .await
+            .unwrap();
+        assert_eq!(versions.len(), 2);
+
+        let first = &versions[0];
+        assert_eq!(first.id, "ver-1");
+        assert_eq!(first.app_id, "APP1");
+        assert_eq!(first.platform.as_deref(), Some("IOS"));
+        assert_eq!(first.app_store_state.as_deref(), Some("READY_FOR_SALE"));
+        assert_eq!(first.app_version_state.as_deref(), Some("ACCEPTED"));
+        assert_eq!(first.version_string.as_deref(), Some("1.4.0"));
+        assert_eq!(first.copyright.as_deref(), Some("2026 Acme"));
+        assert_eq!(first.release_type.as_deref(), Some("MANUAL"));
+        assert_eq!(first.created_date.as_deref(), Some("2026-01-02T03:04:05Z"));
+
+        let second = &versions[1];
+        assert_eq!(second.id, "ver-2");
+        assert_eq!(second.app_id, "APP1");
+        assert_eq!(second.version_string.as_deref(), Some("1.5.0"));
+        assert_eq!(second.release_type.as_deref(), Some("AFTER_APPROVAL"));
+        assert!(second.app_version_state.is_none());
+        assert!(second.copyright.is_none());
+    }
+
+    #[tokio::test]
+    async fn fetch_versions_surfaces_http_error() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v1/apps/APP1/appStoreVersions"))
+            .respond_with(ResponseTemplate::new(403).set_body_string("forbidden"))
+            .mount(&server)
+            .await;
+
+        let err = client(server.uri())
+            .fetch_versions("APP1", 20)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, StackError::Http { status: 403, .. }));
+    }
+
+    #[tokio::test]
+    async fn create_version_posts_and_maps() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/v1/appStoreVersions"))
+            // Assert the request carries platform/versionString/releaseType and the
+            // app relationship id, without over-constraining the envelope.
+            .and(wiremock::matchers::body_partial_json(serde_json::json!({
+                "data": {
+                    "type": "appStoreVersions",
+                    "attributes": {
+                        "platform": "IOS",
+                        "versionString": "2.0.0",
+                        "releaseType": "MANUAL"
+                    },
+                    "relationships": {
+                        "app": { "data": { "type": "apps", "id": "APP1" } }
+                    }
+                }
+            })))
+            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
+                "data": {
+                    "type": "appStoreVersions",
+                    "id": "ver-new",
+                    "attributes": {
+                        "platform": "IOS",
+                        "appStoreState": "PREPARE_FOR_SUBMISSION",
+                        "versionString": "2.0.0",
+                        "releaseType": "MANUAL",
+                        "createdDate": "2026-03-01T12:00:00Z"
+                    }
+                }
+            })))
+            .mount(&server)
+            .await;
+
+        let version = client(server.uri())
+            .create_version("APP1", "IOS", "2.0.0")
+            .await
+            .unwrap();
+
+        assert_eq!(version.id, "ver-new");
+        assert_eq!(version.app_id, "APP1");
+        assert_eq!(version.platform.as_deref(), Some("IOS"));
+        assert_eq!(
+            version.app_store_state.as_deref(),
+            Some("PREPARE_FOR_SUBMISSION")
+        );
+        assert_eq!(version.version_string.as_deref(), Some("2.0.0"));
+        assert_eq!(version.release_type.as_deref(), Some("MANUAL"));
+        assert_eq!(
+            version.created_date.as_deref(),
+            Some("2026-03-01T12:00:00Z")
+        );
+    }
+
+    #[tokio::test]
+    async fn create_version_surfaces_http_error() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/appStoreVersions"))
+            .respond_with(ResponseTemplate::new(409).set_body_string("conflict"))
+            .mount(&server)
+            .await;
+
+        let err = client(server.uri())
+            .create_version("APP1", "IOS", "2.0.0")
+            .await
+            .unwrap_err();
+        assert!(matches!(err, StackError::Http { status: 409, .. }));
+    }
+
+    #[tokio::test]
+    async fn update_version_sends_only_provided_attributes() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("PATCH"))
+            .and(path("/v1/appStoreVersions/V1"))
+            // The provided attributes (versionString, releaseType) must be present.
+            .and(wiremock::matchers::body_partial_json(serde_json::json!({
+                "data": {
+                    "type": "appStoreVersions",
+                    "id": "V1",
+                    "attributes": {
+                        "versionString": "3.1.0",
+                        "releaseType": "MANUAL"
+                    }
+                }
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": {
+                    "type": "appStoreVersions",
+                    "id": "V1",
+                    "attributes": {}
+                }
+            })))
+            .mount(&server)
+            .await;
+
+        let result = client(server.uri())
+            .update_version("V1", Some("3.1.0"), None, Some("MANUAL"), None)
+            .await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn update_version_surfaces_http_error() {
+        let server = MockServer::start().await;
+        Mock::given(method("PATCH"))
+            .and(path("/v1/appStoreVersions/V1"))
+            .respond_with(ResponseTemplate::new(422).set_body_string("unprocessable"))
+            .mount(&server)
+            .await;
+
+        let err = client(server.uri())
+            .update_version("V1", Some("3.1.0"), None, None, None)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, StackError::Http { status: 422, .. }));
+    }
+
+    #[tokio::test]
+    async fn delete_version_succeeds_on_204() {
+        let server = MockServer::start().await;
+        Mock::given(method("DELETE"))
+            .and(path("/v1/appStoreVersions/V1"))
+            .respond_with(ResponseTemplate::new(204))
+            .mount(&server)
+            .await;
+
+        assert!(client(server.uri()).delete_version("V1").await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn delete_version_surfaces_http_error() {
+        let server = MockServer::start().await;
+        Mock::given(method("DELETE"))
+            .and(path("/v1/appStoreVersions/V1"))
+            .respond_with(ResponseTemplate::new(403).set_body_string("forbidden"))
+            .mount(&server)
+            .await;
+
+        let err = client(server.uri()).delete_version("V1").await.unwrap_err();
         assert!(matches!(err, StackError::Http { status: 403, .. }));
     }
 }

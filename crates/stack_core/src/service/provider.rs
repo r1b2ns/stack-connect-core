@@ -4,6 +4,7 @@ use async_trait::async_trait;
 
 use crate::domain::AppInfo;
 use crate::error::StackError;
+use crate::service::capabilities::app_store_versions::AppStoreVersions;
 use crate::service::capabilities::reviews::Reviews;
 use crate::service::kind::ServiceKind;
 
@@ -15,6 +16,7 @@ use crate::service::kind::ServiceKind;
 pub enum Capability {
     Apps,
     Reviews,
+    AppStoreVersions,
 }
 
 /// Internal, non-exported contract every concrete plugin implements. Kept off the
@@ -40,6 +42,13 @@ pub(crate) trait ProviderImpl: Send + Sync {
     /// The Reviews capability handle, or `None` if this provider lacks
     /// [`Capability::Reviews`]. Default `None` so providers opt in explicitly.
     fn reviews(&self) -> Option<Arc<Reviews>> {
+        None
+    }
+
+    /// The App Store Versions capability handle, or `None` if this provider lacks
+    /// [`Capability::AppStoreVersions`]. Default `None` so providers opt in
+    /// explicitly.
+    fn app_store_versions(&self) -> Option<Arc<AppStoreVersions>> {
         None
     }
 }
@@ -77,6 +86,14 @@ impl Provider {
     /// calls `provider.reviews()` and gets `None` when reviews are unsupported.
     pub fn reviews(&self) -> Option<Arc<Reviews>> {
         self.inner.reviews()
+    }
+
+    /// The App Store Versions capability handle, or `None` when this provider does
+    /// not expose [`Capability::AppStoreVersions`]. This is the discovery
+    /// mechanism: the host calls `provider.app_store_versions()` and gets `None`
+    /// when versions are unsupported.
+    pub fn app_store_versions(&self) -> Option<Arc<AppStoreVersions>> {
+        self.inner.app_store_versions()
     }
 }
 

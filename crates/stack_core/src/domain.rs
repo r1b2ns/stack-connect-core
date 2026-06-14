@@ -51,3 +51,18 @@ pub struct ReviewSubmission {
     pub submitted_by_name: Option<String>,
     pub submitted_by_email: Option<String>,
 }
+
+/// An App Store version of an app. Dates are raw ISO8601 strings; the core does
+/// no date parsing (the host owns that).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, uniffi::Record)]
+pub struct AppStoreVersionInfo {
+    pub id: String,
+    pub app_id: String,
+    pub platform: Option<String>,
+    pub app_store_state: Option<String>,
+    pub app_version_state: Option<String>,
+    pub version_string: Option<String>,
+    pub copyright: Option<String>,
+    pub release_type: Option<String>,
+    pub created_date: Option<String>,
+}

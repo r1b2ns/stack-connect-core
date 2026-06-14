@@ -4,8 +4,11 @@ use async_trait::async_trait;
 
 use super::client::AppStoreClient;
 use crate::auth::es256::AppStoreAuthenticator;
-use crate::domain::{AppInfo, CustomerReview, ReviewResponse, ReviewSubmission};
+use crate::domain::{
+    AppInfo, AppStoreVersionInfo, CustomerReview, ReviewResponse, ReviewSubmission,
+};
 use crate::error::StackError;
+use crate::service::capabilities::app_store_versions::{AppStoreVersions, AppStoreVersionsImpl};
 use crate::service::capabilities::reviews::{Reviews, ReviewsImpl};
 use crate::service::kind::ServiceKind;
 use crate::service::provider::{Capability, ProviderImpl};
@@ -36,7 +39,11 @@ impl ProviderImpl for AppStoreProvider {
     }
 
     fn capabilities(&self) -> Vec<Capability> {
-        vec![Capability::Apps, Capability::Reviews]
+        vec![
+            Capability::Apps,
+            Capability::Reviews,
+            Capability::AppStoreVersions,
+        ]
     }
 
     async fn validate(&self) -> Result<(), StackError> {
@@ -49,6 +56,12 @@ impl ProviderImpl for AppStoreProvider {
 
     fn reviews(&self) -> Option<Arc<Reviews>> {
         Some(Reviews::new(Box::new(AppStoreReviews {
+            client: Arc::clone(&self.client),
+        })))
+    }
+
+    fn app_store_versions(&self) -> Option<Arc<AppStoreVersions>> {
+        Some(AppStoreVersions::new(Box::new(AppStoreAppStoreVersions {
             client: Arc::clone(&self.client),
         })))
     }
@@ -89,6 +102,58 @@ impl ReviewsImpl for AppStoreReviews {
     }
 }
 
+/// App Store Connect implementation of the [`AppStoreVersionsImpl`] capability
+/// contract. Holds a shared [`AppStoreClient`] so it reuses the provider's token
+/// cache.
+struct AppStoreAppStoreVersions {
+    client: Arc<AppStoreClient>,
+}
+
+#[async_trait]
+impl AppStoreVersionsImpl for AppStoreAppStoreVersions {
+    async fn fetch_versions(
+        &self,
+        app_id: String,
+        limit: u32,
+    ) -> Result<Vec<AppStoreVersionInfo>, StackError> {
+        self.client.fetch_versions(&app_id, limit).await
+    }
+
+    async fn create_version(
+        &self,
+        app_id: String,
+        platform: String,
+        version_string: String,
+    ) -> Result<AppStoreVersionInfo, StackError> {
+        self.client
+            .create_version(&app_id, &platform, &version_string)
+            .await
+    }
+
+    async fn update_version(
+        &self,
+        id: String,
+        version_string: Option<String>,
+        copyright: Option<String>,
+        release_type: Option<String>,
+        earliest_release_date: Option<String>,
+    ) -> Result<(), StackError> {
+        self.client
+            .update_version(
+                &id,
+                version_string.as_deref(),
+                copyright.as_deref(),
+                release_type.as_deref(),
+                earliest_release_date.as_deref(),
+            )
+            .await
+    }
+
+    async fn delete_version(&self, id: String) -> Result<(), StackError> {
+        self.client.delete_version(&id).await
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -107,7 +172,11 @@ mod tests {
         assert_eq!(p.kind(), ServiceKind::AppStoreConnect);
         assert_eq!(
             p.capabilities(),
-            vec![Capability::Apps, Capability::Reviews]
+            vec![
+                Capability::Apps,
+                Capability::Reviews,
+                Capability::AppStoreVersions
+            ]
         );
     }
 
@@ -118,5 +187,15 @@ mod tests {
         // constructed to assert the unsupported branch.)
         assert!(provider().reviews().is_some());
         assert!(provider().capabilities().contains(&Capability::Reviews));
+    }
+
+    #[test]
+    fn exposes_app_store_versions_capability_handle() {
+        // App Store Connect supports App Store Versions, so the accessor must
+        // return `Some`.
+        assert!(provider().app_store_versions().is_some());
+        assert!(provider()
+            .capabilities()
+            .contains(&Capability::AppStoreVersions));
     }
 }
