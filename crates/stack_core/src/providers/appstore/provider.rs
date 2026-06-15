@@ -227,6 +227,73 @@ impl BetaGroupsImpl for AppStoreBetaGroups {
     ) -> Result<Vec<BetaTesterInfo>, StackError> {
         self.client.fetch_beta_testers(&group_id, limit).await
     }
+
+    async fn create_beta_group(
+        &self,
+        app_id: String,
+        name: String,
+        is_internal: bool,
+        public_link_enabled: bool,
+        has_access_to_all_builds: bool,
+    ) -> Result<BetaGroupInfo, StackError> {
+        self.client
+            .create_beta_group(
+                &app_id,
+                &name,
+                is_internal,
+                public_link_enabled,
+                has_access_to_all_builds,
+            )
+            .await
+    }
+
+    async fn update_beta_group(
+        &self,
+        group_id: String,
+        name: Option<String>,
+        public_link_enabled: Option<bool>,
+        public_link_limit: Option<i32>,
+        feedback_enabled: Option<bool>,
+    ) -> Result<BetaGroupInfo, StackError> {
+        self.client
+            .update_beta_group(
+                &group_id,
+                name.as_deref(),
+                public_link_enabled,
+                public_link_limit,
+                feedback_enabled,
+            )
+            .await
+    }
+
+    async fn delete_beta_group(&self, group_id: String) -> Result<(), StackError> {
+        self.client.delete_beta_group(&group_id).await
+    }
+
+    async fn add_beta_tester(
+        &self,
+        group_id: String,
+        email: String,
+        first_name: Option<String>,
+        last_name: Option<String>,
+    ) -> Result<BetaTesterInfo, StackError> {
+        self.client
+            .add_beta_tester(
+                &group_id,
+                &email,
+                first_name.as_deref(),
+                last_name.as_deref(),
+            )
+            .await
+    }
+
+    async fn remove_beta_tester(
+        &self,
+        group_id: String,
+        tester_id: String,
+    ) -> Result<(), StackError> {
+        self.client.remove_beta_tester(&group_id, &tester_id).await
+    }
 }
 
 #[cfg(test)]

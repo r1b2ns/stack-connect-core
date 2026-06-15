@@ -440,11 +440,28 @@ struct BetaGroupsResponse {
     links: Links,
 }
 
+/// A JSON:API single-resource document wrapping one `betaGroups`, as returned by
+/// the create (POST) and update (PATCH) endpoints: `{ "data": { ... } }`.
+#[derive(Deserialize)]
+struct BetaGroupDocument {
+    data: BetaGroupResource,
+}
+
 #[derive(Deserialize)]
 struct BetaGroupResource {
     id: String,
     #[serde(default)]
     attributes: BetaGroupAttributes,
+    #[serde(default)]
+    relationships: BetaGroupRelationships,
+}
+
+/// The `betaGroups` relationships we care about. Only `app` is read, and only to
+/// recover the owning app id when it is not otherwise known (the update path).
+#[derive(Deserialize, Default)]
+struct BetaGroupRelationships {
+    #[serde(default)]
+    app: ToOneRelationship,
 }
 
 #[derive(Deserialize, Default)]
@@ -480,6 +497,22 @@ impl BetaGroupResource {
             feedback_enabled: self.attributes.feedback_enabled,
         }
     }
+
+    /// Maps a resource whose owning app id is not known from the call site (the
+    /// update path), recovering `app_id` from the JSON:API `relationships.app`
+    /// when present and falling back to an empty string otherwise — the ASC
+    /// PATCH response carries no app relationship, so this is the simplest
+    /// correct behavior without a second round-trip.
+    fn into_beta_group_info_inferring_app(self) -> BetaGroupInfo {
+        let app_id = self
+            .relationships
+            .app
+            .data
+            .as_ref()
+            .map(|rel| rel.id.clone())
+            .unwrap_or_default();
+        self.into_beta_group_info(&app_id)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -493,6 +526,13 @@ struct BetaTestersResponse {
     data: Vec<BetaTesterResource>,
     #[serde(default)]
     links: Links,
+}
+
+/// A JSON:API single-resource document wrapping one `betaTesters`, as returned
+/// by the create (POST) endpoint: `{ "data": { ... } }`.
+#[derive(Deserialize)]
+struct BetaTesterDocument {
+    data: BetaTesterResource,
 }
 
 #[derive(Deserialize)]
@@ -1174,6 +1214,318 @@ impl AppStoreClient {
         }
 
         Ok(testers)
+    }
+
+    /// Creates a new beta group for `app_id`.
+    ///
+    /// `POST /v1/betaGroups` with a JSON:API body carrying the `name`,
+    /// `isInternalGroup`, `hasAccessToAllBuilds`, `isPublicLinkEnabled` and a
+    /// `isFeedbackEnabled` of `true`, plus the `app` relationship. Success is any
+    /// 2xx (`201 Created`); the returned single-resource document is mapped into a
+    /// [`BetaGroupInfo`] with `app_id` set from the parameter (same as the read
+    /// path).
+    ///
+    /// # Errors
+    /// [`StackError::PendingAgreements`] on a pending-agreements 403,
+    /// [`StackError::Http`] on any other non-2xx response, [`StackError::Decode`]
+    /// on malformed JSON, or [`StackError::Network`] on transport failure.
+    pub(crate) async fn create_beta_group(
+        &self,
+        app_id: &str,
+        name: &str,
+        is_internal: bool,
+        public_link_enabled: bool,
+        has_access_to_all_builds: bool,
+    ) -> Result<BetaGroupInfo, StackError> {
+        let url = format!("{}/v1/betaGroups", self.base_url);
+        let token = self.auth.bearer_token().await?;
+        let request_body = json!({
+            "data": {
+                "type": "betaGroups",
+                "attributes": {
+                    "name": name,
+                    "isInternalGroup": is_internal,
+                    "hasAccessToAllBuilds": has_access_to_all_builds,
+                    "isPublicLinkEnabled": public_link_enabled,
+                    "isFeedbackEnabled": true
+                },
+                "relationships": {
+                    "app": {
+                        "data": { "type": "apps", "id": app_id }
+                    }
+                }
+            }
+        });
+
+        let response = self
+            .http
+            .post(&url)
+            .bearer_auth(token)
+            .json(&request_body)
+            .send()
+            .await
+            .map_err(|e| StackError::network(e.to_string()))?;
+
+        let status = response.status();
+        let response_body = response
+            .text()
+            .await
+            .map_err(|e| StackError::network(e.to_string()))?;
+        if !status.is_success() {
+            if let Some(err) = pending_agreements_error(status.as_u16(), &response_body) {
+                return Err(err);
+            }
+            return Err(StackError::Http {
+                status: status.as_u16(),
+                message: response_body,
+            });
+        }
+
+        let document: BetaGroupDocument = serde_json::from_str(&response_body)
+            .map_err(|e| StackError::decode(format!("beta group response: {e}")))?;
+        Ok(document.data.into_beta_group_info(app_id))
+    }
+
+    /// Updates the beta group identified by `group_id`, sending only the
+    /// attributes that are `Some`.
+    ///
+    /// `PATCH /v1/betaGroups/{group_id}`. `name` → `name`, `public_link_enabled`
+    /// → `isPublicLinkEnabled`, `public_link_limit` → `publicLinkLimit`, and
+    /// `feedback_enabled` → `isFeedbackEnabled`; `None` fields are omitted from
+    /// the request entirely. Success is any 2xx; the returned single-resource
+    /// document is mapped into a [`BetaGroupInfo`]. The PATCH response carries no
+    /// `app` relationship, so `app_id` is recovered from it when present and is an
+    /// empty string otherwise (see
+    /// [`BetaGroupResource::into_beta_group_info_inferring_app`]).
+    ///
+    /// # Errors
+    /// [`StackError::PendingAgreements`] on a pending-agreements 403,
+    /// [`StackError::Http`] on any other non-2xx response, [`StackError::Decode`]
+    /// on malformed JSON, or [`StackError::Network`] on transport failure.
+    pub(crate) async fn update_beta_group(
+        &self,
+        group_id: &str,
+        name: Option<&str>,
+        public_link_enabled: Option<bool>,
+        public_link_limit: Option<i32>,
+        feedback_enabled: Option<bool>,
+    ) -> Result<BetaGroupInfo, StackError> {
+        let url = format!("{}/v1/betaGroups/{group_id}", self.base_url);
+        let token = self.auth.bearer_token().await?;
+
+        let mut attributes = serde_json::Map::new();
+        if let Some(value) = name {
+            attributes.insert("name".into(), json!(value));
+        }
+        if let Some(value) = public_link_enabled {
+            attributes.insert("isPublicLinkEnabled".into(), json!(value));
+        }
+        if let Some(value) = public_link_limit {
+            attributes.insert("publicLinkLimit".into(), json!(value));
+        }
+        if let Some(value) = feedback_enabled {
+            attributes.insert("isFeedbackEnabled".into(), json!(value));
+        }
+
+        let request_body = json!({
+            "data": {
+                "type": "betaGroups",
+                "id": group_id,
+                "attributes": attributes
+            }
+        });
+
+        let response = self
+            .http
+            .patch(&url)
+            .bearer_auth(token)
+            .json(&request_body)
+            .send()
+            .await
+            .map_err(|e| StackError::network(e.to_string()))?;
+
+        let status = response.status();
+        let response_body = response
+            .text()
+            .await
+            .map_err(|e| StackError::network(e.to_string()))?;
+        if !status.is_success() {
+            if let Some(err) = pending_agreements_error(status.as_u16(), &response_body) {
+                return Err(err);
+            }
+            return Err(StackError::Http {
+                status: status.as_u16(),
+                message: response_body,
+            });
+        }
+
+        let document: BetaGroupDocument = serde_json::from_str(&response_body)
+            .map_err(|e| StackError::decode(format!("beta group response: {e}")))?;
+        Ok(document.data.into_beta_group_info_inferring_app())
+    }
+
+    /// Deletes the beta group identified by `group_id`.
+    ///
+    /// `DELETE /v1/betaGroups/{group_id}` returns `204 No Content` (any 2xx is
+    /// accepted) with an empty body.
+    ///
+    /// # Errors
+    /// [`StackError::PendingAgreements`] on a pending-agreements 403,
+    /// [`StackError::Http`] on any other non-2xx response, or
+    /// [`StackError::Network`] on transport failure.
+    pub(crate) async fn delete_beta_group(&self, group_id: &str) -> Result<(), StackError> {
+        let url = format!("{}/v1/betaGroups/{group_id}", self.base_url);
+        let token = self.auth.bearer_token().await?;
+        let response = self
+            .http
+            .delete(&url)
+            .bearer_auth(token)
+            .send()
+            .await
+            .map_err(|e| StackError::network(e.to_string()))?;
+
+        let status = response.status();
+        if status.is_success() {
+            return Ok(());
+        }
+
+        let body = response
+            .text()
+            .await
+            .map_err(|e| StackError::network(e.to_string()))?;
+        if let Some(err) = pending_agreements_error(status.as_u16(), &body) {
+            return Err(err);
+        }
+        Err(StackError::Http {
+            status: status.as_u16(),
+            message: body,
+        })
+    }
+
+    /// Adds a beta tester to `group_id`, creating the tester from `email` (and
+    /// optional name parts).
+    ///
+    /// `POST /v1/betaTesters` with a JSON:API body carrying the `email`, the
+    /// `firstName`/`lastName` attributes (omitted when `None`), and the
+    /// `betaGroups` to-many relationship. Success is any 2xx (`201 Created`); the
+    /// returned single-resource document is mapped into a [`BetaTesterInfo`].
+    ///
+    /// # Errors
+    /// [`StackError::PendingAgreements`] on a pending-agreements 403,
+    /// [`StackError::Http`] on any other non-2xx response, [`StackError::Decode`]
+    /// on malformed JSON, or [`StackError::Network`] on transport failure.
+    pub(crate) async fn add_beta_tester(
+        &self,
+        group_id: &str,
+        email: &str,
+        first_name: Option<&str>,
+        last_name: Option<&str>,
+    ) -> Result<BetaTesterInfo, StackError> {
+        let url = format!("{}/v1/betaTesters", self.base_url);
+        let token = self.auth.bearer_token().await?;
+
+        // Build attributes dynamically so absent name parts are omitted entirely,
+        // mirroring how the read DTO treats optional names.
+        let mut attributes = serde_json::Map::new();
+        if let Some(value) = first_name {
+            attributes.insert("firstName".into(), json!(value));
+        }
+        if let Some(value) = last_name {
+            attributes.insert("lastName".into(), json!(value));
+        }
+        attributes.insert("email".into(), json!(email));
+
+        let request_body = json!({
+            "data": {
+                "type": "betaTesters",
+                "attributes": attributes,
+                "relationships": {
+                    "betaGroups": {
+                        "data": [{ "type": "betaGroups", "id": group_id }]
+                    }
+                }
+            }
+        });
+
+        let response = self
+            .http
+            .post(&url)
+            .bearer_auth(token)
+            .json(&request_body)
+            .send()
+            .await
+            .map_err(|e| StackError::network(e.to_string()))?;
+
+        let status = response.status();
+        let response_body = response
+            .text()
+            .await
+            .map_err(|e| StackError::network(e.to_string()))?;
+        if !status.is_success() {
+            if let Some(err) = pending_agreements_error(status.as_u16(), &response_body) {
+                return Err(err);
+            }
+            return Err(StackError::Http {
+                status: status.as_u16(),
+                message: response_body,
+            });
+        }
+
+        let document: BetaTesterDocument = serde_json::from_str(&response_body)
+            .map_err(|e| StackError::decode(format!("beta tester response: {e}")))?;
+        Ok(document.data.into_beta_tester_info())
+    }
+
+    /// Removes the beta tester `tester_id` from `group_id` (the tester is not
+    /// deleted, only unlinked from the group).
+    ///
+    /// `DELETE /v1/betaGroups/{group_id}/relationships/betaTesters` with a
+    /// JSON:API to-many linkage body `{ "data": [{ "type": "betaTesters", "id":
+    /// ... }] }`. Returns `204 No Content` (any 2xx is accepted).
+    ///
+    /// # Errors
+    /// [`StackError::PendingAgreements`] on a pending-agreements 403,
+    /// [`StackError::Http`] on any other non-2xx response, or
+    /// [`StackError::Network`] on transport failure.
+    pub(crate) async fn remove_beta_tester(
+        &self,
+        group_id: &str,
+        tester_id: &str,
+    ) -> Result<(), StackError> {
+        let url = format!(
+            "{}/v1/betaGroups/{group_id}/relationships/betaTesters",
+            self.base_url
+        );
+        let token = self.auth.bearer_token().await?;
+        let request_body = json!({
+            "data": [{ "type": "betaTesters", "id": tester_id }]
+        });
+
+        let response = self
+            .http
+            .delete(&url)
+            .bearer_auth(token)
+            .json(&request_body)
+            .send()
+            .await
+            .map_err(|e| StackError::network(e.to_string()))?;
+
+        let status = response.status();
+        if status.is_success() {
+            return Ok(());
+        }
+
+        let body = response
+            .text()
+            .await
+            .map_err(|e| StackError::network(e.to_string()))?;
+        if let Some(err) = pending_agreements_error(status.as_u16(), &body) {
+            return Err(err);
+        }
+        Err(StackError::Http {
+            status: status.as_u16(),
+            message: body,
+        })
     }
 
     /// Authenticated `GET` of one JSON:API page, returning the raw body or mapping
@@ -2327,6 +2679,363 @@ mod tests {
 
         let err = client(server.uri())
             .fetch_beta_testers("group-1", 20)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, StackError::Http { status: 403, .. }));
+    }
+
+    #[tokio::test]
+    async fn create_beta_group_posts_and_maps() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/v1/betaGroups"))
+            // Assert the request carries the attributes and the app relationship,
+            // without over-constraining the rest of the JSON:API envelope.
+            .and(wiremock::matchers::body_partial_json(serde_json::json!({
+                "data": {
+                    "type": "betaGroups",
+                    "attributes": {
+                        "name": "External Testers",
+                        "isInternalGroup": false,
+                        "hasAccessToAllBuilds": true,
+                        "isPublicLinkEnabled": true,
+                        "isFeedbackEnabled": true
+                    },
+                    "relationships": {
+                        "app": { "data": { "type": "apps", "id": "APP1" } }
+                    }
+                }
+            })))
+            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
+                "data": {
+                    "type": "betaGroups",
+                    "id": "group-1",
+                    "attributes": {
+                        "name": "External Testers",
+                        "createdDate": "2026-03-01T12:00:00Z",
+                        "isInternalGroup": false,
+                        "hasAccessToAllBuilds": true,
+                        "publicLinkEnabled": true,
+                        "publicLink": "https://testflight.apple.com/join/ABC123",
+                        "feedbackEnabled": true
+                    }
+                }
+            })))
+            .mount(&server)
+            .await;
+
+        let group = client(server.uri())
+            .create_beta_group("APP1", "External Testers", false, true, true)
+            .await
+            .unwrap();
+
+        assert_eq!(group.id, "group-1");
+        assert_eq!(group.app_id, "APP1");
+        assert_eq!(group.name.as_deref(), Some("External Testers"));
+        assert_eq!(group.created_date.as_deref(), Some("2026-03-01T12:00:00Z"));
+        assert_eq!(group.is_internal_group, Some(false));
+        assert_eq!(group.has_access_to_all_builds, Some(true));
+        assert_eq!(group.public_link_enabled, Some(true));
+        assert_eq!(
+            group.public_link.as_deref(),
+            Some("https://testflight.apple.com/join/ABC123")
+        );
+        assert_eq!(group.feedback_enabled, Some(true));
+    }
+
+    #[tokio::test]
+    async fn create_beta_group_surfaces_http_error() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/betaGroups"))
+            .respond_with(ResponseTemplate::new(409).set_body_string("conflict"))
+            .mount(&server)
+            .await;
+
+        let err = client(server.uri())
+            .create_beta_group("APP1", "Dupe", false, false, false)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, StackError::Http { status: 409, .. }));
+    }
+
+    #[tokio::test]
+    async fn create_beta_group_surfaces_pending_agreements() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/betaGroups"))
+            .respond_with(ResponseTemplate::new(403).set_body_json(serde_json::json!({
+                "errors": [{ "detail": "The agreement is pending." }]
+            })))
+            .mount(&server)
+            .await;
+
+        let err = client(server.uri())
+            .create_beta_group("APP1", "Group", false, false, false)
+            .await
+            .unwrap_err();
+        match err {
+            StackError::PendingAgreements { message } => {
+                assert!(message.contains("pending agreements"))
+            }
+            other => panic!("expected PendingAgreements, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn update_beta_group_sends_only_provided_attributes() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("PATCH"))
+            .and(path("/v1/betaGroups/group-1"))
+            // Only `name` and `publicLinkLimit` were provided; assert they are
+            // present. (Absent attrs are simply omitted from the request map.)
+            .and(wiremock::matchers::body_partial_json(serde_json::json!({
+                "data": {
+                    "type": "betaGroups",
+                    "id": "group-1",
+                    "attributes": {
+                        "name": "Renamed",
+                        "publicLinkLimit": 250
+                    }
+                }
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": {
+                    "type": "betaGroups",
+                    "id": "group-1",
+                    "attributes": {
+                        "name": "Renamed",
+                        "publicLinkEnabled": true,
+                        "feedbackEnabled": true
+                    },
+                    "relationships": {
+                        "app": { "data": { "type": "apps", "id": "APP1" } }
+                    }
+                }
+            })))
+            .mount(&server)
+            .await;
+
+        let group = client(server.uri())
+            .update_beta_group("group-1", Some("Renamed"), None, Some(250), None)
+            .await
+            .unwrap();
+
+        assert_eq!(group.id, "group-1");
+        // `app_id` is recovered from the PATCH response's app relationship.
+        assert_eq!(group.app_id, "APP1");
+        assert_eq!(group.name.as_deref(), Some("Renamed"));
+        assert_eq!(group.public_link_enabled, Some(true));
+        assert_eq!(group.feedback_enabled, Some(true));
+    }
+
+    #[tokio::test]
+    async fn update_beta_group_app_id_empty_when_no_relationship() {
+        let server = MockServer::start().await;
+
+        // A PATCH response with no `app` relationship → `app_id` falls back to "".
+        Mock::given(method("PATCH"))
+            .and(path("/v1/betaGroups/group-2"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": {
+                    "type": "betaGroups",
+                    "id": "group-2",
+                    "attributes": { "feedbackEnabled": false }
+                }
+            })))
+            .mount(&server)
+            .await;
+
+        let group = client(server.uri())
+            .update_beta_group("group-2", None, None, None, Some(false))
+            .await
+            .unwrap();
+
+        assert_eq!(group.id, "group-2");
+        assert_eq!(group.app_id, "");
+        assert_eq!(group.feedback_enabled, Some(false));
+    }
+
+    #[tokio::test]
+    async fn update_beta_group_surfaces_http_error() {
+        let server = MockServer::start().await;
+        Mock::given(method("PATCH"))
+            .and(path("/v1/betaGroups/group-1"))
+            .respond_with(ResponseTemplate::new(422).set_body_string("unprocessable"))
+            .mount(&server)
+            .await;
+
+        let err = client(server.uri())
+            .update_beta_group("group-1", Some("x"), None, None, None)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, StackError::Http { status: 422, .. }));
+    }
+
+    #[tokio::test]
+    async fn delete_beta_group_succeeds_on_204() {
+        let server = MockServer::start().await;
+        Mock::given(method("DELETE"))
+            .and(path("/v1/betaGroups/group-1"))
+            .respond_with(ResponseTemplate::new(204))
+            .mount(&server)
+            .await;
+
+        assert!(client(server.uri())
+            .delete_beta_group("group-1")
+            .await
+            .is_ok());
+    }
+
+    #[tokio::test]
+    async fn delete_beta_group_surfaces_http_error() {
+        let server = MockServer::start().await;
+        Mock::given(method("DELETE"))
+            .and(path("/v1/betaGroups/group-1"))
+            .respond_with(ResponseTemplate::new(403).set_body_string("forbidden"))
+            .mount(&server)
+            .await;
+
+        let err = client(server.uri())
+            .delete_beta_group("group-1")
+            .await
+            .unwrap_err();
+        assert!(matches!(err, StackError::Http { status: 403, .. }));
+    }
+
+    #[tokio::test]
+    async fn add_beta_tester_posts_and_maps() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/v1/betaTesters"))
+            // Assert the email + name attrs and the betaGroups linkage are carried.
+            .and(wiremock::matchers::body_partial_json(serde_json::json!({
+                "data": {
+                    "type": "betaTesters",
+                    "attributes": {
+                        "firstName": "Jane",
+                        "lastName": "Doe",
+                        "email": "jane@example.com"
+                    },
+                    "relationships": {
+                        "betaGroups": {
+                            "data": [{ "type": "betaGroups", "id": "group-1" }]
+                        }
+                    }
+                }
+            })))
+            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
+                "data": {
+                    "type": "betaTesters",
+                    "id": "tester-1",
+                    "attributes": {
+                        "firstName": "Jane",
+                        "lastName": "Doe",
+                        "email": "jane@example.com",
+                        "inviteType": "EMAIL",
+                        "state": "INVITED"
+                    }
+                }
+            })))
+            .mount(&server)
+            .await;
+
+        let tester = client(server.uri())
+            .add_beta_tester("group-1", "jane@example.com", Some("Jane"), Some("Doe"))
+            .await
+            .unwrap();
+
+        assert_eq!(tester.id, "tester-1");
+        assert_eq!(tester.first_name.as_deref(), Some("Jane"));
+        assert_eq!(tester.last_name.as_deref(), Some("Doe"));
+        assert_eq!(tester.email.as_deref(), Some("jane@example.com"));
+        assert_eq!(tester.invite_type.as_deref(), Some("EMAIL"));
+        assert_eq!(tester.state.as_deref(), Some("INVITED"));
+    }
+
+    #[tokio::test]
+    async fn add_beta_tester_omits_absent_name_parts() {
+        let server = MockServer::start().await;
+
+        // With no name parts, only `email` is sent in attributes.
+        Mock::given(method("POST"))
+            .and(path("/v1/betaTesters"))
+            .and(wiremock::matchers::body_partial_json(serde_json::json!({
+                "data": {
+                    "type": "betaTesters",
+                    "attributes": { "email": "bob@example.com" }
+                }
+            })))
+            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
+                "data": {
+                    "type": "betaTesters",
+                    "id": "tester-2",
+                    "attributes": { "email": "bob@example.com" }
+                }
+            })))
+            .mount(&server)
+            .await;
+
+        let tester = client(server.uri())
+            .add_beta_tester("group-1", "bob@example.com", None, None)
+            .await
+            .unwrap();
+
+        assert_eq!(tester.id, "tester-2");
+        assert_eq!(tester.email.as_deref(), Some("bob@example.com"));
+        assert!(tester.first_name.is_none());
+        assert!(tester.last_name.is_none());
+    }
+
+    #[tokio::test]
+    async fn add_beta_tester_surfaces_http_error() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/betaTesters"))
+            .respond_with(ResponseTemplate::new(409).set_body_string("conflict"))
+            .mount(&server)
+            .await;
+
+        let err = client(server.uri())
+            .add_beta_tester("group-1", "x@example.com", None, None)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, StackError::Http { status: 409, .. }));
+    }
+
+    #[tokio::test]
+    async fn remove_beta_tester_succeeds_on_204() {
+        let server = MockServer::start().await;
+        Mock::given(method("DELETE"))
+            .and(path("/v1/betaGroups/group-1/relationships/betaTesters"))
+            // Assert the to-many linkage body carries the tester id.
+            .and(wiremock::matchers::body_partial_json(serde_json::json!({
+                "data": [{ "type": "betaTesters", "id": "tester-1" }]
+            })))
+            .respond_with(ResponseTemplate::new(204))
+            .mount(&server)
+            .await;
+
+        assert!(client(server.uri())
+            .remove_beta_tester("group-1", "tester-1")
+            .await
+            .is_ok());
+    }
+
+    #[tokio::test]
+    async fn remove_beta_tester_surfaces_http_error() {
+        let server = MockServer::start().await;
+        Mock::given(method("DELETE"))
+            .and(path("/v1/betaGroups/group-1/relationships/betaTesters"))
+            .respond_with(ResponseTemplate::new(403).set_body_string("forbidden"))
+            .mount(&server)
+            .await;
+
+        let err = client(server.uri())
+            .remove_beta_tester("group-1", "tester-1")
             .await
             .unwrap_err();
         assert!(matches!(err, StackError::Http { status: 403, .. }));

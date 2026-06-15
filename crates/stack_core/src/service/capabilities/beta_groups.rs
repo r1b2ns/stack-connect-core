@@ -13,7 +13,8 @@ use crate::error::StackError;
 /// `Send + Sync` so a `Box<dyn BetaGroupsImpl>` can live inside an
 /// `Arc<BetaGroups>` shared across the tokio runtime.
 ///
-/// Read-only today (list groups, list testers) — see RUST_CORE_PLAN.md Phase 2.
+/// Covers reads (list groups, list testers) and writes (create/update/delete a
+/// group, add/remove a tester) — see RUST_CORE_PLAN.md Phase 2.
 #[async_trait]
 pub(crate) trait BetaGroupsImpl: Send + Sync {
     /// Lists the beta groups for `app_id`, up to `limit`.
@@ -29,6 +30,46 @@ pub(crate) trait BetaGroupsImpl: Send + Sync {
         group_id: String,
         limit: u32,
     ) -> Result<Vec<BetaTesterInfo>, StackError>;
+
+    /// Creates a beta group named `name` under `app_id`.
+    async fn create_beta_group(
+        &self,
+        app_id: String,
+        name: String,
+        is_internal: bool,
+        public_link_enabled: bool,
+        has_access_to_all_builds: bool,
+    ) -> Result<BetaGroupInfo, StackError>;
+
+    /// Updates the beta group `group_id`, applying only the provided fields.
+    async fn update_beta_group(
+        &self,
+        group_id: String,
+        name: Option<String>,
+        public_link_enabled: Option<bool>,
+        public_link_limit: Option<i32>,
+        feedback_enabled: Option<bool>,
+    ) -> Result<BetaGroupInfo, StackError>;
+
+    /// Deletes the beta group `group_id`.
+    async fn delete_beta_group(&self, group_id: String) -> Result<(), StackError>;
+
+    /// Adds a beta tester (created from `email` and optional name parts) to
+    /// `group_id`.
+    async fn add_beta_tester(
+        &self,
+        group_id: String,
+        email: String,
+        first_name: Option<String>,
+        last_name: Option<String>,
+    ) -> Result<BetaTesterInfo, StackError>;
+
+    /// Removes the beta tester `tester_id` from `group_id`.
+    async fn remove_beta_tester(
+        &self,
+        group_id: String,
+        tester_id: String,
+    ) -> Result<(), StackError>;
 }
 
 /// UniFFI-exported Beta Groups capability handle. A thin, binding-friendly
@@ -72,5 +113,108 @@ impl BetaGroups {
         limit: u32,
     ) -> Result<Vec<BetaTesterInfo>, StackError> {
         self.inner.fetch_beta_testers(group_id, limit).await
+    }
+
+    /// Creates a beta group named `name` under `app_id`, returning the created
+    /// group. `is_internal` selects an internal vs. external group;
+    /// `public_link_enabled` toggles the TestFlight public link; and
+    /// `has_access_to_all_builds` grants the group every build. Feedback is
+    /// enabled on creation.
+    ///
+    /// # Errors
+    /// [`StackError::PendingAgreements`] when App Store Connect reports pending
+    /// agreements, [`StackError::Http`] on any other non-2xx response,
+    /// [`StackError::Decode`] on malformed JSON, or [`StackError::Network`] on
+    /// transport failure.
+    pub async fn create_beta_group(
+        &self,
+        app_id: String,
+        name: String,
+        is_internal: bool,
+        public_link_enabled: bool,
+        has_access_to_all_builds: bool,
+    ) -> Result<BetaGroupInfo, StackError> {
+        self.inner
+            .create_beta_group(
+                app_id,
+                name,
+                is_internal,
+                public_link_enabled,
+                has_access_to_all_builds,
+            )
+            .await
+    }
+
+    /// Updates the beta group `group_id`, applying only the fields that are
+    /// `Some` and leaving the rest untouched. `public_link_limit` caps the number
+    /// of testers who can join via the public link.
+    ///
+    /// # Errors
+    /// [`StackError::PendingAgreements`] when App Store Connect reports pending
+    /// agreements, [`StackError::Http`] on any other non-2xx response,
+    /// [`StackError::Decode`] on malformed JSON, or [`StackError::Network`] on
+    /// transport failure.
+    pub async fn update_beta_group(
+        &self,
+        group_id: String,
+        name: Option<String>,
+        public_link_enabled: Option<bool>,
+        public_link_limit: Option<i32>,
+        feedback_enabled: Option<bool>,
+    ) -> Result<BetaGroupInfo, StackError> {
+        self.inner
+            .update_beta_group(
+                group_id,
+                name,
+                public_link_enabled,
+                public_link_limit,
+                feedback_enabled,
+            )
+            .await
+    }
+
+    /// Deletes the beta group `group_id`.
+    ///
+    /// # Errors
+    /// [`StackError::PendingAgreements`] when App Store Connect reports pending
+    /// agreements, [`StackError::Http`] on any other non-2xx response, or
+    /// [`StackError::Network`] on transport failure.
+    pub async fn delete_beta_group(&self, group_id: String) -> Result<(), StackError> {
+        self.inner.delete_beta_group(group_id).await
+    }
+
+    /// Adds a beta tester to `group_id`, creating the tester from `email` and the
+    /// optional `first_name`/`last_name`, and returns the created tester.
+    ///
+    /// # Errors
+    /// [`StackError::PendingAgreements`] when App Store Connect reports pending
+    /// agreements, [`StackError::Http`] on any other non-2xx response,
+    /// [`StackError::Decode`] on malformed JSON, or [`StackError::Network`] on
+    /// transport failure.
+    pub async fn add_beta_tester(
+        &self,
+        group_id: String,
+        email: String,
+        first_name: Option<String>,
+        last_name: Option<String>,
+    ) -> Result<BetaTesterInfo, StackError> {
+        self.inner
+            .add_beta_tester(group_id, email, first_name, last_name)
+            .await
+    }
+
+    /// Removes the beta tester `tester_id` from `group_id` (unlinks the tester
+    /// from the group; the tester itself is not deleted).
+    ///
+    /// # Errors
+    /// [`StackError::PendingAgreements`] when App Store Connect reports pending
+    /// agreements, [`StackError::Http`] on any other non-2xx response, or
+    /// [`StackError::Network`] on transport failure.
+    pub async fn remove_beta_tester(
+        &self,
+        group_id: String,
+        tester_id: String,
+    ) -> Result<(), StackError> {
+        self.inner.remove_beta_tester(group_id, tester_id).await
     }
 }
