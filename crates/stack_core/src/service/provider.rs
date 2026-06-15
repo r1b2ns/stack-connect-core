@@ -5,6 +5,7 @@ use async_trait::async_trait;
 use crate::domain::AppInfo;
 use crate::error::StackError;
 use crate::service::capabilities::app_store_versions::AppStoreVersions;
+use crate::service::capabilities::beta_groups::BetaGroups;
 use crate::service::capabilities::builds::Builds;
 use crate::service::capabilities::reviews::Reviews;
 use crate::service::kind::ServiceKind;
@@ -19,6 +20,7 @@ pub enum Capability {
     Reviews,
     AppStoreVersions,
     Builds,
+    BetaGroups,
 }
 
 /// Internal, non-exported contract every concrete plugin implements. Kept off the
@@ -57,6 +59,12 @@ pub(crate) trait ProviderImpl: Send + Sync {
     /// The Builds capability handle, or `None` if this provider lacks
     /// [`Capability::Builds`]. Default `None` so providers opt in explicitly.
     fn builds(&self) -> Option<Arc<Builds>> {
+        None
+    }
+
+    /// The Beta Groups capability handle, or `None` if this provider lacks
+    /// [`Capability::BetaGroups`]. Default `None` so providers opt in explicitly.
+    fn beta_groups(&self) -> Option<Arc<BetaGroups>> {
         None
     }
 }
@@ -109,6 +117,14 @@ impl Provider {
     /// `provider.builds()` and gets `None` when builds are unsupported.
     pub fn builds(&self) -> Option<Arc<Builds>> {
         self.inner.builds()
+    }
+
+    /// The Beta Groups capability handle, or `None` when this provider does not
+    /// expose [`Capability::BetaGroups`]. This is the discovery mechanism: the
+    /// host calls `provider.beta_groups()` and gets `None` when beta groups are
+    /// unsupported.
+    pub fn beta_groups(&self) -> Option<Arc<BetaGroups>> {
+        self.inner.beta_groups()
     }
 }
 

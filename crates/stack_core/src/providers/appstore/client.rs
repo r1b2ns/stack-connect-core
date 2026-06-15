@@ -5,8 +5,8 @@ use serde_json::json;
 
 use crate::auth::es256::AppStoreAuthenticator;
 use crate::domain::{
-    AppInfo, AppStoreVersionInfo, BuildInfo, CustomerReview, CustomerReviewsPage, ReviewResponse,
-    ReviewSubmission,
+    AppInfo, AppStoreVersionInfo, BetaGroupInfo, BetaTesterInfo, BuildInfo, CustomerReview,
+    CustomerReviewsPage, ReviewResponse, ReviewSubmission,
 };
 use crate::error::StackError;
 
@@ -423,6 +423,109 @@ impl BuildResource {
             processing_state: self.attributes.processing_state,
             min_os_version: self.attributes.min_os_version,
             expiration_date: self.attributes.expiration_date,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Beta groups (JSON:API)
+// ---------------------------------------------------------------------------
+
+/// A JSON:API document page of `betaGroups` resources.
+#[derive(Deserialize)]
+struct BetaGroupsResponse {
+    #[serde(default)]
+    data: Vec<BetaGroupResource>,
+    #[serde(default)]
+    links: Links,
+}
+
+#[derive(Deserialize)]
+struct BetaGroupResource {
+    id: String,
+    #[serde(default)]
+    attributes: BetaGroupAttributes,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct BetaGroupAttributes {
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    created_date: Option<String>,
+    #[serde(default)]
+    is_internal_group: Option<bool>,
+    #[serde(default)]
+    has_access_to_all_builds: Option<bool>,
+    #[serde(default)]
+    public_link_enabled: Option<bool>,
+    #[serde(default)]
+    public_link: Option<String>,
+    #[serde(default)]
+    feedback_enabled: Option<bool>,
+}
+
+impl BetaGroupResource {
+    fn into_beta_group_info(self, app_id: &str) -> BetaGroupInfo {
+        BetaGroupInfo {
+            id: self.id,
+            app_id: app_id.to_string(),
+            name: self.attributes.name,
+            created_date: self.attributes.created_date,
+            is_internal_group: self.attributes.is_internal_group,
+            has_access_to_all_builds: self.attributes.has_access_to_all_builds,
+            public_link_enabled: self.attributes.public_link_enabled,
+            public_link: self.attributes.public_link,
+            feedback_enabled: self.attributes.feedback_enabled,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Beta testers (JSON:API)
+// ---------------------------------------------------------------------------
+
+/// A JSON:API document page of `betaTesters` resources.
+#[derive(Deserialize)]
+struct BetaTestersResponse {
+    #[serde(default)]
+    data: Vec<BetaTesterResource>,
+    #[serde(default)]
+    links: Links,
+}
+
+#[derive(Deserialize)]
+struct BetaTesterResource {
+    id: String,
+    #[serde(default)]
+    attributes: BetaTesterAttributes,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct BetaTesterAttributes {
+    #[serde(default)]
+    first_name: Option<String>,
+    #[serde(default)]
+    last_name: Option<String>,
+    #[serde(default)]
+    email: Option<String>,
+    #[serde(default)]
+    invite_type: Option<String>,
+    #[serde(default)]
+    state: Option<String>,
+}
+
+impl BetaTesterResource {
+    fn into_beta_tester_info(self) -> BetaTesterInfo {
+        BetaTesterInfo {
+            id: self.id,
+            first_name: self.attributes.first_name,
+            last_name: self.attributes.last_name,
+            email: self.attributes.email,
+            invite_type: self.attributes.invite_type,
+            state: self.attributes.state,
         }
     }
 }
@@ -996,6 +1099,81 @@ impl AppStoreClient {
         }
 
         Ok(builds)
+    }
+
+    /// Lists the beta groups for `app_id`, mapping each into a [`BetaGroupInfo`]
+    /// with `app_id` set from the parameter.
+    ///
+    /// `GET /v1/betaGroups?filter[app]={app_id}&limit={limit}`, following
+    /// `links.next` pagination until exhausted (`limit` is the page size).
+    ///
+    /// # Errors
+    /// [`StackError::Http`] on a non-2xx page, [`StackError::Decode`] on malformed
+    /// JSON, or [`StackError::Network`] on transport failure.
+    pub(crate) async fn fetch_beta_groups(
+        &self,
+        app_id: &str,
+        limit: u32,
+    ) -> Result<Vec<BetaGroupInfo>, StackError> {
+        let mut groups = Vec::new();
+        let mut next_url = Some(format!(
+            "{}/v1/betaGroups?filter[app]={app_id}&limit={limit}",
+            self.base_url
+        ));
+
+        while let Some(url) = next_url {
+            let body = self.get_page(&url).await?;
+            let page: BetaGroupsResponse = serde_json::from_str(&body)
+                .map_err(|e| StackError::decode(format!("beta groups response: {e}")))?;
+            groups.extend(
+                page.data
+                    .into_iter()
+                    .map(|g| g.into_beta_group_info(app_id)),
+            );
+
+            // `links.next` is an absolute URL; follow it verbatim until absent.
+            next_url = page.links.next.filter(|u| !u.is_empty());
+        }
+
+        Ok(groups)
+    }
+
+    /// Lists the beta testers belonging to `group_id`, mapping each into a
+    /// [`BetaTesterInfo`].
+    ///
+    /// `GET /v1/betaTesters?filter[betaGroups]={group_id}&limit={limit}`,
+    /// following `links.next` pagination until exhausted (`limit` is the page
+    /// size).
+    ///
+    /// # Errors
+    /// [`StackError::Http`] on a non-2xx page, [`StackError::Decode`] on malformed
+    /// JSON, or [`StackError::Network`] on transport failure.
+    pub(crate) async fn fetch_beta_testers(
+        &self,
+        group_id: &str,
+        limit: u32,
+    ) -> Result<Vec<BetaTesterInfo>, StackError> {
+        let mut testers = Vec::new();
+        let mut next_url = Some(format!(
+            "{}/v1/betaTesters?filter[betaGroups]={group_id}&limit={limit}",
+            self.base_url
+        ));
+
+        while let Some(url) = next_url {
+            let body = self.get_page(&url).await?;
+            let page: BetaTestersResponse = serde_json::from_str(&body)
+                .map_err(|e| StackError::decode(format!("beta testers response: {e}")))?;
+            testers.extend(
+                page.data
+                    .into_iter()
+                    .map(BetaTesterResource::into_beta_tester_info),
+            );
+
+            // `links.next` is an absolute URL; follow it verbatim until absent.
+            next_url = page.links.next.filter(|u| !u.is_empty());
+        }
+
+        Ok(testers)
     }
 
     /// Authenticated `GET` of one JSON:API page, returning the raw body or mapping
@@ -1933,6 +2111,222 @@ mod tests {
 
         let err = client(server.uri())
             .fetch_builds("APP1", 20)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, StackError::Http { status: 403, .. }));
+    }
+
+    #[tokio::test]
+    async fn fetch_beta_groups_maps_and_paginates() {
+        let server = MockServer::start().await;
+        let next = format!("{}/v1/betaGroups?cursor=PAGE2", server.uri());
+
+        // Page 1: a fully-populated group, plus the `links.next` cursor. The first
+        // request must carry the app filter and the limit.
+        Mock::given(method("GET"))
+            .and(path("/v1/betaGroups"))
+            .and(query_param("filter[app]", "APP1"))
+            .and(query_param("limit", "20"))
+            .and(wiremock::matchers::query_param_is_missing("cursor"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": [{
+                    "type": "betaGroups",
+                    "id": "group-1",
+                    "attributes": {
+                        "name": "External Testers",
+                        "createdDate": "2026-01-02T03:04:05Z",
+                        "isInternalGroup": false,
+                        "hasAccessToAllBuilds": true,
+                        "publicLinkEnabled": true,
+                        "publicLink": "https://testflight.apple.com/join/ABC123",
+                        "feedbackEnabled": true
+                    }
+                }],
+                "links": { "next": next }
+            })))
+            .mount(&server)
+            .await;
+
+        // Page 2: a sparse group (only the name present) and no further page.
+        Mock::given(method("GET"))
+            .and(path("/v1/betaGroups"))
+            .and(query_param("cursor", "PAGE2"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": [{
+                    "type": "betaGroups",
+                    "id": "group-2",
+                    "attributes": {
+                        "name": "Internal"
+                    }
+                }],
+                "links": {}
+            })))
+            .mount(&server)
+            .await;
+
+        let groups = client(server.uri())
+            .fetch_beta_groups("APP1", 20)
+            .await
+            .unwrap();
+        assert_eq!(groups.len(), 2);
+
+        let first = &groups[0];
+        assert_eq!(first.id, "group-1");
+        assert_eq!(first.app_id, "APP1");
+        assert_eq!(first.name.as_deref(), Some("External Testers"));
+        assert_eq!(first.created_date.as_deref(), Some("2026-01-02T03:04:05Z"));
+        assert_eq!(first.is_internal_group, Some(false));
+        assert_eq!(first.has_access_to_all_builds, Some(true));
+        assert_eq!(first.public_link_enabled, Some(true));
+        assert_eq!(
+            first.public_link.as_deref(),
+            Some("https://testflight.apple.com/join/ABC123")
+        );
+        assert_eq!(first.feedback_enabled, Some(true));
+
+        let second = &groups[1];
+        assert_eq!(second.id, "group-2");
+        assert_eq!(second.app_id, "APP1");
+        assert_eq!(second.name.as_deref(), Some("Internal"));
+        assert!(second.created_date.is_none());
+        assert!(second.is_internal_group.is_none());
+        assert!(second.has_access_to_all_builds.is_none());
+        assert!(second.public_link_enabled.is_none());
+        assert!(second.public_link.is_none());
+        assert!(second.feedback_enabled.is_none());
+    }
+
+    #[tokio::test]
+    async fn fetch_beta_groups_surfaces_http_error() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v1/betaGroups"))
+            .respond_with(ResponseTemplate::new(403).set_body_string("forbidden"))
+            .mount(&server)
+            .await;
+
+        let err = client(server.uri())
+            .fetch_beta_groups("APP1", 20)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, StackError::Http { status: 403, .. }));
+    }
+
+    #[tokio::test]
+    async fn fetch_beta_testers_maps_fields() {
+        let server = MockServer::start().await;
+
+        // The request must carry the group filter and the limit.
+        Mock::given(method("GET"))
+            .and(path("/v1/betaTesters"))
+            .and(query_param("filter[betaGroups]", "group-1"))
+            .and(query_param("limit", "20"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": [
+                    {
+                        "type": "betaTesters",
+                        "id": "tester-1",
+                        "attributes": {
+                            "firstName": "Jane",
+                            "lastName": "Doe",
+                            "email": "jane@example.com",
+                            "inviteType": "EMAIL",
+                            "state": "ACCEPTED"
+                        }
+                    },
+                    {
+                        "type": "betaTesters",
+                        "id": "tester-2",
+                        "attributes": {
+                            "email": "bob@example.com"
+                        }
+                    }
+                ],
+                "links": {}
+            })))
+            .mount(&server)
+            .await;
+
+        let testers = client(server.uri())
+            .fetch_beta_testers("group-1", 20)
+            .await
+            .unwrap();
+        assert_eq!(testers.len(), 2);
+
+        let first = &testers[0];
+        assert_eq!(first.id, "tester-1");
+        assert_eq!(first.first_name.as_deref(), Some("Jane"));
+        assert_eq!(first.last_name.as_deref(), Some("Doe"));
+        assert_eq!(first.email.as_deref(), Some("jane@example.com"));
+        assert_eq!(first.invite_type.as_deref(), Some("EMAIL"));
+        assert_eq!(first.state.as_deref(), Some("ACCEPTED"));
+
+        let second = &testers[1];
+        assert_eq!(second.id, "tester-2");
+        assert_eq!(second.email.as_deref(), Some("bob@example.com"));
+        assert!(second.first_name.is_none());
+        assert!(second.last_name.is_none());
+        assert!(second.invite_type.is_none());
+        assert!(second.state.is_none());
+    }
+
+    #[tokio::test]
+    async fn fetch_beta_testers_follows_next() {
+        let server = MockServer::start().await;
+        let next = format!("{}/v1/betaTesters?cursor=PAGE2", server.uri());
+
+        // Page 1: one tester plus the `links.next` cursor.
+        Mock::given(method("GET"))
+            .and(path("/v1/betaTesters"))
+            .and(query_param("filter[betaGroups]", "group-1"))
+            .and(wiremock::matchers::query_param_is_missing("cursor"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": [{
+                    "type": "betaTesters",
+                    "id": "tester-1",
+                    "attributes": { "email": "a@example.com" }
+                }],
+                "links": { "next": next }
+            })))
+            .mount(&server)
+            .await;
+
+        // Page 2: the cursor encoded in `links.next` must be fetched verbatim.
+        Mock::given(method("GET"))
+            .and(path("/v1/betaTesters"))
+            .and(query_param("cursor", "PAGE2"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": [{
+                    "type": "betaTesters",
+                    "id": "tester-2",
+                    "attributes": { "email": "b@example.com" }
+                }],
+                "links": {}
+            })))
+            .mount(&server)
+            .await;
+
+        let testers = client(server.uri())
+            .fetch_beta_testers("group-1", 50)
+            .await
+            .unwrap();
+        assert_eq!(testers.len(), 2);
+        assert_eq!(testers[0].id, "tester-1");
+        assert_eq!(testers[1].id, "tester-2");
+        assert_eq!(testers[1].email.as_deref(), Some("b@example.com"));
+    }
+
+    #[tokio::test]
+    async fn fetch_beta_testers_surfaces_http_error() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v1/betaTesters"))
+            .respond_with(ResponseTemplate::new(403).set_body_string("forbidden"))
+            .mount(&server)
+            .await;
+
+        let err = client(server.uri())
+            .fetch_beta_testers("group-1", 20)
             .await
             .unwrap_err();
         assert!(matches!(err, StackError::Http { status: 403, .. }));

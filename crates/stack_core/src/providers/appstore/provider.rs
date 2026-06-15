@@ -5,11 +5,12 @@ use async_trait::async_trait;
 use super::client::AppStoreClient;
 use crate::auth::es256::AppStoreAuthenticator;
 use crate::domain::{
-    AppInfo, AppStoreVersionInfo, BuildInfo, CustomerReview, CustomerReviewsPage, ReviewResponse,
-    ReviewSubmission,
+    AppInfo, AppStoreVersionInfo, BetaGroupInfo, BetaTesterInfo, BuildInfo, CustomerReview,
+    CustomerReviewsPage, ReviewResponse, ReviewSubmission,
 };
 use crate::error::StackError;
 use crate::service::capabilities::app_store_versions::{AppStoreVersions, AppStoreVersionsImpl};
+use crate::service::capabilities::beta_groups::{BetaGroups, BetaGroupsImpl};
 use crate::service::capabilities::builds::{Builds, BuildsImpl};
 use crate::service::capabilities::reviews::{Reviews, ReviewsImpl};
 use crate::service::kind::ServiceKind;
@@ -46,6 +47,7 @@ impl ProviderImpl for AppStoreProvider {
             Capability::Reviews,
             Capability::AppStoreVersions,
             Capability::Builds,
+            Capability::BetaGroups,
         ]
     }
 
@@ -71,6 +73,12 @@ impl ProviderImpl for AppStoreProvider {
 
     fn builds(&self) -> Option<Arc<Builds>> {
         Some(Builds::new(Box::new(AppStoreBuilds {
+            client: Arc::clone(&self.client),
+        })))
+    }
+
+    fn beta_groups(&self) -> Option<Arc<BetaGroups>> {
+        Some(BetaGroups::new(Box::new(AppStoreBetaGroups {
             client: Arc::clone(&self.client),
         })))
     }
@@ -195,6 +203,32 @@ impl BuildsImpl for AppStoreBuilds {
     }
 }
 
+/// App Store Connect implementation of the [`BetaGroupsImpl`] capability
+/// contract. Holds a shared [`AppStoreClient`] so it reuses the provider's token
+/// cache.
+struct AppStoreBetaGroups {
+    client: Arc<AppStoreClient>,
+}
+
+#[async_trait]
+impl BetaGroupsImpl for AppStoreBetaGroups {
+    async fn fetch_beta_groups(
+        &self,
+        app_id: String,
+        limit: u32,
+    ) -> Result<Vec<BetaGroupInfo>, StackError> {
+        self.client.fetch_beta_groups(&app_id, limit).await
+    }
+
+    async fn fetch_beta_testers(
+        &self,
+        group_id: String,
+        limit: u32,
+    ) -> Result<Vec<BetaTesterInfo>, StackError> {
+        self.client.fetch_beta_testers(&group_id, limit).await
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -217,7 +251,8 @@ mod tests {
                 Capability::Apps,
                 Capability::Reviews,
                 Capability::AppStoreVersions,
-                Capability::Builds
+                Capability::Builds,
+                Capability::BetaGroups
             ]
         );
     }
@@ -246,5 +281,13 @@ mod tests {
         // App Store Connect supports Builds, so the accessor must return `Some`.
         assert!(provider().builds().is_some());
         assert!(provider().capabilities().contains(&Capability::Builds));
+    }
+
+    #[test]
+    fn exposes_beta_groups_capability_handle() {
+        // App Store Connect supports Beta Groups, so the accessor must return
+        // `Some`.
+        assert!(provider().beta_groups().is_some());
+        assert!(provider().capabilities().contains(&Capability::BetaGroups));
     }
 }

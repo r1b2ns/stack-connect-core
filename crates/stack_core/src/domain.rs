@@ -91,3 +91,32 @@ pub struct BuildInfo {
     pub min_os_version: Option<String>,
     pub expiration_date: Option<String>,
 }
+
+/// A TestFlight beta group (internal or external) of an app. Dates are raw
+/// ISO8601 strings; the core does no date parsing (the host owns that).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, uniffi::Record)]
+#[serde(rename_all = "camelCase")]
+pub struct BetaGroupInfo {
+    pub id: String,
+    pub app_id: String,
+    pub name: Option<String>,
+    pub created_date: Option<String>,
+    pub is_internal_group: Option<bool>,
+    pub has_access_to_all_builds: Option<bool>,
+    pub public_link_enabled: Option<bool>,
+    pub public_link: Option<String>,
+    pub feedback_enabled: Option<bool>,
+}
+
+/// A TestFlight beta tester. `invite_type` and `state` are the raw ASC values
+/// passed through verbatim; the core does no remapping.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, uniffi::Record)]
+#[serde(rename_all = "camelCase")]
+pub struct BetaTesterInfo {
+    pub id: String,
+    pub first_name: Option<String>,
+    pub last_name: Option<String>,
+    pub email: Option<String>,
+    pub invite_type: Option<String>,
+    pub state: Option<String>,
+}
