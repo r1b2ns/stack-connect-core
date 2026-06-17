@@ -6,6 +6,7 @@ use crate::domain::AppInfo;
 use crate::error::StackError;
 use crate::service::capabilities::app_store_versions::AppStoreVersions;
 use crate::service::capabilities::beta_app_localizations::BetaAppLocalizations;
+use crate::service::capabilities::beta_app_review_detail::BetaAppReviewDetail;
 use crate::service::capabilities::beta_build_localizations::BetaBuildLocalizations;
 use crate::service::capabilities::beta_groups::BetaGroups;
 use crate::service::capabilities::builds::Builds;
@@ -25,6 +26,7 @@ pub enum Capability {
     BetaGroups,
     BetaBuildLocalizations,
     BetaAppLocalizations,
+    BetaAppReviewDetail,
 }
 
 /// Internal, non-exported contract every concrete plugin implements. Kept off the
@@ -83,6 +85,13 @@ pub(crate) trait ProviderImpl: Send + Sync {
     /// lacks [`Capability::BetaAppLocalizations`]. Default `None` so providers
     /// opt in explicitly.
     fn beta_app_localizations(&self) -> Option<Arc<BetaAppLocalizations>> {
+        None
+    }
+
+    /// The Beta App Review Detail capability handle, or `None` if this provider
+    /// lacks [`Capability::BetaAppReviewDetail`]. Default `None` so providers opt
+    /// in explicitly.
+    fn beta_app_review_detail(&self) -> Option<Arc<BetaAppReviewDetail>> {
         None
     }
 }
@@ -160,6 +169,14 @@ impl Provider {
     /// `None` when beta app localizations are unsupported.
     pub fn beta_app_localizations(&self) -> Option<Arc<BetaAppLocalizations>> {
         self.inner.beta_app_localizations()
+    }
+
+    /// The Beta App Review Detail capability handle, or `None` when this provider
+    /// does not expose [`Capability::BetaAppReviewDetail`]. This is the discovery
+    /// mechanism: the host calls `provider.beta_app_review_detail()` and gets
+    /// `None` when the beta app review detail is unsupported.
+    pub fn beta_app_review_detail(&self) -> Option<Arc<BetaAppReviewDetail>> {
+        self.inner.beta_app_review_detail()
     }
 }
 

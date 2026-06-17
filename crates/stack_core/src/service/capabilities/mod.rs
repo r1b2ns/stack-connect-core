@@ -10,6 +10,7 @@
 
 pub(crate) mod app_store_versions;
 pub(crate) mod beta_app_localizations;
+pub(crate) mod beta_app_review_detail;
 pub(crate) mod beta_build_localizations;
 pub(crate) mod beta_groups;
 pub(crate) mod builds;

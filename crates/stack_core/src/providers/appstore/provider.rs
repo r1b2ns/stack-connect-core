@@ -5,14 +5,17 @@ use async_trait::async_trait;
 use super::client::AppStoreClient;
 use crate::auth::es256::AppStoreAuthenticator;
 use crate::domain::{
-    AppInfo, AppStoreVersionInfo, BetaAppLocalizationInfo, BetaBuildLocalizationInfo, BetaGroupInfo,
-    BetaTesterInfo, BuildInfo, CustomerReview, CustomerReviewsPage, ReviewResponse,
-    ReviewSubmission,
+    AppInfo, AppStoreVersionInfo, BetaAppLocalizationInfo, BetaAppReviewDetailInfo,
+    BetaBuildLocalizationInfo, BetaGroupInfo, BetaTesterInfo, BuildInfo, CustomerReview,
+    CustomerReviewsPage, ReviewResponse, ReviewSubmission,
 };
 use crate::error::StackError;
 use crate::service::capabilities::app_store_versions::{AppStoreVersions, AppStoreVersionsImpl};
 use crate::service::capabilities::beta_app_localizations::{
     BetaAppLocalizations, BetaAppLocalizationsImpl,
+};
+use crate::service::capabilities::beta_app_review_detail::{
+    BetaAppReviewDetail, BetaAppReviewDetailImpl,
 };
 use crate::service::capabilities::beta_build_localizations::{
     BetaBuildLocalizations, BetaBuildLocalizationsImpl,
@@ -57,6 +60,7 @@ impl ProviderImpl for AppStoreProvider {
             Capability::BetaGroups,
             Capability::BetaBuildLocalizations,
             Capability::BetaAppLocalizations,
+            Capability::BetaAppReviewDetail,
         ]
     }
 
@@ -103,6 +107,14 @@ impl ProviderImpl for AppStoreProvider {
     fn beta_app_localizations(&self) -> Option<Arc<BetaAppLocalizations>> {
         Some(BetaAppLocalizations::new(Box::new(
             AppStoreBetaAppLocalizations {
+                client: Arc::clone(&self.client),
+            },
+        )))
+    }
+
+    fn beta_app_review_detail(&self) -> Option<Arc<BetaAppReviewDetail>> {
+        Some(BetaAppReviewDetail::new(Box::new(
+            AppStoreBetaAppReviewDetail {
                 client: Arc::clone(&self.client),
             },
         )))
@@ -410,6 +422,50 @@ impl BetaAppLocalizationsImpl for AppStoreBetaAppLocalizations {
     }
 }
 
+/// App Store Connect implementation of the [`BetaAppReviewDetailImpl`]
+/// capability contract. Holds a shared [`AppStoreClient`] so it reuses the
+/// provider's token cache.
+struct AppStoreBetaAppReviewDetail {
+    client: Arc<AppStoreClient>,
+}
+
+#[async_trait]
+impl BetaAppReviewDetailImpl for AppStoreBetaAppReviewDetail {
+    async fn fetch_beta_app_review_detail(
+        &self,
+        app_id: String,
+    ) -> Result<BetaAppReviewDetailInfo, StackError> {
+        self.client.fetch_beta_app_review_detail(&app_id).await
+    }
+
+    async fn update_beta_app_review_detail(
+        &self,
+        detail_id: String,
+        contact_first_name: Option<String>,
+        contact_last_name: Option<String>,
+        contact_email: Option<String>,
+        contact_phone: Option<String>,
+        demo_account_name: Option<String>,
+        demo_account_password: Option<String>,
+        is_demo_account_required: Option<bool>,
+        notes: Option<String>,
+    ) -> Result<BetaAppReviewDetailInfo, StackError> {
+        self.client
+            .update_beta_app_review_detail(
+                &detail_id,
+                contact_first_name.as_deref(),
+                contact_last_name.as_deref(),
+                contact_email.as_deref(),
+                contact_phone.as_deref(),
+                demo_account_name.as_deref(),
+                demo_account_password.as_deref(),
+                is_demo_account_required,
+                notes.as_deref(),
+            )
+            .await
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -435,7 +491,8 @@ mod tests {
                 Capability::Builds,
                 Capability::BetaGroups,
                 Capability::BetaBuildLocalizations,
-                Capability::BetaAppLocalizations
+                Capability::BetaAppLocalizations,
+                Capability::BetaAppReviewDetail
             ]
         );
     }
@@ -492,5 +549,15 @@ mod tests {
         assert!(provider()
             .capabilities()
             .contains(&Capability::BetaAppLocalizations));
+    }
+
+    #[test]
+    fn exposes_beta_app_review_detail_capability_handle() {
+        // App Store Connect supports the Beta App Review Detail, so the accessor
+        // must return `Some`.
+        assert!(provider().beta_app_review_detail().is_some());
+        assert!(provider()
+            .capabilities()
+            .contains(&Capability::BetaAppReviewDetail));
     }
 }

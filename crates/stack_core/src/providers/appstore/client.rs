@@ -5,9 +5,9 @@ use serde_json::json;
 
 use crate::auth::es256::AppStoreAuthenticator;
 use crate::domain::{
-    AppInfo, AppStoreVersionInfo, BetaAppLocalizationInfo, BetaBuildLocalizationInfo, BetaGroupInfo,
-    BetaTesterInfo, BuildInfo, CustomerReview, CustomerReviewsPage, ReviewResponse,
-    ReviewSubmission,
+    AppInfo, AppStoreVersionInfo, BetaAppLocalizationInfo, BetaAppReviewDetailInfo,
+    BetaBuildLocalizationInfo, BetaGroupInfo, BetaTesterInfo, BuildInfo, CustomerReview,
+    CustomerReviewsPage, ReviewResponse, ReviewSubmission,
 };
 use crate::error::StackError;
 
@@ -662,6 +662,63 @@ impl BetaAppLocalizationResource {
             locale: self.attributes.locale.unwrap_or_default(),
             feedback_email: self.attributes.feedback_email,
             description: self.attributes.description,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Beta app review detail (JSON:API)
+// ---------------------------------------------------------------------------
+
+/// A JSON:API single-resource document wrapping one `betaAppReviewDetails`, as
+/// returned by the app-relationship fetch (`GET`) and the update (`PATCH`)
+/// endpoints: `{ "data": { ... } }`. App Store Connect exposes exactly one beta
+/// app review detail per app, so this is a single object, not a list.
+#[derive(Deserialize)]
+struct BetaAppReviewDetailDocument {
+    data: BetaAppReviewDetailResource,
+}
+
+#[derive(Deserialize)]
+struct BetaAppReviewDetailResource {
+    id: String,
+    #[serde(default)]
+    attributes: BetaAppReviewDetailAttributes,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct BetaAppReviewDetailAttributes {
+    #[serde(default)]
+    contact_first_name: Option<String>,
+    #[serde(default)]
+    contact_last_name: Option<String>,
+    #[serde(default)]
+    contact_email: Option<String>,
+    #[serde(default)]
+    contact_phone: Option<String>,
+    #[serde(default)]
+    demo_account_name: Option<String>,
+    #[serde(default)]
+    demo_account_password: Option<String>,
+    #[serde(default)]
+    is_demo_account_required: Option<bool>,
+    #[serde(default)]
+    notes: Option<String>,
+}
+
+impl BetaAppReviewDetailResource {
+    fn into_beta_app_review_detail_info(self) -> BetaAppReviewDetailInfo {
+        BetaAppReviewDetailInfo {
+            id: self.id,
+            contact_first_name: self.attributes.contact_first_name,
+            contact_last_name: self.attributes.contact_last_name,
+            contact_email: self.attributes.contact_email,
+            contact_phone: self.attributes.contact_phone,
+            demo_account_name: self.attributes.demo_account_name,
+            demo_account_password: self.attributes.demo_account_password,
+            is_demo_account_required: self.attributes.is_demo_account_required,
+            notes: self.attributes.notes,
         }
     }
 }
@@ -1959,6 +2016,143 @@ impl AppStoreClient {
         let document: BetaAppLocalizationDocument = serde_json::from_str(&response_body)
             .map_err(|e| StackError::decode(format!("beta app localization response: {e}")))?;
         Ok(document.data.into_beta_app_localization_info())
+    }
+
+    /// Fetches the single beta app review detail for `app_id`, mapping it into a
+    /// [`BetaAppReviewDetailInfo`].
+    ///
+    /// `GET /v1/apps/{app_id}/betaAppReviewDetail` — the app's singular
+    /// relationship endpoint, which returns a single-resource document
+    /// (`{ "data": { ... } }`), not a list. There is no pagination.
+    ///
+    /// # Errors
+    /// [`StackError::PendingAgreements`] on a pending-agreements 403,
+    /// [`StackError::Http`] on any other non-2xx response, [`StackError::Decode`]
+    /// on malformed JSON, or [`StackError::Network`] on transport failure.
+    pub(crate) async fn fetch_beta_app_review_detail(
+        &self,
+        app_id: &str,
+    ) -> Result<BetaAppReviewDetailInfo, StackError> {
+        let url = format!("{}/v1/apps/{app_id}/betaAppReviewDetail", self.base_url);
+        let token = self.auth.bearer_token().await?;
+
+        let response = self
+            .http
+            .get(&url)
+            .bearer_auth(token)
+            .send()
+            .await
+            .map_err(|e| StackError::network(e.to_string()))?;
+
+        let status = response.status();
+        let response_body = response
+            .text()
+            .await
+            .map_err(|e| StackError::network(e.to_string()))?;
+        if !status.is_success() {
+            if let Some(err) = pending_agreements_error(status.as_u16(), &response_body) {
+                return Err(err);
+            }
+            return Err(StackError::Http {
+                status: status.as_u16(),
+                message: response_body,
+            });
+        }
+
+        let document: BetaAppReviewDetailDocument = serde_json::from_str(&response_body)
+            .map_err(|e| StackError::decode(format!("beta app review detail response: {e}")))?;
+        Ok(document.data.into_beta_app_review_detail_info())
+    }
+
+    /// Updates the beta app review detail identified by `detail_id`, replacing
+    /// only the provided attributes.
+    ///
+    /// `PATCH /v1/betaAppReviewDetails/{detail_id}` (note the plural path
+    /// segment) with a JSON:API body that includes only the `Some` attributes
+    /// and no relationships. Success is any 2xx (`200 OK`); the returned
+    /// single-resource document is mapped into a [`BetaAppReviewDetailInfo`].
+    ///
+    /// # Errors
+    /// [`StackError::PendingAgreements`] on a pending-agreements 403,
+    /// [`StackError::Http`] on any other non-2xx response, [`StackError::Decode`]
+    /// on malformed JSON, or [`StackError::Network`] on transport failure.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn update_beta_app_review_detail(
+        &self,
+        detail_id: &str,
+        contact_first_name: Option<&str>,
+        contact_last_name: Option<&str>,
+        contact_email: Option<&str>,
+        contact_phone: Option<&str>,
+        demo_account_name: Option<&str>,
+        demo_account_password: Option<&str>,
+        is_demo_account_required: Option<bool>,
+        notes: Option<&str>,
+    ) -> Result<BetaAppReviewDetailInfo, StackError> {
+        let url = format!("{}/v1/betaAppReviewDetails/{detail_id}", self.base_url);
+        let token = self.auth.bearer_token().await?;
+
+        let mut attributes = serde_json::Map::new();
+        if let Some(value) = contact_first_name {
+            attributes.insert("contactFirstName".into(), json!(value));
+        }
+        if let Some(value) = contact_last_name {
+            attributes.insert("contactLastName".into(), json!(value));
+        }
+        if let Some(value) = contact_email {
+            attributes.insert("contactEmail".into(), json!(value));
+        }
+        if let Some(value) = contact_phone {
+            attributes.insert("contactPhone".into(), json!(value));
+        }
+        if let Some(value) = demo_account_name {
+            attributes.insert("demoAccountName".into(), json!(value));
+        }
+        if let Some(value) = demo_account_password {
+            attributes.insert("demoAccountPassword".into(), json!(value));
+        }
+        if let Some(value) = is_demo_account_required {
+            attributes.insert("isDemoAccountRequired".into(), json!(value));
+        }
+        if let Some(value) = notes {
+            attributes.insert("notes".into(), json!(value));
+        }
+
+        let request_body = json!({
+            "data": {
+                "type": "betaAppReviewDetails",
+                "id": detail_id,
+                "attributes": attributes
+            }
+        });
+
+        let response = self
+            .http
+            .patch(&url)
+            .bearer_auth(token)
+            .json(&request_body)
+            .send()
+            .await
+            .map_err(|e| StackError::network(e.to_string()))?;
+
+        let status = response.status();
+        let response_body = response
+            .text()
+            .await
+            .map_err(|e| StackError::network(e.to_string()))?;
+        if !status.is_success() {
+            if let Some(err) = pending_agreements_error(status.as_u16(), &response_body) {
+                return Err(err);
+            }
+            return Err(StackError::Http {
+                status: status.as_u16(),
+                message: response_body,
+            });
+        }
+
+        let document: BetaAppReviewDetailDocument = serde_json::from_str(&response_body)
+            .map_err(|e| StackError::decode(format!("beta app review detail response: {e}")))?;
+        Ok(document.data.into_beta_app_review_detail_info())
     }
 
     /// Authenticated `GET` of one JSON:API page, returning the raw body or mapping
@@ -3906,6 +4100,218 @@ mod tests {
 
         let err = client(server.uri())
             .update_beta_app_localization("loc-1", Some("beta@example.com"), None)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, StackError::Http { status: 404, .. }));
+    }
+
+    #[tokio::test]
+    async fn fetch_beta_app_review_detail_maps_all_fields() {
+        let server = MockServer::start().await;
+
+        // The singular app-relationship endpoint returns a single-resource
+        // document with every attribute populated.
+        Mock::given(method("GET"))
+            .and(path("/v1/apps/app-1/betaAppReviewDetail"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": {
+                    "type": "betaAppReviewDetails",
+                    "id": "detail-1",
+                    "attributes": {
+                        "contactFirstName": "Ada",
+                        "contactLastName": "Lovelace",
+                        "contactEmail": "ada@example.com",
+                        "contactPhone": "+15551234567",
+                        "demoAccountName": "demo-user",
+                        "demoAccountPassword": "s3cr3t",
+                        "isDemoAccountRequired": true,
+                        "notes": "Use the demo account to reach the paywall."
+                    }
+                }
+            })))
+            .mount(&server)
+            .await;
+
+        let detail = client(server.uri())
+            .fetch_beta_app_review_detail("app-1")
+            .await
+            .unwrap();
+
+        assert_eq!(detail.id, "detail-1");
+        assert_eq!(detail.contact_first_name.as_deref(), Some("Ada"));
+        assert_eq!(detail.contact_last_name.as_deref(), Some("Lovelace"));
+        assert_eq!(detail.contact_email.as_deref(), Some("ada@example.com"));
+        assert_eq!(detail.contact_phone.as_deref(), Some("+15551234567"));
+        assert_eq!(detail.demo_account_name.as_deref(), Some("demo-user"));
+        assert_eq!(detail.demo_account_password.as_deref(), Some("s3cr3t"));
+        assert_eq!(detail.is_demo_account_required, Some(true));
+        assert_eq!(
+            detail.notes.as_deref(),
+            Some("Use the demo account to reach the paywall.")
+        );
+    }
+
+    #[tokio::test]
+    async fn fetch_beta_app_review_detail_handles_missing_attributes() {
+        let server = MockServer::start().await;
+
+        // A sparse detail: only `id` present, attributes object empty/absent,
+        // exercising the all-`None` mapping path.
+        Mock::given(method("GET"))
+            .and(path("/v1/apps/app-1/betaAppReviewDetail"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": {
+                    "type": "betaAppReviewDetails",
+                    "id": "detail-2"
+                }
+            })))
+            .mount(&server)
+            .await;
+
+        let detail = client(server.uri())
+            .fetch_beta_app_review_detail("app-1")
+            .await
+            .unwrap();
+
+        assert_eq!(detail.id, "detail-2");
+        assert!(detail.contact_first_name.is_none());
+        assert!(detail.contact_last_name.is_none());
+        assert!(detail.contact_email.is_none());
+        assert!(detail.contact_phone.is_none());
+        assert!(detail.demo_account_name.is_none());
+        assert!(detail.demo_account_password.is_none());
+        assert!(detail.is_demo_account_required.is_none());
+        assert!(detail.notes.is_none());
+    }
+
+    #[tokio::test]
+    async fn fetch_beta_app_review_detail_surfaces_http_error() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v1/apps/app-1/betaAppReviewDetail"))
+            .respond_with(ResponseTemplate::new(404).set_body_string("not found"))
+            .mount(&server)
+            .await;
+
+        let err = client(server.uri())
+            .fetch_beta_app_review_detail("app-1")
+            .await
+            .unwrap_err();
+        assert!(matches!(err, StackError::Http { status: 404, .. }));
+    }
+
+    #[tokio::test]
+    async fn update_beta_app_review_detail_patches_and_maps() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("PATCH"))
+            .and(path("/v1/betaAppReviewDetails/detail-1"))
+            // Only the provided attributes should be present; no relationships.
+            // `isDemoAccountRequired` is sent as a bool.
+            .and(wiremock::matchers::body_partial_json(serde_json::json!({
+                "data": {
+                    "type": "betaAppReviewDetails",
+                    "id": "detail-1",
+                    "attributes": {
+                        "contactEmail": "ada@example.com",
+                        "isDemoAccountRequired": false
+                    }
+                }
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": {
+                    "type": "betaAppReviewDetails",
+                    "id": "detail-1",
+                    "attributes": {
+                        "contactFirstName": "Ada",
+                        "contactLastName": "Lovelace",
+                        "contactEmail": "ada@example.com",
+                        "contactPhone": "+15551234567",
+                        "demoAccountName": "demo-user",
+                        "demoAccountPassword": "s3cr3t",
+                        "isDemoAccountRequired": false,
+                        "notes": "No demo account needed."
+                    }
+                }
+            })))
+            .mount(&server)
+            .await;
+
+        let detail = client(server.uri())
+            .update_beta_app_review_detail(
+                "detail-1",
+                None,
+                None,
+                Some("ada@example.com"),
+                None,
+                None,
+                None,
+                Some(false),
+                None,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(detail.id, "detail-1");
+        assert_eq!(detail.contact_email.as_deref(), Some("ada@example.com"));
+        assert_eq!(detail.is_demo_account_required, Some(false));
+        assert_eq!(detail.notes.as_deref(), Some("No demo account needed."));
+    }
+
+    #[tokio::test]
+    async fn update_beta_app_review_detail_surfaces_pending_agreements() {
+        let server = MockServer::start().await;
+        Mock::given(method("PATCH"))
+            .and(path("/v1/betaAppReviewDetails/detail-1"))
+            .respond_with(ResponseTemplate::new(403).set_body_json(serde_json::json!({
+                "errors": [{ "detail": "The agreement is pending." }]
+            })))
+            .mount(&server)
+            .await;
+
+        let err = client(server.uri())
+            .update_beta_app_review_detail(
+                "detail-1",
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+            .await
+            .unwrap_err();
+        match err {
+            StackError::PendingAgreements { message } => {
+                assert!(message.contains("pending agreements"))
+            }
+            other => panic!("expected PendingAgreements, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn update_beta_app_review_detail_surfaces_http_error() {
+        let server = MockServer::start().await;
+        Mock::given(method("PATCH"))
+            .and(path("/v1/betaAppReviewDetails/detail-1"))
+            .respond_with(ResponseTemplate::new(404).set_body_string("not found"))
+            .mount(&server)
+            .await;
+
+        let err = client(server.uri())
+            .update_beta_app_review_detail(
+                "detail-1",
+                Some("Ada"),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
             .await
             .unwrap_err();
         assert!(matches!(err, StackError::Http { status: 404, .. }));

@@ -130,6 +130,24 @@ pub struct BetaAppLocalizationInfo {
     pub description: Option<String>,
 }
 
+/// The TestFlight "Test Information" beta review detail for an app: the beta
+/// review contact (name, email, phone), optional demo account credentials, and
+/// reviewer notes. App Store Connect exposes exactly one per app (the singular
+/// `betaAppReviewDetail` relationship). All attributes are optional.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, uniffi::Record)]
+#[serde(rename_all = "camelCase")]
+pub struct BetaAppReviewDetailInfo {
+    pub id: String,
+    pub contact_first_name: Option<String>,
+    pub contact_last_name: Option<String>,
+    pub contact_email: Option<String>,
+    pub contact_phone: Option<String>,
+    pub demo_account_name: Option<String>,
+    pub demo_account_password: Option<String>,
+    pub is_demo_account_required: Option<bool>,
+    pub notes: Option<String>,
+}
+
 /// A TestFlight beta tester. `invite_type` and `state` are the raw ASC values
 /// passed through verbatim; the core does no remapping.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, uniffi::Record)]
