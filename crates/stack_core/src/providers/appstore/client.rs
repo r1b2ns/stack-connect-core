@@ -536,6 +536,41 @@ struct BetaTesterDocument {
     data: BetaTesterResource,
 }
 
+/// Minimal projection of a JSON:API collection used solely to read the total
+/// item count from `meta.paging.total`. The full resource list is ignored, so a
+/// `limit=1` request can report the count without materializing every tester.
+#[derive(Deserialize, Default)]
+struct BetaTestersCountResponse {
+    #[serde(default)]
+    meta: Option<Meta>,
+}
+
+/// JSON:API top-level `meta` object, narrowed to the paging block we read.
+#[derive(Deserialize, Default)]
+struct Meta {
+    #[serde(default)]
+    paging: Option<Paging>,
+}
+
+/// JSON:API `meta.paging` object, narrowed to the `total` count.
+#[derive(Deserialize, Default)]
+struct Paging {
+    #[serde(default)]
+    total: u32,
+}
+
+impl BetaTestersCountResponse {
+    /// The reported total, defaulting to `0` when `meta`/`paging`/`total` is
+    /// absent.
+    fn total(&self) -> u32 {
+        self.meta
+            .as_ref()
+            .and_then(|m| m.paging.as_ref())
+            .map(|p| p.total)
+            .unwrap_or(0)
+    }
+}
+
 #[derive(Deserialize)]
 struct BetaTesterResource {
     id: String,
@@ -1914,6 +1949,88 @@ impl AppStoreClient {
         let response = self
             .http
             .delete(&url)
+            .bearer_auth(token)
+            .json(&request_body)
+            .send()
+            .await
+            .map_err(|e| StackError::network(e.to_string()))?;
+
+        let status = response.status();
+        if status.is_success() {
+            return Ok(());
+        }
+
+        let body = response
+            .text()
+            .await
+            .map_err(|e| StackError::network(e.to_string()))?;
+        if let Some(err) = pending_agreements_error(status.as_u16(), &body) {
+            return Err(err);
+        }
+        Err(StackError::Http {
+            status: status.as_u16(),
+            message: body,
+        })
+    }
+
+    /// Returns the number of beta testers belonging to `group_id`.
+    ///
+    /// `GET /v1/betaGroups/{group_id}/betaTesters?limit=1`. The full list is
+    /// intentionally not fetched and `links.next` is not followed; the count is
+    /// read from the JSON:API `meta.paging.total` field and defaults to `0` when
+    /// that field is absent.
+    ///
+    /// # Errors
+    /// [`StackError::PendingAgreements`] on a pending-agreements 403,
+    /// [`StackError::Http`] on any other non-2xx response, [`StackError::Decode`]
+    /// on malformed JSON, or [`StackError::Network`] on transport failure.
+    pub(crate) async fn fetch_tester_count(&self, group_id: &str) -> Result<u32, StackError> {
+        let url = format!(
+            "{}/v1/betaGroups/{group_id}/betaTesters?limit=1",
+            self.base_url
+        );
+        // `get_page` already routes non-2xx (incl. the pending-agreements 403)
+        // through `pending_agreements_error`.
+        let body = self.get_page(&url).await?;
+        let response: BetaTestersCountResponse = serde_json::from_str(&body)
+            .map_err(|e| StackError::decode(format!("beta testers count response: {e}")))?;
+        Ok(response.total())
+    }
+
+    /// Resends the TestFlight invite for beta tester `tester_id` on `app_id`.
+    ///
+    /// `POST /v1/betaTesterInvitations` with a JSON:API body carrying the
+    /// `betaTester` and `app` relationships. Any 2xx is treated as success; the
+    /// response body (if any) is ignored.
+    ///
+    /// # Errors
+    /// [`StackError::PendingAgreements`] on a pending-agreements 403,
+    /// [`StackError::Http`] on any other non-2xx response, or
+    /// [`StackError::Network`] on transport failure.
+    pub(crate) async fn resend_invite(
+        &self,
+        tester_id: &str,
+        app_id: &str,
+    ) -> Result<(), StackError> {
+        let url = format!("{}/v1/betaTesterInvitations", self.base_url);
+        let token = self.auth.bearer_token().await?;
+        let request_body = json!({
+            "data": {
+                "type": "betaTesterInvitations",
+                "relationships": {
+                    "betaTester": {
+                        "data": { "type": "betaTesters", "id": tester_id }
+                    },
+                    "app": {
+                        "data": { "type": "apps", "id": app_id }
+                    }
+                }
+            }
+        });
+
+        let response = self
+            .http
+            .post(&url)
             .bearer_auth(token)
             .json(&request_body)
             .send()
@@ -4070,6 +4187,139 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(err, StackError::Http { status: 403, .. }));
+    }
+
+    #[tokio::test]
+    async fn fetch_tester_count_reads_meta_paging_total() {
+        let server = MockServer::start().await;
+
+        // The request must cap the page at one item and not fetch the list; the
+        // count comes from `meta.paging.total` (42) even though `data` carries a
+        // single tester.
+        Mock::given(method("GET"))
+            .and(path("/v1/betaGroups/group-1/betaTesters"))
+            .and(query_param("limit", "1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": [
+                    { "type": "betaTesters", "id": "tester-1", "attributes": {} }
+                ],
+                "meta": { "paging": { "total": 42, "limit": 1 } }
+            })))
+            .mount(&server)
+            .await;
+
+        let count = client(server.uri())
+            .fetch_tester_count("group-1")
+            .await
+            .unwrap();
+        assert_eq!(count, 42);
+    }
+
+    #[tokio::test]
+    async fn fetch_tester_count_defaults_to_zero_without_meta() {
+        let server = MockServer::start().await;
+
+        // No `meta` block at all → the count falls back to 0.
+        Mock::given(method("GET"))
+            .and(path("/v1/betaGroups/group-1/betaTesters"))
+            .and(query_param("limit", "1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": []
+            })))
+            .mount(&server)
+            .await;
+
+        let count = client(server.uri())
+            .fetch_tester_count("group-1")
+            .await
+            .unwrap();
+        assert_eq!(count, 0);
+    }
+
+    #[tokio::test]
+    async fn fetch_tester_count_surfaces_http_error() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v1/betaGroups/group-1/betaTesters"))
+            .respond_with(ResponseTemplate::new(500).set_body_string("boom"))
+            .mount(&server)
+            .await;
+
+        let err = client(server.uri())
+            .fetch_tester_count("group-1")
+            .await
+            .unwrap_err();
+        assert!(matches!(err, StackError::Http { status: 500, .. }));
+    }
+
+    #[tokio::test]
+    async fn resend_invite_posts_invitation() {
+        let server = MockServer::start().await;
+
+        // Assert the betaTesterInvitations POST body shape: the betaTester and
+        // app relationships are both carried.
+        Mock::given(method("POST"))
+            .and(path("/v1/betaTesterInvitations"))
+            .and(wiremock::matchers::body_partial_json(serde_json::json!({
+                "data": {
+                    "type": "betaTesterInvitations",
+                    "relationships": {
+                        "betaTester": {
+                            "data": { "type": "betaTesters", "id": "tester-1" }
+                        },
+                        "app": {
+                            "data": { "type": "apps", "id": "APP1" }
+                        }
+                    }
+                }
+            })))
+            .respond_with(ResponseTemplate::new(201))
+            .mount(&server)
+            .await;
+
+        assert!(client(server.uri())
+            .resend_invite("tester-1", "APP1")
+            .await
+            .is_ok());
+    }
+
+    #[tokio::test]
+    async fn resend_invite_surfaces_pending_agreements() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/betaTesterInvitations"))
+            .respond_with(ResponseTemplate::new(403).set_body_json(serde_json::json!({
+                "errors": [{ "detail": "The agreement is pending." }]
+            })))
+            .mount(&server)
+            .await;
+
+        let err = client(server.uri())
+            .resend_invite("tester-1", "APP1")
+            .await
+            .unwrap_err();
+        match err {
+            StackError::PendingAgreements { message } => {
+                assert!(message.contains("pending agreements"))
+            }
+            other => panic!("expected PendingAgreements, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn resend_invite_surfaces_http_error() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/betaTesterInvitations"))
+            .respond_with(ResponseTemplate::new(409).set_body_string("conflict"))
+            .mount(&server)
+            .await;
+
+        let err = client(server.uri())
+            .resend_invite("tester-1", "APP1")
+            .await
+            .unwrap_err();
+        assert!(matches!(err, StackError::Http { status: 409, .. }));
     }
 
     #[tokio::test]

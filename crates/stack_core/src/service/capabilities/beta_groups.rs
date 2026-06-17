@@ -70,6 +70,12 @@ pub(crate) trait BetaGroupsImpl: Send + Sync {
         group_id: String,
         tester_id: String,
     ) -> Result<(), StackError>;
+
+    /// Returns the number of beta testers belonging to `group_id`.
+    async fn fetch_tester_count(&self, group_id: String) -> Result<u32, StackError>;
+
+    /// Resends the TestFlight invite for `tester_id` on `app_id`.
+    async fn resend_invite(&self, tester_id: String, app_id: String) -> Result<(), StackError>;
 }
 
 /// UniFFI-exported Beta Groups capability handle. A thin, binding-friendly
@@ -216,5 +222,32 @@ impl BetaGroups {
         tester_id: String,
     ) -> Result<(), StackError> {
         self.inner.remove_beta_tester(group_id, tester_id).await
+    }
+
+    /// Returns the number of beta testers belonging to `group_id`. Reads the
+    /// total from App Store Connect's paging metadata without materializing the
+    /// full tester list.
+    ///
+    /// # Errors
+    /// [`StackError::PendingAgreements`] when App Store Connect reports pending
+    /// agreements, [`StackError::Http`] on any other non-2xx response,
+    /// [`StackError::Decode`] on malformed JSON, or [`StackError::Network`] on
+    /// transport failure.
+    pub async fn fetch_tester_count(&self, group_id: String) -> Result<u32, StackError> {
+        self.inner.fetch_tester_count(group_id).await
+    }
+
+    /// Resends the TestFlight invite for the beta tester `tester_id` on `app_id`.
+    ///
+    /// # Errors
+    /// [`StackError::PendingAgreements`] when App Store Connect reports pending
+    /// agreements, [`StackError::Http`] on any other non-2xx response, or
+    /// [`StackError::Network`] on transport failure.
+    pub async fn resend_invite(
+        &self,
+        tester_id: String,
+        app_id: String,
+    ) -> Result<(), StackError> {
+        self.inner.resend_invite(tester_id, app_id).await
     }
 }

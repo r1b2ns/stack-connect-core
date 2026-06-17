@@ -365,6 +365,14 @@ impl BetaGroupsImpl for AppStoreBetaGroups {
     ) -> Result<(), StackError> {
         self.client.remove_beta_tester(&group_id, &tester_id).await
     }
+
+    async fn fetch_tester_count(&self, group_id: String) -> Result<u32, StackError> {
+        self.client.fetch_tester_count(&group_id).await
+    }
+
+    async fn resend_invite(&self, tester_id: String, app_id: String) -> Result<(), StackError> {
+        self.client.resend_invite(&tester_id, &app_id).await
+    }
 }
 
 /// App Store Connect implementation of the [`BetaBuildLocalizationsImpl`]
