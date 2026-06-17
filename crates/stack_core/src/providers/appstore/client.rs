@@ -5,8 +5,9 @@ use serde_json::json;
 
 use crate::auth::es256::AppStoreAuthenticator;
 use crate::domain::{
-    AppInfo, AppStoreVersionInfo, BetaBuildLocalizationInfo, BetaGroupInfo, BetaTesterInfo,
-    BuildInfo, CustomerReview, CustomerReviewsPage, ReviewResponse, ReviewSubmission,
+    AppInfo, AppStoreVersionInfo, BetaAppLocalizationInfo, BetaBuildLocalizationInfo, BetaGroupInfo,
+    BetaTesterInfo, BuildInfo, CustomerReview, CustomerReviewsPage, ReviewResponse,
+    ReviewSubmission,
 };
 use crate::error::StackError;
 
@@ -612,6 +613,55 @@ impl BetaBuildLocalizationResource {
             id: self.id,
             locale: self.attributes.locale.unwrap_or_default(),
             whats_new: self.attributes.whats_new,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Beta app localizations (JSON:API)
+// ---------------------------------------------------------------------------
+
+/// A JSON:API document page of `betaAppLocalizations` resources.
+#[derive(Deserialize)]
+struct BetaAppLocalizationsResponse {
+    #[serde(default)]
+    data: Vec<BetaAppLocalizationResource>,
+    #[serde(default)]
+    links: Links,
+}
+
+/// A JSON:API single-resource document wrapping one `betaAppLocalizations`, as
+/// returned by the create (POST) and update (PATCH) endpoints: `{ "data": { ... } }`.
+#[derive(Deserialize)]
+struct BetaAppLocalizationDocument {
+    data: BetaAppLocalizationResource,
+}
+
+#[derive(Deserialize)]
+struct BetaAppLocalizationResource {
+    id: String,
+    #[serde(default)]
+    attributes: BetaAppLocalizationAttributes,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct BetaAppLocalizationAttributes {
+    #[serde(default)]
+    locale: Option<String>,
+    #[serde(default)]
+    feedback_email: Option<String>,
+    #[serde(default)]
+    description: Option<String>,
+}
+
+impl BetaAppLocalizationResource {
+    fn into_beta_app_localization_info(self) -> BetaAppLocalizationInfo {
+        BetaAppLocalizationInfo {
+            id: self.id,
+            locale: self.attributes.locale.unwrap_or_default(),
+            feedback_email: self.attributes.feedback_email,
+            description: self.attributes.description,
         }
     }
 }
@@ -1731,6 +1781,184 @@ impl AppStoreClient {
         let document: BetaBuildLocalizationDocument = serde_json::from_str(&response_body)
             .map_err(|e| StackError::decode(format!("beta build localization response: {e}")))?;
         Ok(document.data.into_beta_build_localization_info())
+    }
+
+    /// Lists the beta app localizations for `app_id`, mapping each into a
+    /// [`BetaAppLocalizationInfo`].
+    ///
+    /// `GET /v1/apps/{app_id}/betaAppLocalizations?limit={limit}` — the app's
+    /// relationship list endpoint (note this is under `/apps/{id}/`, not a
+    /// `filter[app]` query) — following `links.next` pagination until exhausted
+    /// (`limit` is the page size).
+    ///
+    /// # Errors
+    /// [`StackError::Http`] on a non-2xx page, [`StackError::Decode`] on malformed
+    /// JSON, or [`StackError::Network`] on transport failure.
+    pub(crate) async fn fetch_beta_app_localizations(
+        &self,
+        app_id: &str,
+        limit: u32,
+    ) -> Result<Vec<BetaAppLocalizationInfo>, StackError> {
+        let mut localizations = Vec::new();
+        let mut next_url = Some(format!(
+            "{}/v1/apps/{app_id}/betaAppLocalizations?limit={limit}",
+            self.base_url
+        ));
+
+        while let Some(url) = next_url {
+            let body = self.get_page(&url).await?;
+            let page: BetaAppLocalizationsResponse = serde_json::from_str(&body).map_err(|e| {
+                StackError::decode(format!("beta app localizations response: {e}"))
+            })?;
+            localizations.extend(
+                page.data
+                    .into_iter()
+                    .map(BetaAppLocalizationResource::into_beta_app_localization_info),
+            );
+
+            // `links.next` is an absolute URL; follow it verbatim until absent.
+            next_url = page.links.next.filter(|u| !u.is_empty());
+        }
+
+        Ok(localizations)
+    }
+
+    /// Creates a beta app localization for `app_id` in `locale`.
+    ///
+    /// `POST /v1/betaAppLocalizations` with a JSON:API body that always carries
+    /// the `locale` attribute and includes `feedbackEmail`/`description` only when
+    /// `Some`, plus the `app` relationship. Success is any 2xx (`201 Created`); the
+    /// returned single-resource document is mapped into a
+    /// [`BetaAppLocalizationInfo`].
+    ///
+    /// # Errors
+    /// [`StackError::PendingAgreements`] on a pending-agreements 403,
+    /// [`StackError::Http`] on any other non-2xx response, [`StackError::Decode`]
+    /// on malformed JSON, or [`StackError::Network`] on transport failure.
+    pub(crate) async fn create_beta_app_localization(
+        &self,
+        app_id: &str,
+        locale: &str,
+        feedback_email: Option<&str>,
+        description: Option<&str>,
+    ) -> Result<BetaAppLocalizationInfo, StackError> {
+        let url = format!("{}/v1/betaAppLocalizations", self.base_url);
+        let token = self.auth.bearer_token().await?;
+
+        let mut attributes = serde_json::Map::new();
+        attributes.insert("locale".into(), json!(locale));
+        if let Some(value) = feedback_email {
+            attributes.insert("feedbackEmail".into(), json!(value));
+        }
+        if let Some(value) = description {
+            attributes.insert("description".into(), json!(value));
+        }
+
+        let request_body = json!({
+            "data": {
+                "type": "betaAppLocalizations",
+                "attributes": attributes,
+                "relationships": {
+                    "app": {
+                        "data": { "type": "apps", "id": app_id }
+                    }
+                }
+            }
+        });
+
+        let response = self
+            .http
+            .post(&url)
+            .bearer_auth(token)
+            .json(&request_body)
+            .send()
+            .await
+            .map_err(|e| StackError::network(e.to_string()))?;
+
+        let status = response.status();
+        let response_body = response
+            .text()
+            .await
+            .map_err(|e| StackError::network(e.to_string()))?;
+        if !status.is_success() {
+            if let Some(err) = pending_agreements_error(status.as_u16(), &response_body) {
+                return Err(err);
+            }
+            return Err(StackError::Http {
+                status: status.as_u16(),
+                message: response_body,
+            });
+        }
+
+        let document: BetaAppLocalizationDocument = serde_json::from_str(&response_body)
+            .map_err(|e| StackError::decode(format!("beta app localization response: {e}")))?;
+        Ok(document.data.into_beta_app_localization_info())
+    }
+
+    /// Updates the beta app localization identified by `id`, replacing only the
+    /// provided `feedbackEmail` and/or `description` attributes.
+    ///
+    /// `PATCH /v1/betaAppLocalizations/{id}` with a JSON:API body that includes
+    /// only the `Some` attributes and no relationships. Success is any 2xx
+    /// (`200 OK`); the returned single-resource document is mapped into a
+    /// [`BetaAppLocalizationInfo`].
+    ///
+    /// # Errors
+    /// [`StackError::PendingAgreements`] on a pending-agreements 403,
+    /// [`StackError::Http`] on any other non-2xx response, [`StackError::Decode`]
+    /// on malformed JSON, or [`StackError::Network`] on transport failure.
+    pub(crate) async fn update_beta_app_localization(
+        &self,
+        id: &str,
+        feedback_email: Option<&str>,
+        description: Option<&str>,
+    ) -> Result<BetaAppLocalizationInfo, StackError> {
+        let url = format!("{}/v1/betaAppLocalizations/{id}", self.base_url);
+        let token = self.auth.bearer_token().await?;
+
+        let mut attributes = serde_json::Map::new();
+        if let Some(value) = feedback_email {
+            attributes.insert("feedbackEmail".into(), json!(value));
+        }
+        if let Some(value) = description {
+            attributes.insert("description".into(), json!(value));
+        }
+
+        let request_body = json!({
+            "data": {
+                "type": "betaAppLocalizations",
+                "id": id,
+                "attributes": attributes
+            }
+        });
+
+        let response = self
+            .http
+            .patch(&url)
+            .bearer_auth(token)
+            .json(&request_body)
+            .send()
+            .await
+            .map_err(|e| StackError::network(e.to_string()))?;
+
+        let status = response.status();
+        let response_body = response
+            .text()
+            .await
+            .map_err(|e| StackError::network(e.to_string()))?;
+        if !status.is_success() {
+            if let Some(err) = pending_agreements_error(status.as_u16(), &response_body) {
+                return Err(err);
+            }
+            return Err(StackError::Http {
+                status: status.as_u16(),
+                message: response_body,
+            });
+        }
+
+        let document: BetaAppLocalizationDocument = serde_json::from_str(&response_body)
+            .map_err(|e| StackError::decode(format!("beta app localization response: {e}")))?;
+        Ok(document.data.into_beta_app_localization_info())
     }
 
     /// Authenticated `GET` of one JSON:API page, returning the raw body or mapping
@@ -3454,6 +3682,230 @@ mod tests {
 
         let err = client(server.uri())
             .update_beta_build_localization("loc-1", "Notes")
+            .await
+            .unwrap_err();
+        assert!(matches!(err, StackError::Http { status: 404, .. }));
+    }
+
+    #[tokio::test]
+    async fn fetch_beta_app_localizations_maps_and_paginates() {
+        let server = MockServer::start().await;
+        let next = format!(
+            "{}/v1/apps/app-1/betaAppLocalizations?cursor=PAGE2",
+            server.uri()
+        );
+
+        // Page 1: a fully-populated localization, plus the `links.next` cursor.
+        // The first request hits the app-relationship endpoint and carries the
+        // limit.
+        Mock::given(method("GET"))
+            .and(path("/v1/apps/app-1/betaAppLocalizations"))
+            .and(query_param("limit", "20"))
+            .and(wiremock::matchers::query_param_is_missing("cursor"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": [{
+                    "type": "betaAppLocalizations",
+                    "id": "loc-1",
+                    "attributes": {
+                        "locale": "en-US",
+                        "feedbackEmail": "beta@example.com",
+                        "description": "Try the new flows."
+                    }
+                }],
+                "links": { "next": next }
+            })))
+            .mount(&server)
+            .await;
+
+        // Page 2: a sparse localization (only the locale present) and no further
+        // page, exercising the `feedbackEmail`/`description`-absent path.
+        Mock::given(method("GET"))
+            .and(path("/v1/apps/app-1/betaAppLocalizations"))
+            .and(query_param("cursor", "PAGE2"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": [{
+                    "type": "betaAppLocalizations",
+                    "id": "loc-2",
+                    "attributes": {
+                        "locale": "pt-BR"
+                    }
+                }],
+                "links": {}
+            })))
+            .mount(&server)
+            .await;
+
+        let localizations = client(server.uri())
+            .fetch_beta_app_localizations("app-1", 20)
+            .await
+            .unwrap();
+        assert_eq!(localizations.len(), 2);
+
+        let first = &localizations[0];
+        assert_eq!(first.id, "loc-1");
+        assert_eq!(first.locale, "en-US");
+        assert_eq!(first.feedback_email.as_deref(), Some("beta@example.com"));
+        assert_eq!(first.description.as_deref(), Some("Try the new flows."));
+
+        let second = &localizations[1];
+        assert_eq!(second.id, "loc-2");
+        assert_eq!(second.locale, "pt-BR");
+        assert!(second.feedback_email.is_none());
+        assert!(second.description.is_none());
+    }
+
+    #[tokio::test]
+    async fn fetch_beta_app_localizations_surfaces_http_error() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v1/apps/app-1/betaAppLocalizations"))
+            .respond_with(ResponseTemplate::new(403).set_body_string("forbidden"))
+            .mount(&server)
+            .await;
+
+        let err = client(server.uri())
+            .fetch_beta_app_localizations("app-1", 20)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, StackError::Http { status: 403, .. }));
+    }
+
+    #[tokio::test]
+    async fn create_beta_app_localization_posts_and_maps() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/v1/betaAppLocalizations"))
+            // Assert the request always carries `locale`, includes the provided
+            // optional attributes, and wires the app relationship, without
+            // over-constraining the rest of the envelope.
+            .and(wiremock::matchers::body_partial_json(serde_json::json!({
+                "data": {
+                    "type": "betaAppLocalizations",
+                    "attributes": {
+                        "locale": "en-US",
+                        "feedbackEmail": "beta@example.com",
+                        "description": "Try the new flows."
+                    },
+                    "relationships": {
+                        "app": { "data": { "type": "apps", "id": "app-1" } }
+                    }
+                }
+            })))
+            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
+                "data": {
+                    "type": "betaAppLocalizations",
+                    "id": "loc-1",
+                    "attributes": {
+                        "locale": "en-US",
+                        "feedbackEmail": "beta@example.com",
+                        "description": "Try the new flows."
+                    }
+                }
+            })))
+            .mount(&server)
+            .await;
+
+        let localization = client(server.uri())
+            .create_beta_app_localization(
+                "app-1",
+                "en-US",
+                Some("beta@example.com"),
+                Some("Try the new flows."),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(localization.id, "loc-1");
+        assert_eq!(localization.locale, "en-US");
+        assert_eq!(
+            localization.feedback_email.as_deref(),
+            Some("beta@example.com")
+        );
+        assert_eq!(localization.description.as_deref(), Some("Try the new flows."));
+    }
+
+    #[tokio::test]
+    async fn create_beta_app_localization_surfaces_pending_agreements() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/betaAppLocalizations"))
+            .respond_with(ResponseTemplate::new(403).set_body_json(serde_json::json!({
+                "errors": [{ "detail": "The agreement is pending." }]
+            })))
+            .mount(&server)
+            .await;
+
+        let err = client(server.uri())
+            .create_beta_app_localization("app-1", "en-US", None, None)
+            .await
+            .unwrap_err();
+        match err {
+            StackError::PendingAgreements { message } => {
+                assert!(message.contains("pending agreements"))
+            }
+            other => panic!("expected PendingAgreements, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn update_beta_app_localization_patches_and_maps() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("PATCH"))
+            .and(path("/v1/betaAppLocalizations/loc-1"))
+            // Only the provided attribute should be present; no relationships.
+            .and(wiremock::matchers::body_partial_json(serde_json::json!({
+                "data": {
+                    "type": "betaAppLocalizations",
+                    "id": "loc-1",
+                    "attributes": {
+                        "description": "Updated description."
+                    }
+                }
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": {
+                    "type": "betaAppLocalizations",
+                    "id": "loc-1",
+                    "attributes": {
+                        "locale": "en-US",
+                        "feedbackEmail": "beta@example.com",
+                        "description": "Updated description."
+                    }
+                }
+            })))
+            .mount(&server)
+            .await;
+
+        let localization = client(server.uri())
+            .update_beta_app_localization("loc-1", None, Some("Updated description."))
+            .await
+            .unwrap();
+
+        assert_eq!(localization.id, "loc-1");
+        assert_eq!(localization.locale, "en-US");
+        assert_eq!(
+            localization.feedback_email.as_deref(),
+            Some("beta@example.com")
+        );
+        assert_eq!(
+            localization.description.as_deref(),
+            Some("Updated description.")
+        );
+    }
+
+    #[tokio::test]
+    async fn update_beta_app_localization_surfaces_http_error() {
+        let server = MockServer::start().await;
+        Mock::given(method("PATCH"))
+            .and(path("/v1/betaAppLocalizations/loc-1"))
+            .respond_with(ResponseTemplate::new(404).set_body_string("not found"))
+            .mount(&server)
+            .await;
+
+        let err = client(server.uri())
+            .update_beta_app_localization("loc-1", Some("beta@example.com"), None)
             .await
             .unwrap_err();
         assert!(matches!(err, StackError::Http { status: 404, .. }));

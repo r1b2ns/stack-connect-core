@@ -5,6 +5,7 @@ use async_trait::async_trait;
 use crate::domain::AppInfo;
 use crate::error::StackError;
 use crate::service::capabilities::app_store_versions::AppStoreVersions;
+use crate::service::capabilities::beta_app_localizations::BetaAppLocalizations;
 use crate::service::capabilities::beta_build_localizations::BetaBuildLocalizations;
 use crate::service::capabilities::beta_groups::BetaGroups;
 use crate::service::capabilities::builds::Builds;
@@ -23,6 +24,7 @@ pub enum Capability {
     Builds,
     BetaGroups,
     BetaBuildLocalizations,
+    BetaAppLocalizations,
 }
 
 /// Internal, non-exported contract every concrete plugin implements. Kept off the
@@ -74,6 +76,13 @@ pub(crate) trait ProviderImpl: Send + Sync {
     /// lacks [`Capability::BetaBuildLocalizations`]. Default `None` so providers
     /// opt in explicitly.
     fn beta_build_localizations(&self) -> Option<Arc<BetaBuildLocalizations>> {
+        None
+    }
+
+    /// The Beta App Localizations capability handle, or `None` if this provider
+    /// lacks [`Capability::BetaAppLocalizations`]. Default `None` so providers
+    /// opt in explicitly.
+    fn beta_app_localizations(&self) -> Option<Arc<BetaAppLocalizations>> {
         None
     }
 }
@@ -143,6 +152,14 @@ impl Provider {
     /// localizations are unsupported.
     pub fn beta_build_localizations(&self) -> Option<Arc<BetaBuildLocalizations>> {
         self.inner.beta_build_localizations()
+    }
+
+    /// The Beta App Localizations capability handle, or `None` when this provider
+    /// does not expose [`Capability::BetaAppLocalizations`]. This is the discovery
+    /// mechanism: the host calls `provider.beta_app_localizations()` and gets
+    /// `None` when beta app localizations are unsupported.
+    pub fn beta_app_localizations(&self) -> Option<Arc<BetaAppLocalizations>> {
+        self.inner.beta_app_localizations()
     }
 }
 

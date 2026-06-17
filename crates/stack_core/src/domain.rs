@@ -118,6 +118,18 @@ pub struct BetaBuildLocalizationInfo {
     pub whats_new: Option<String>,
 }
 
+/// A TestFlight app-level localization, keyed by `locale`. `feedback_email` is
+/// the per-locale address testers' feedback is sent to, and `description` is the
+/// per-locale TestFlight test description shown to testers.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, uniffi::Record)]
+#[serde(rename_all = "camelCase")]
+pub struct BetaAppLocalizationInfo {
+    pub id: String,
+    pub locale: String,
+    pub feedback_email: Option<String>,
+    pub description: Option<String>,
+}
+
 /// A TestFlight beta tester. `invite_type` and `state` are the raw ASC values
 /// passed through verbatim; the core does no remapping.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, uniffi::Record)]

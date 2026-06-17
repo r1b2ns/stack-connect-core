@@ -5,11 +5,15 @@ use async_trait::async_trait;
 use super::client::AppStoreClient;
 use crate::auth::es256::AppStoreAuthenticator;
 use crate::domain::{
-    AppInfo, AppStoreVersionInfo, BetaBuildLocalizationInfo, BetaGroupInfo, BetaTesterInfo,
-    BuildInfo, CustomerReview, CustomerReviewsPage, ReviewResponse, ReviewSubmission,
+    AppInfo, AppStoreVersionInfo, BetaAppLocalizationInfo, BetaBuildLocalizationInfo, BetaGroupInfo,
+    BetaTesterInfo, BuildInfo, CustomerReview, CustomerReviewsPage, ReviewResponse,
+    ReviewSubmission,
 };
 use crate::error::StackError;
 use crate::service::capabilities::app_store_versions::{AppStoreVersions, AppStoreVersionsImpl};
+use crate::service::capabilities::beta_app_localizations::{
+    BetaAppLocalizations, BetaAppLocalizationsImpl,
+};
 use crate::service::capabilities::beta_build_localizations::{
     BetaBuildLocalizations, BetaBuildLocalizationsImpl,
 };
@@ -52,6 +56,7 @@ impl ProviderImpl for AppStoreProvider {
             Capability::Builds,
             Capability::BetaGroups,
             Capability::BetaBuildLocalizations,
+            Capability::BetaAppLocalizations,
         ]
     }
 
@@ -90,6 +95,14 @@ impl ProviderImpl for AppStoreProvider {
     fn beta_build_localizations(&self) -> Option<Arc<BetaBuildLocalizations>> {
         Some(BetaBuildLocalizations::new(Box::new(
             AppStoreBetaBuildLocalizations {
+                client: Arc::clone(&self.client),
+            },
+        )))
+    }
+
+    fn beta_app_localizations(&self) -> Option<Arc<BetaAppLocalizations>> {
+        Some(BetaAppLocalizations::new(Box::new(
+            AppStoreBetaAppLocalizations {
                 client: Arc::clone(&self.client),
             },
         )))
@@ -349,6 +362,54 @@ impl BetaBuildLocalizationsImpl for AppStoreBetaBuildLocalizations {
     }
 }
 
+/// App Store Connect implementation of the [`BetaAppLocalizationsImpl`]
+/// capability contract. Holds a shared [`AppStoreClient`] so it reuses the
+/// provider's token cache.
+struct AppStoreBetaAppLocalizations {
+    client: Arc<AppStoreClient>,
+}
+
+#[async_trait]
+impl BetaAppLocalizationsImpl for AppStoreBetaAppLocalizations {
+    async fn fetch_beta_app_localizations(
+        &self,
+        app_id: String,
+        limit: u32,
+    ) -> Result<Vec<BetaAppLocalizationInfo>, StackError> {
+        self.client
+            .fetch_beta_app_localizations(&app_id, limit)
+            .await
+    }
+
+    async fn create_beta_app_localization(
+        &self,
+        app_id: String,
+        locale: String,
+        feedback_email: Option<String>,
+        description: Option<String>,
+    ) -> Result<BetaAppLocalizationInfo, StackError> {
+        self.client
+            .create_beta_app_localization(
+                &app_id,
+                &locale,
+                feedback_email.as_deref(),
+                description.as_deref(),
+            )
+            .await
+    }
+
+    async fn update_beta_app_localization(
+        &self,
+        id: String,
+        feedback_email: Option<String>,
+        description: Option<String>,
+    ) -> Result<BetaAppLocalizationInfo, StackError> {
+        self.client
+            .update_beta_app_localization(&id, feedback_email.as_deref(), description.as_deref())
+            .await
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -373,7 +434,8 @@ mod tests {
                 Capability::AppStoreVersions,
                 Capability::Builds,
                 Capability::BetaGroups,
-                Capability::BetaBuildLocalizations
+                Capability::BetaBuildLocalizations,
+                Capability::BetaAppLocalizations
             ]
         );
     }
@@ -420,5 +482,15 @@ mod tests {
         assert!(provider()
             .capabilities()
             .contains(&Capability::BetaBuildLocalizations));
+    }
+
+    #[test]
+    fn exposes_beta_app_localizations_capability_handle() {
+        // App Store Connect supports Beta App Localizations, so the accessor must
+        // return `Some`.
+        assert!(provider().beta_app_localizations().is_some());
+        assert!(provider()
+            .capabilities()
+            .contains(&Capability::BetaAppLocalizations));
     }
 }
