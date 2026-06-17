@@ -1294,6 +1294,263 @@ impl AppStoreClient {
         Ok(builds)
     }
 
+    /// Marks the build identified by `build_id` as expired.
+    ///
+    /// `PATCH /v1/builds/{build_id}` with a JSON:API body setting the `expired`
+    /// attribute to `true` (the ASC attribute key is `expired`, not `isExpired`).
+    /// Any 2xx → `Ok(())`.
+    ///
+    /// # Errors
+    /// [`StackError::PendingAgreements`] on a pending-agreements 403,
+    /// [`StackError::Http`] on any other non-2xx response, or
+    /// [`StackError::Network`] on transport failure.
+    pub(crate) async fn expire_build(&self, build_id: &str) -> Result<(), StackError> {
+        let url = format!("{}/v1/builds/{build_id}", self.base_url);
+        let token = self.auth.bearer_token().await?;
+        let request_body = json!({
+            "data": {
+                "type": "builds",
+                "id": build_id,
+                "attributes": { "expired": true }
+            }
+        });
+
+        let response = self
+            .http
+            .patch(&url)
+            .bearer_auth(token)
+            .json(&request_body)
+            .send()
+            .await
+            .map_err(|e| StackError::network(e.to_string()))?;
+
+        let status = response.status();
+        if status.is_success() {
+            return Ok(());
+        }
+
+        let body = response
+            .text()
+            .await
+            .map_err(|e| StackError::network(e.to_string()))?;
+        if let Some(err) = pending_agreements_error(status.as_u16(), &body) {
+            return Err(err);
+        }
+        Err(StackError::Http {
+            status: status.as_u16(),
+            message: body,
+        })
+    }
+
+    /// Attaches the build `build_id` to the App Store version `version_id`.
+    ///
+    /// `PATCH /v1/appStoreVersions/{version_id}/relationships/build` with a
+    /// JSON:API to-one linkage body `{ "data": { "type": "builds", "id": ... } }`
+    /// (a single relationship object, not an array). Any 2xx → `Ok(())`.
+    ///
+    /// # Errors
+    /// [`StackError::PendingAgreements`] on a pending-agreements 403,
+    /// [`StackError::Http`] on any other non-2xx response, or
+    /// [`StackError::Network`] on transport failure.
+    pub(crate) async fn attach_build(
+        &self,
+        version_id: &str,
+        build_id: &str,
+    ) -> Result<(), StackError> {
+        let url = format!(
+            "{}/v1/appStoreVersions/{version_id}/relationships/build",
+            self.base_url
+        );
+        let token = self.auth.bearer_token().await?;
+        let request_body = json!({
+            "data": { "type": "builds", "id": build_id }
+        });
+
+        let response = self
+            .http
+            .patch(&url)
+            .bearer_auth(token)
+            .json(&request_body)
+            .send()
+            .await
+            .map_err(|e| StackError::network(e.to_string()))?;
+
+        let status = response.status();
+        if status.is_success() {
+            return Ok(());
+        }
+
+        let body = response
+            .text()
+            .await
+            .map_err(|e| StackError::network(e.to_string()))?;
+        if let Some(err) = pending_agreements_error(status.as_u16(), &body) {
+            return Err(err);
+        }
+        Err(StackError::Http {
+            status: status.as_u16(),
+            message: body,
+        })
+    }
+
+    /// Submits the build `build_id` for beta (TestFlight) review.
+    ///
+    /// `POST /v1/betaAppReviewSubmissions` with a JSON:API body carrying the
+    /// `build` to-one relationship. Any 2xx (`201 Created`) → `Ok(())`.
+    ///
+    /// # Errors
+    /// [`StackError::PendingAgreements`] on a pending-agreements 403,
+    /// [`StackError::Http`] on any other non-2xx response, or
+    /// [`StackError::Network`] on transport failure.
+    pub(crate) async fn submit_build_for_beta_review(
+        &self,
+        build_id: &str,
+    ) -> Result<(), StackError> {
+        let url = format!("{}/v1/betaAppReviewSubmissions", self.base_url);
+        let token = self.auth.bearer_token().await?;
+        let request_body = json!({
+            "data": {
+                "type": "betaAppReviewSubmissions",
+                "relationships": {
+                    "build": {
+                        "data": { "type": "builds", "id": build_id }
+                    }
+                }
+            }
+        });
+
+        let response = self
+            .http
+            .post(&url)
+            .bearer_auth(token)
+            .json(&request_body)
+            .send()
+            .await
+            .map_err(|e| StackError::network(e.to_string()))?;
+
+        let status = response.status();
+        if status.is_success() {
+            return Ok(());
+        }
+
+        let body = response
+            .text()
+            .await
+            .map_err(|e| StackError::network(e.to_string()))?;
+        if let Some(err) = pending_agreements_error(status.as_u16(), &body) {
+            return Err(err);
+        }
+        Err(StackError::Http {
+            status: status.as_u16(),
+            message: body,
+        })
+    }
+
+    /// Adds the build `build_id` to each beta group in `group_ids`.
+    ///
+    /// `POST /v1/builds/{build_id}/relationships/betaGroups` with a JSON:API
+    /// to-many linkage body `{ "data": [{ "type": "betaGroups", "id": ... }, ...] }`
+    /// — one entry per group id (an empty `group_ids` sends an empty array). Any
+    /// 2xx → `Ok(())`.
+    ///
+    /// # Errors
+    /// [`StackError::PendingAgreements`] on a pending-agreements 403,
+    /// [`StackError::Http`] on any other non-2xx response, or
+    /// [`StackError::Network`] on transport failure.
+    pub(crate) async fn add_build_to_groups(
+        &self,
+        build_id: &str,
+        group_ids: &[String],
+    ) -> Result<(), StackError> {
+        let url = format!(
+            "{}/v1/builds/{build_id}/relationships/betaGroups",
+            self.base_url
+        );
+        let token = self.auth.bearer_token().await?;
+        let data: Vec<_> = group_ids
+            .iter()
+            .map(|id| json!({ "type": "betaGroups", "id": id }))
+            .collect();
+        let request_body = json!({ "data": data });
+
+        let response = self
+            .http
+            .post(&url)
+            .bearer_auth(token)
+            .json(&request_body)
+            .send()
+            .await
+            .map_err(|e| StackError::network(e.to_string()))?;
+
+        let status = response.status();
+        if status.is_success() {
+            return Ok(());
+        }
+
+        let body = response
+            .text()
+            .await
+            .map_err(|e| StackError::network(e.to_string()))?;
+        if let Some(err) = pending_agreements_error(status.as_u16(), &body) {
+            return Err(err);
+        }
+        Err(StackError::Http {
+            status: status.as_u16(),
+            message: body,
+        })
+    }
+
+    /// Removes the build `build_id` from the beta group `group_id`.
+    ///
+    /// `DELETE /v1/betaGroups/{group_id}/relationships/builds` with a JSON:API
+    /// to-many linkage body `{ "data": [{ "type": "builds", "id": ... }] }` (an
+    /// array carrying the single build). Any 2xx (`204 No Content`) → `Ok(())`.
+    ///
+    /// # Errors
+    /// [`StackError::PendingAgreements`] on a pending-agreements 403,
+    /// [`StackError::Http`] on any other non-2xx response, or
+    /// [`StackError::Network`] on transport failure.
+    pub(crate) async fn remove_build_from_group(
+        &self,
+        build_id: &str,
+        group_id: &str,
+    ) -> Result<(), StackError> {
+        let url = format!(
+            "{}/v1/betaGroups/{group_id}/relationships/builds",
+            self.base_url
+        );
+        let token = self.auth.bearer_token().await?;
+        let request_body = json!({
+            "data": [{ "type": "builds", "id": build_id }]
+        });
+
+        let response = self
+            .http
+            .delete(&url)
+            .bearer_auth(token)
+            .json(&request_body)
+            .send()
+            .await
+            .map_err(|e| StackError::network(e.to_string()))?;
+
+        let status = response.status();
+        if status.is_success() {
+            return Ok(());
+        }
+
+        let body = response
+            .text()
+            .await
+            .map_err(|e| StackError::network(e.to_string()))?;
+        if let Some(err) = pending_agreements_error(status.as_u16(), &body) {
+            return Err(err);
+        }
+        Err(StackError::Http {
+            status: status.as_u16(),
+            message: body,
+        })
+    }
+
     /// Lists the beta groups for `app_id`, mapping each into a [`BetaGroupInfo`]
     /// with `app_id` set from the parameter.
     ///
@@ -3093,6 +3350,153 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(err, StackError::Http { status: 403, .. }));
+    }
+
+    #[tokio::test]
+    async fn expire_build_patches_expired_attribute() {
+        let server = MockServer::start().await;
+        Mock::given(method("PATCH"))
+            .and(path("/v1/builds/build-1"))
+            // The ASC attribute key is `expired` (boolean), not `isExpired`.
+            .and(wiremock::matchers::body_partial_json(serde_json::json!({
+                "data": {
+                    "type": "builds",
+                    "id": "build-1",
+                    "attributes": { "expired": true }
+                }
+            })))
+            .respond_with(ResponseTemplate::new(200))
+            .mount(&server)
+            .await;
+
+        assert!(client(server.uri())
+            .expire_build("build-1")
+            .await
+            .is_ok());
+    }
+
+    #[tokio::test]
+    async fn expire_build_surfaces_pending_agreements() {
+        let server = MockServer::start().await;
+        Mock::given(method("PATCH"))
+            .and(path("/v1/builds/build-1"))
+            .respond_with(ResponseTemplate::new(403).set_body_json(serde_json::json!({
+                "errors": [{ "detail": "The agreement is pending." }]
+            })))
+            .mount(&server)
+            .await;
+
+        let err = client(server.uri())
+            .expire_build("build-1")
+            .await
+            .unwrap_err();
+        match err {
+            StackError::PendingAgreements { message } => {
+                assert!(message.contains("pending agreements"))
+            }
+            other => panic!("expected PendingAgreements, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn attach_build_patches_single_relationship_object() {
+        let server = MockServer::start().await;
+        Mock::given(method("PATCH"))
+            .and(path("/v1/appStoreVersions/version-1/relationships/build"))
+            // The linkage is a single to-one relationship object, NOT an array.
+            .and(wiremock::matchers::body_partial_json(serde_json::json!({
+                "data": { "type": "builds", "id": "build-1" }
+            })))
+            .respond_with(ResponseTemplate::new(204))
+            .mount(&server)
+            .await;
+
+        assert!(client(server.uri())
+            .attach_build("version-1", "build-1")
+            .await
+            .is_ok());
+    }
+
+    #[tokio::test]
+    async fn attach_build_surfaces_http_error() {
+        let server = MockServer::start().await;
+        Mock::given(method("PATCH"))
+            .and(path("/v1/appStoreVersions/version-1/relationships/build"))
+            .respond_with(ResponseTemplate::new(409).set_body_string("conflict"))
+            .mount(&server)
+            .await;
+
+        let err = client(server.uri())
+            .attach_build("version-1", "build-1")
+            .await
+            .unwrap_err();
+        assert!(matches!(err, StackError::Http { status: 409, .. }));
+    }
+
+    #[tokio::test]
+    async fn submit_build_for_beta_review_posts_relationship() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/betaAppReviewSubmissions"))
+            .and(wiremock::matchers::body_partial_json(serde_json::json!({
+                "data": {
+                    "type": "betaAppReviewSubmissions",
+                    "relationships": {
+                        "build": {
+                            "data": { "type": "builds", "id": "build-1" }
+                        }
+                    }
+                }
+            })))
+            .respond_with(ResponseTemplate::new(201))
+            .mount(&server)
+            .await;
+
+        assert!(client(server.uri())
+            .submit_build_for_beta_review("build-1")
+            .await
+            .is_ok());
+    }
+
+    #[tokio::test]
+    async fn add_build_to_groups_posts_to_many_linkage() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/builds/build-1/relationships/betaGroups"))
+            // One linkage entry per group id.
+            .and(wiremock::matchers::body_partial_json(serde_json::json!({
+                "data": [
+                    { "type": "betaGroups", "id": "group-1" },
+                    { "type": "betaGroups", "id": "group-2" }
+                ]
+            })))
+            .respond_with(ResponseTemplate::new(204))
+            .mount(&server)
+            .await;
+
+        assert!(client(server.uri())
+            .add_build_to_groups("build-1", &["group-1".to_string(), "group-2".to_string()])
+            .await
+            .is_ok());
+    }
+
+    #[tokio::test]
+    async fn remove_build_from_group_deletes_with_body() {
+        let server = MockServer::start().await;
+        Mock::given(method("DELETE"))
+            .and(path("/v1/betaGroups/group-1/relationships/builds"))
+            // Array carrying the single build to unlink.
+            .and(wiremock::matchers::body_partial_json(serde_json::json!({
+                "data": [{ "type": "builds", "id": "build-1" }]
+            })))
+            .respond_with(ResponseTemplate::new(204))
+            .mount(&server)
+            .await;
+
+        assert!(client(server.uri())
+            .remove_build_from_group("build-1", "group-1")
+            .await
+            .is_ok());
     }
 
     #[tokio::test]

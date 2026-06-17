@@ -238,6 +238,40 @@ impl BuildsImpl for AppStoreBuilds {
     async fn fetch_builds(&self, app_id: String, limit: u32) -> Result<Vec<BuildInfo>, StackError> {
         self.client.fetch_builds(&app_id, limit).await
     }
+
+    async fn expire_build(&self, build_id: String) -> Result<(), StackError> {
+        self.client.expire_build(&build_id).await
+    }
+
+    async fn attach_build(
+        &self,
+        version_id: String,
+        build_id: String,
+    ) -> Result<(), StackError> {
+        self.client.attach_build(&version_id, &build_id).await
+    }
+
+    async fn submit_build_for_beta_review(&self, build_id: String) -> Result<(), StackError> {
+        self.client.submit_build_for_beta_review(&build_id).await
+    }
+
+    async fn add_build_to_groups(
+        &self,
+        build_id: String,
+        group_ids: Vec<String>,
+    ) -> Result<(), StackError> {
+        self.client.add_build_to_groups(&build_id, &group_ids).await
+    }
+
+    async fn remove_build_from_group(
+        &self,
+        build_id: String,
+        group_id: String,
+    ) -> Result<(), StackError> {
+        self.client
+            .remove_build_from_group(&build_id, &group_id)
+            .await
+    }
 }
 
 /// App Store Connect implementation of the [`BetaGroupsImpl`] capability
