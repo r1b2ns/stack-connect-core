@@ -5,11 +5,14 @@ use async_trait::async_trait;
 use super::client::AppStoreClient;
 use crate::auth::es256::AppStoreAuthenticator;
 use crate::domain::{
-    AppInfo, AppStoreVersionInfo, BetaGroupInfo, BetaTesterInfo, BuildInfo, CustomerReview,
-    CustomerReviewsPage, ReviewResponse, ReviewSubmission,
+    AppInfo, AppStoreVersionInfo, BetaBuildLocalizationInfo, BetaGroupInfo, BetaTesterInfo,
+    BuildInfo, CustomerReview, CustomerReviewsPage, ReviewResponse, ReviewSubmission,
 };
 use crate::error::StackError;
 use crate::service::capabilities::app_store_versions::{AppStoreVersions, AppStoreVersionsImpl};
+use crate::service::capabilities::beta_build_localizations::{
+    BetaBuildLocalizations, BetaBuildLocalizationsImpl,
+};
 use crate::service::capabilities::beta_groups::{BetaGroups, BetaGroupsImpl};
 use crate::service::capabilities::builds::{Builds, BuildsImpl};
 use crate::service::capabilities::reviews::{Reviews, ReviewsImpl};
@@ -48,6 +51,7 @@ impl ProviderImpl for AppStoreProvider {
             Capability::AppStoreVersions,
             Capability::Builds,
             Capability::BetaGroups,
+            Capability::BetaBuildLocalizations,
         ]
     }
 
@@ -81,6 +85,14 @@ impl ProviderImpl for AppStoreProvider {
         Some(BetaGroups::new(Box::new(AppStoreBetaGroups {
             client: Arc::clone(&self.client),
         })))
+    }
+
+    fn beta_build_localizations(&self) -> Option<Arc<BetaBuildLocalizations>> {
+        Some(BetaBuildLocalizations::new(Box::new(
+            AppStoreBetaBuildLocalizations {
+                client: Arc::clone(&self.client),
+            },
+        )))
     }
 }
 
@@ -296,6 +308,47 @@ impl BetaGroupsImpl for AppStoreBetaGroups {
     }
 }
 
+/// App Store Connect implementation of the [`BetaBuildLocalizationsImpl`]
+/// capability contract. Holds a shared [`AppStoreClient`] so it reuses the
+/// provider's token cache.
+struct AppStoreBetaBuildLocalizations {
+    client: Arc<AppStoreClient>,
+}
+
+#[async_trait]
+impl BetaBuildLocalizationsImpl for AppStoreBetaBuildLocalizations {
+    async fn fetch_beta_build_localizations(
+        &self,
+        build_id: String,
+        limit: u32,
+    ) -> Result<Vec<BetaBuildLocalizationInfo>, StackError> {
+        self.client
+            .fetch_beta_build_localizations(&build_id, limit)
+            .await
+    }
+
+    async fn create_beta_build_localization(
+        &self,
+        build_id: String,
+        locale: String,
+        whats_new: String,
+    ) -> Result<BetaBuildLocalizationInfo, StackError> {
+        self.client
+            .create_beta_build_localization(&build_id, &locale, &whats_new)
+            .await
+    }
+
+    async fn update_beta_build_localization(
+        &self,
+        id: String,
+        whats_new: String,
+    ) -> Result<BetaBuildLocalizationInfo, StackError> {
+        self.client
+            .update_beta_build_localization(&id, &whats_new)
+            .await
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -319,7 +372,8 @@ mod tests {
                 Capability::Reviews,
                 Capability::AppStoreVersions,
                 Capability::Builds,
-                Capability::BetaGroups
+                Capability::BetaGroups,
+                Capability::BetaBuildLocalizations
             ]
         );
     }
@@ -356,5 +410,15 @@ mod tests {
         // `Some`.
         assert!(provider().beta_groups().is_some());
         assert!(provider().capabilities().contains(&Capability::BetaGroups));
+    }
+
+    #[test]
+    fn exposes_beta_build_localizations_capability_handle() {
+        // App Store Connect supports Beta Build Localizations, so the accessor
+        // must return `Some`.
+        assert!(provider().beta_build_localizations().is_some());
+        assert!(provider()
+            .capabilities()
+            .contains(&Capability::BetaBuildLocalizations));
     }
 }

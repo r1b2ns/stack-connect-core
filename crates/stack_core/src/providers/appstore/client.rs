@@ -5,8 +5,8 @@ use serde_json::json;
 
 use crate::auth::es256::AppStoreAuthenticator;
 use crate::domain::{
-    AppInfo, AppStoreVersionInfo, BetaGroupInfo, BetaTesterInfo, BuildInfo, CustomerReview,
-    CustomerReviewsPage, ReviewResponse, ReviewSubmission,
+    AppInfo, AppStoreVersionInfo, BetaBuildLocalizationInfo, BetaGroupInfo, BetaTesterInfo,
+    BuildInfo, CustomerReview, CustomerReviewsPage, ReviewResponse, ReviewSubmission,
 };
 use crate::error::StackError;
 
@@ -566,6 +566,52 @@ impl BetaTesterResource {
             email: self.attributes.email,
             invite_type: self.attributes.invite_type,
             state: self.attributes.state,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Beta build localizations (JSON:API)
+// ---------------------------------------------------------------------------
+
+/// A JSON:API document page of `betaBuildLocalizations` resources.
+#[derive(Deserialize)]
+struct BetaBuildLocalizationsResponse {
+    #[serde(default)]
+    data: Vec<BetaBuildLocalizationResource>,
+    #[serde(default)]
+    links: Links,
+}
+
+/// A JSON:API single-resource document wrapping one `betaBuildLocalizations`, as
+/// returned by the create (POST) and update (PATCH) endpoints: `{ "data": { ... } }`.
+#[derive(Deserialize)]
+struct BetaBuildLocalizationDocument {
+    data: BetaBuildLocalizationResource,
+}
+
+#[derive(Deserialize)]
+struct BetaBuildLocalizationResource {
+    id: String,
+    #[serde(default)]
+    attributes: BetaBuildLocalizationAttributes,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct BetaBuildLocalizationAttributes {
+    #[serde(default)]
+    locale: Option<String>,
+    #[serde(default)]
+    whats_new: Option<String>,
+}
+
+impl BetaBuildLocalizationResource {
+    fn into_beta_build_localization_info(self) -> BetaBuildLocalizationInfo {
+        BetaBuildLocalizationInfo {
+            id: self.id,
+            locale: self.attributes.locale.unwrap_or_default(),
+            whats_new: self.attributes.whats_new,
         }
     }
 }
@@ -1526,6 +1572,165 @@ impl AppStoreClient {
             status: status.as_u16(),
             message: body,
         })
+    }
+
+    /// Lists the beta build localizations for `build_id`, mapping each into a
+    /// [`BetaBuildLocalizationInfo`].
+    ///
+    /// `GET /v1/betaBuildLocalizations?filter[build]={build_id}&limit={limit}`,
+    /// following `links.next` pagination until exhausted (`limit` is the page
+    /// size).
+    ///
+    /// # Errors
+    /// [`StackError::Http`] on a non-2xx page, [`StackError::Decode`] on malformed
+    /// JSON, or [`StackError::Network`] on transport failure.
+    pub(crate) async fn fetch_beta_build_localizations(
+        &self,
+        build_id: &str,
+        limit: u32,
+    ) -> Result<Vec<BetaBuildLocalizationInfo>, StackError> {
+        let mut localizations = Vec::new();
+        let mut next_url = Some(format!(
+            "{}/v1/betaBuildLocalizations?filter[build]={build_id}&limit={limit}",
+            self.base_url
+        ));
+
+        while let Some(url) = next_url {
+            let body = self.get_page(&url).await?;
+            let page: BetaBuildLocalizationsResponse = serde_json::from_str(&body).map_err(|e| {
+                StackError::decode(format!("beta build localizations response: {e}"))
+            })?;
+            localizations.extend(
+                page.data
+                    .into_iter()
+                    .map(BetaBuildLocalizationResource::into_beta_build_localization_info),
+            );
+
+            // `links.next` is an absolute URL; follow it verbatim until absent.
+            next_url = page.links.next.filter(|u| !u.is_empty());
+        }
+
+        Ok(localizations)
+    }
+
+    /// Creates a beta build localization for `build_id` in `locale`.
+    ///
+    /// `POST /v1/betaBuildLocalizations` with a JSON:API body carrying the
+    /// `whatsNew` and `locale` attributes plus the `build` relationship. Success
+    /// is any 2xx (`201 Created`); the returned single-resource document is mapped
+    /// into a [`BetaBuildLocalizationInfo`].
+    ///
+    /// # Errors
+    /// [`StackError::PendingAgreements`] on a pending-agreements 403,
+    /// [`StackError::Http`] on any other non-2xx response, [`StackError::Decode`]
+    /// on malformed JSON, or [`StackError::Network`] on transport failure.
+    pub(crate) async fn create_beta_build_localization(
+        &self,
+        build_id: &str,
+        locale: &str,
+        whats_new: &str,
+    ) -> Result<BetaBuildLocalizationInfo, StackError> {
+        let url = format!("{}/v1/betaBuildLocalizations", self.base_url);
+        let token = self.auth.bearer_token().await?;
+        let request_body = json!({
+            "data": {
+                "type": "betaBuildLocalizations",
+                "attributes": {
+                    "whatsNew": whats_new,
+                    "locale": locale
+                },
+                "relationships": {
+                    "build": {
+                        "data": { "type": "builds", "id": build_id }
+                    }
+                }
+            }
+        });
+
+        let response = self
+            .http
+            .post(&url)
+            .bearer_auth(token)
+            .json(&request_body)
+            .send()
+            .await
+            .map_err(|e| StackError::network(e.to_string()))?;
+
+        let status = response.status();
+        let response_body = response
+            .text()
+            .await
+            .map_err(|e| StackError::network(e.to_string()))?;
+        if !status.is_success() {
+            if let Some(err) = pending_agreements_error(status.as_u16(), &response_body) {
+                return Err(err);
+            }
+            return Err(StackError::Http {
+                status: status.as_u16(),
+                message: response_body,
+            });
+        }
+
+        let document: BetaBuildLocalizationDocument = serde_json::from_str(&response_body)
+            .map_err(|e| StackError::decode(format!("beta build localization response: {e}")))?;
+        Ok(document.data.into_beta_build_localization_info())
+    }
+
+    /// Updates the beta build localization identified by `id`, replacing its
+    /// `whatsNew` testing notes.
+    ///
+    /// `PATCH /v1/betaBuildLocalizations/{id}` with a JSON:API body carrying the
+    /// `whatsNew` attribute. Success is any 2xx (`200 OK`); the returned
+    /// single-resource document is mapped into a [`BetaBuildLocalizationInfo`].
+    ///
+    /// # Errors
+    /// [`StackError::PendingAgreements`] on a pending-agreements 403,
+    /// [`StackError::Http`] on any other non-2xx response, [`StackError::Decode`]
+    /// on malformed JSON, or [`StackError::Network`] on transport failure.
+    pub(crate) async fn update_beta_build_localization(
+        &self,
+        id: &str,
+        whats_new: &str,
+    ) -> Result<BetaBuildLocalizationInfo, StackError> {
+        let url = format!("{}/v1/betaBuildLocalizations/{id}", self.base_url);
+        let token = self.auth.bearer_token().await?;
+        let request_body = json!({
+            "data": {
+                "type": "betaBuildLocalizations",
+                "id": id,
+                "attributes": {
+                    "whatsNew": whats_new
+                }
+            }
+        });
+
+        let response = self
+            .http
+            .patch(&url)
+            .bearer_auth(token)
+            .json(&request_body)
+            .send()
+            .await
+            .map_err(|e| StackError::network(e.to_string()))?;
+
+        let status = response.status();
+        let response_body = response
+            .text()
+            .await
+            .map_err(|e| StackError::network(e.to_string()))?;
+        if !status.is_success() {
+            if let Some(err) = pending_agreements_error(status.as_u16(), &response_body) {
+                return Err(err);
+            }
+            return Err(StackError::Http {
+                status: status.as_u16(),
+                message: response_body,
+            });
+        }
+
+        let document: BetaBuildLocalizationDocument = serde_json::from_str(&response_body)
+            .map_err(|e| StackError::decode(format!("beta build localization response: {e}")))?;
+        Ok(document.data.into_beta_build_localization_info())
     }
 
     /// Authenticated `GET` of one JSON:API page, returning the raw body or mapping
@@ -3039,5 +3244,218 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(err, StackError::Http { status: 403, .. }));
+    }
+
+    #[tokio::test]
+    async fn fetch_beta_build_localizations_maps_and_paginates() {
+        let server = MockServer::start().await;
+        let next = format!("{}/v1/betaBuildLocalizations?cursor=PAGE2", server.uri());
+
+        // Page 1: a fully-populated localization, plus the `links.next` cursor.
+        // The first request must carry the build filter and the limit.
+        Mock::given(method("GET"))
+            .and(path("/v1/betaBuildLocalizations"))
+            .and(query_param("filter[build]", "build-1"))
+            .and(query_param("limit", "20"))
+            .and(wiremock::matchers::query_param_is_missing("cursor"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": [{
+                    "type": "betaBuildLocalizations",
+                    "id": "loc-1",
+                    "attributes": {
+                        "locale": "en-US",
+                        "whatsNew": "Bug fixes and improvements."
+                    }
+                }],
+                "links": { "next": next }
+            })))
+            .mount(&server)
+            .await;
+
+        // Page 2: a sparse localization (only the locale present) and no further
+        // page, exercising the `whatsNew`-absent path.
+        Mock::given(method("GET"))
+            .and(path("/v1/betaBuildLocalizations"))
+            .and(query_param("cursor", "PAGE2"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": [{
+                    "type": "betaBuildLocalizations",
+                    "id": "loc-2",
+                    "attributes": {
+                        "locale": "pt-BR"
+                    }
+                }],
+                "links": {}
+            })))
+            .mount(&server)
+            .await;
+
+        let localizations = client(server.uri())
+            .fetch_beta_build_localizations("build-1", 20)
+            .await
+            .unwrap();
+        assert_eq!(localizations.len(), 2);
+
+        let first = &localizations[0];
+        assert_eq!(first.id, "loc-1");
+        assert_eq!(first.locale, "en-US");
+        assert_eq!(first.whats_new.as_deref(), Some("Bug fixes and improvements."));
+
+        let second = &localizations[1];
+        assert_eq!(second.id, "loc-2");
+        assert_eq!(second.locale, "pt-BR");
+        assert!(second.whats_new.is_none());
+    }
+
+    #[tokio::test]
+    async fn fetch_beta_build_localizations_surfaces_http_error() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v1/betaBuildLocalizations"))
+            .respond_with(ResponseTemplate::new(403).set_body_string("forbidden"))
+            .mount(&server)
+            .await;
+
+        let err = client(server.uri())
+            .fetch_beta_build_localizations("build-1", 20)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, StackError::Http { status: 403, .. }));
+    }
+
+    #[tokio::test]
+    async fn create_beta_build_localization_posts_and_maps() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/v1/betaBuildLocalizations"))
+            // Assert the request carries the attributes and the build
+            // relationship, without over-constraining the rest of the envelope.
+            .and(wiremock::matchers::body_partial_json(serde_json::json!({
+                "data": {
+                    "type": "betaBuildLocalizations",
+                    "attributes": {
+                        "whatsNew": "First beta!",
+                        "locale": "en-US"
+                    },
+                    "relationships": {
+                        "build": { "data": { "type": "builds", "id": "build-1" } }
+                    }
+                }
+            })))
+            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
+                "data": {
+                    "type": "betaBuildLocalizations",
+                    "id": "loc-1",
+                    "attributes": {
+                        "locale": "en-US",
+                        "whatsNew": "First beta!"
+                    }
+                }
+            })))
+            .mount(&server)
+            .await;
+
+        let localization = client(server.uri())
+            .create_beta_build_localization("build-1", "en-US", "First beta!")
+            .await
+            .unwrap();
+
+        assert_eq!(localization.id, "loc-1");
+        assert_eq!(localization.locale, "en-US");
+        assert_eq!(localization.whats_new.as_deref(), Some("First beta!"));
+    }
+
+    #[tokio::test]
+    async fn create_beta_build_localization_surfaces_pending_agreements() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/betaBuildLocalizations"))
+            .respond_with(ResponseTemplate::new(403).set_body_json(serde_json::json!({
+                "errors": [{ "detail": "The agreement is pending." }]
+            })))
+            .mount(&server)
+            .await;
+
+        let err = client(server.uri())
+            .create_beta_build_localization("build-1", "en-US", "Notes")
+            .await
+            .unwrap_err();
+        match err {
+            StackError::PendingAgreements { message } => {
+                assert!(message.contains("pending agreements"))
+            }
+            other => panic!("expected PendingAgreements, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn create_beta_build_localization_surfaces_http_error() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/betaBuildLocalizations"))
+            .respond_with(ResponseTemplate::new(409).set_body_string("conflict"))
+            .mount(&server)
+            .await;
+
+        let err = client(server.uri())
+            .create_beta_build_localization("build-1", "en-US", "Notes")
+            .await
+            .unwrap_err();
+        assert!(matches!(err, StackError::Http { status: 409, .. }));
+    }
+
+    #[tokio::test]
+    async fn update_beta_build_localization_patches_and_maps() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("PATCH"))
+            .and(path("/v1/betaBuildLocalizations/loc-1"))
+            .and(wiremock::matchers::body_partial_json(serde_json::json!({
+                "data": {
+                    "type": "betaBuildLocalizations",
+                    "id": "loc-1",
+                    "attributes": {
+                        "whatsNew": "Updated notes."
+                    }
+                }
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": {
+                    "type": "betaBuildLocalizations",
+                    "id": "loc-1",
+                    "attributes": {
+                        "locale": "en-US",
+                        "whatsNew": "Updated notes."
+                    }
+                }
+            })))
+            .mount(&server)
+            .await;
+
+        let localization = client(server.uri())
+            .update_beta_build_localization("loc-1", "Updated notes.")
+            .await
+            .unwrap();
+
+        assert_eq!(localization.id, "loc-1");
+        assert_eq!(localization.locale, "en-US");
+        assert_eq!(localization.whats_new.as_deref(), Some("Updated notes."));
+    }
+
+    #[tokio::test]
+    async fn update_beta_build_localization_surfaces_http_error() {
+        let server = MockServer::start().await;
+        Mock::given(method("PATCH"))
+            .and(path("/v1/betaBuildLocalizations/loc-1"))
+            .respond_with(ResponseTemplate::new(404).set_body_string("not found"))
+            .mount(&server)
+            .await;
+
+        let err = client(server.uri())
+            .update_beta_build_localization("loc-1", "Notes")
+            .await
+            .unwrap_err();
+        assert!(matches!(err, StackError::Http { status: 404, .. }));
     }
 }
