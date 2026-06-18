@@ -234,6 +234,29 @@ impl AppStoreVersionsImpl for AppStoreAppStoreVersions {
     async fn delete_version(&self, id: String) -> Result<(), StackError> {
         self.client.delete_version(&id).await
     }
+
+    async fn submit_for_review(
+        &self,
+        app_id: String,
+        version_id: String,
+        platform: Option<String>,
+    ) -> Result<(), StackError> {
+        self.client
+            .submit_for_review(&app_id, &version_id, platform.as_deref())
+            .await
+    }
+
+    async fn cancel_review(&self, app_id: String) -> Result<(), StackError> {
+        self.client.cancel_review(&app_id).await
+    }
+
+    async fn release_version(&self, version_id: String) -> Result<(), StackError> {
+        self.client.release_version(&version_id).await
+    }
+
+    async fn reject_version(&self, app_id: String) -> Result<(), StackError> {
+        self.client.reject_version(&app_id).await
+    }
 }
 
 /// App Store Connect implementation of the [`BuildsImpl`] capability contract.

@@ -6,9 +6,9 @@ use serde_json::json;
 use crate::auth::es256::AppStoreAuthenticator;
 use crate::domain::{
     AgeRatingDeclarationInfo, AppCategoryInfo, AppInfo, AppInfoDetails, AppInfoLocalizationInfo,
-    AppStoreVersionInfo, BetaAppLocalizationInfo, BetaAppReviewDetailInfo, BetaBuildLocalizationInfo,
-    BetaGroupInfo, BetaTesterInfo, BuildDetailInfo, BuildInfo, BuildsPage, CustomerReview,
-    CustomerReviewsPage, ReviewResponse, ReviewSubmission,
+    AppStoreVersionInfo, BetaAppLocalizationInfo, BetaAppReviewDetailInfo,
+    BetaBuildLocalizationInfo, BetaGroupInfo, BetaTesterInfo, BuildDetailInfo, BuildInfo,
+    BuildsPage, CustomerReview, CustomerReviewsPage, ReviewResponse, ReviewSubmission,
 };
 use crate::error::StackError;
 
@@ -315,6 +315,19 @@ impl ReviewSubmissionResource {
             submitted_by_email,
         }
     }
+}
+
+/// The single-resource document returned by `POST /v1/reviewSubmissions`. Only
+/// the created submission's `id` is needed to chain the follow-up requests, so
+/// the rest of the resource is ignored.
+#[derive(Deserialize)]
+struct ReviewSubmissionCreateDocument {
+    data: ReviewSubmissionCreateResource,
+}
+
+#[derive(Deserialize)]
+struct ReviewSubmissionCreateResource {
+    id: String,
 }
 
 // ---------------------------------------------------------------------------
@@ -1816,6 +1829,212 @@ impl AppStoreClient {
             .text()
             .await
             .map_err(|e| StackError::network(e.to_string()))?;
+        if let Some(err) = pending_agreements_error(status.as_u16(), &body) {
+            return Err(err);
+        }
+        Err(StackError::Http {
+            status: status.as_u16(),
+            message: body,
+        })
+    }
+
+    /// Submits the version `version_id` of `app_id` for App Store review.
+    ///
+    /// This drives three sequential App Store Connect requests, each routed
+    /// through the shared pending-agreements 403 guard:
+    /// 1. `POST /v1/reviewSubmissions` creating a submission for the `app`
+    ///    relationship. When `platform` is `Some`, an `attributes.platform`
+    ///    object carries it; when `None`, no `attributes` object is sent. The
+    ///    created submission's `data.id` is parsed for the follow-ups.
+    /// 2. `POST /v1/reviewSubmissionItems` attaching the `appStoreVersion`
+    ///    (`version_id`) to the new submission.
+    /// 3. `PATCH /v1/reviewSubmissions/{id}` setting the `submitted` attribute
+    ///    to `true` to finalize the submission.
+    ///
+    /// Any 2xx on each request advances to the next; success of the final PATCH
+    /// yields `Ok(())`.
+    ///
+    /// # Errors
+    /// [`StackError::PendingAgreements`] on a pending-agreements 403,
+    /// [`StackError::Http`] on any other non-2xx response, [`StackError::Decode`]
+    /// on malformed JSON, or [`StackError::Network`] on transport failure.
+    pub(crate) async fn submit_for_review(
+        &self,
+        app_id: &str,
+        version_id: &str,
+        platform: Option<&str>,
+    ) -> Result<(), StackError> {
+        // 1. Create the review submission.
+        let mut submission_data = serde_json::Map::new();
+        submission_data.insert("type".into(), json!("reviewSubmissions"));
+        if let Some(platform) = platform {
+            submission_data.insert("attributes".into(), json!({ "platform": platform }));
+        }
+        submission_data.insert(
+            "relationships".into(),
+            json!({
+                "app": { "data": { "type": "apps", "id": app_id } }
+            }),
+        );
+        let create_body = json!({ "data": submission_data });
+
+        let url = format!("{}/v1/reviewSubmissions", self.base_url);
+        let response_body = self.post_json_2xx(&url, &create_body).await?;
+        let document: ReviewSubmissionCreateDocument = serde_json::from_str(&response_body)
+            .map_err(|e| StackError::decode(format!("review submission response: {e}")))?;
+        let submission_id = document.data.id;
+
+        // 2. Attach the app store version as a submission item.
+        let item_url = format!("{}/v1/reviewSubmissionItems", self.base_url);
+        let item_body = json!({
+            "data": {
+                "type": "reviewSubmissionItems",
+                "relationships": {
+                    "reviewSubmission": {
+                        "data": { "type": "reviewSubmissions", "id": submission_id }
+                    },
+                    "appStoreVersion": {
+                        "data": { "type": "appStoreVersions", "id": version_id }
+                    }
+                }
+            }
+        });
+        self.post_json_2xx(&item_url, &item_body).await?;
+
+        // 3. Mark the submission submitted.
+        let patch_url = format!("{}/v1/reviewSubmissions/{submission_id}", self.base_url);
+        let patch_body = json!({
+            "data": {
+                "type": "reviewSubmissions",
+                "id": submission_id,
+                "attributes": { "submitted": true }
+            }
+        });
+        let token = self.auth.bearer_token().await?;
+        self.patch_no_content(&patch_url, &token, &patch_body).await
+    }
+
+    /// Cancels the active submission for `app_id`.
+    ///
+    /// 1. `GET /v1/reviewSubmissions?filter[state]=WAITING_FOR_REVIEW,IN_REVIEW\
+    ///    &filter[app]={app_id}` and take the first `data` item. When the page is
+    ///    empty this is a no-op that returns `Ok(())` (matching the host).
+    /// 2. `PATCH /v1/reviewSubmissions/{id}` setting the `canceled` attribute to
+    ///    `true`. Any 2xx → `Ok(())`.
+    ///
+    /// Both requests route through the shared pending-agreements 403 guard.
+    ///
+    /// # Errors
+    /// [`StackError::PendingAgreements`] on a pending-agreements 403,
+    /// [`StackError::Http`] on any other non-2xx response, [`StackError::Decode`]
+    /// on malformed JSON, or [`StackError::Network`] on transport failure.
+    pub(crate) async fn cancel_review(&self, app_id: &str) -> Result<(), StackError> {
+        let url = format!(
+            "{}/v1/reviewSubmissions?filter[state]=WAITING_FOR_REVIEW,IN_REVIEW\
+             &filter[app]={app_id}",
+            self.base_url
+        );
+        self.cancel_first_submission(&url).await
+    }
+
+    /// Manually releases the approved version identified by `version_id`.
+    ///
+    /// `POST /v1/appStoreVersionReleaseRequests` with a JSON:API body carrying
+    /// the `appStoreVersion` to-one relationship. Any 2xx → `Ok(())`. The call
+    /// routes through the shared pending-agreements 403 guard.
+    ///
+    /// # Errors
+    /// [`StackError::PendingAgreements`] on a pending-agreements 403,
+    /// [`StackError::Http`] on any other non-2xx response, or
+    /// [`StackError::Network`] on transport failure.
+    pub(crate) async fn release_version(&self, version_id: &str) -> Result<(), StackError> {
+        let url = format!("{}/v1/appStoreVersionReleaseRequests", self.base_url);
+        let request_body = json!({
+            "data": {
+                "type": "appStoreVersionReleaseRequests",
+                "relationships": {
+                    "appStoreVersion": {
+                        "data": { "type": "appStoreVersions", "id": version_id }
+                    }
+                }
+            }
+        });
+        self.post_json_2xx(&url, &request_body).await.map(|_| ())
+    }
+
+    /// Rejects the most recent submission for `app_id`.
+    ///
+    /// Like [`Self::cancel_review`] but the lookup `GET
+    /// /v1/reviewSubmissions?filter[app]={app_id}` carries no state filter, so
+    /// the first submission in any state is targeted. When none exists this is a
+    /// no-op that returns `Ok(())`. The active submission is then canceled via
+    /// `PATCH /v1/reviewSubmissions/{id}` with `canceled: true`. Both requests
+    /// route through the shared pending-agreements 403 guard.
+    ///
+    /// # Errors
+    /// [`StackError::PendingAgreements`] on a pending-agreements 403,
+    /// [`StackError::Http`] on any other non-2xx response, [`StackError::Decode`]
+    /// on malformed JSON, or [`StackError::Network`] on transport failure.
+    pub(crate) async fn reject_version(&self, app_id: &str) -> Result<(), StackError> {
+        let url = format!(
+            "{}/v1/reviewSubmissions?filter[app]={app_id}",
+            self.base_url
+        );
+        self.cancel_first_submission(&url).await
+    }
+
+    /// Shared GET-then-conditional-PATCH used by both [`Self::cancel_review`] and
+    /// [`Self::reject_version`]: fetches the submissions page at `get_url`, and
+    /// if a first item exists, PATCHes it with `canceled: true`. An empty page is
+    /// a no-op (`Ok(())`).
+    async fn cancel_first_submission(&self, get_url: &str) -> Result<(), StackError> {
+        let body = self.get_page(get_url).await?;
+        let page: ReviewSubmissionsResponse = serde_json::from_str(&body)
+            .map_err(|e| StackError::decode(format!("review submissions response: {e}")))?;
+
+        let Some(submission) = page.data.into_iter().next() else {
+            // No active submission to cancel — matches the host's no-op behavior.
+            return Ok(());
+        };
+
+        let patch_url = format!("{}/v1/reviewSubmissions/{}", self.base_url, submission.id);
+        let patch_body = json!({
+            "data": {
+                "type": "reviewSubmissions",
+                "id": submission.id,
+                "attributes": { "canceled": true }
+            }
+        });
+        let token = self.auth.bearer_token().await?;
+        self.patch_no_content(&patch_url, &token, &patch_body).await
+    }
+
+    /// Authenticated `POST` of a JSON:API body, returning the raw response body on
+    /// any 2xx or mapping the failure through the shared pending-agreements 403
+    /// guard (then [`StackError::Http`]); transport → [`StackError::Network`].
+    async fn post_json_2xx(
+        &self,
+        url: &str,
+        request_body: &serde_json::Value,
+    ) -> Result<String, StackError> {
+        let token = self.auth.bearer_token().await?;
+        let response = self
+            .http
+            .post(url)
+            .bearer_auth(token)
+            .json(request_body)
+            .send()
+            .await
+            .map_err(|e| StackError::network(e.to_string()))?;
+
+        let status = response.status();
+        let body = response
+            .text()
+            .await
+            .map_err(|e| StackError::network(e.to_string()))?;
+        if status.is_success() {
+            return Ok(body);
+        }
         if let Some(err) = pending_agreements_error(status.as_u16(), &body) {
             return Err(err);
         }
@@ -3433,10 +3652,7 @@ impl AppStoreClient {
     /// [`StackError::Http`] on any other non-2xx response (including a 404-style
     /// error when the app has no app-info resource), [`StackError::Decode`] on
     /// malformed JSON, or [`StackError::Network`] on transport failure.
-    pub(crate) async fn fetch_app_info(
-        &self,
-        app_id: &str,
-    ) -> Result<AppInfoDetails, StackError> {
+    pub(crate) async fn fetch_app_info(&self, app_id: &str) -> Result<AppInfoDetails, StackError> {
         // Request 1: the app-info resource with category/age-rating/localization
         // includes.
         let app_infos_url = format!(
@@ -3449,10 +3665,14 @@ impl AppStoreClient {
         let page: AppInfosResponse = serde_json::from_str(&body)
             .map_err(|e| StackError::decode(format!("app infos response: {e}")))?;
 
-        let app_info = page.data.into_iter().next().ok_or_else(|| StackError::Http {
-            status: 404,
-            message: format!("no app info found for app {app_id}"),
-        })?;
+        let app_info = page
+            .data
+            .into_iter()
+            .next()
+            .ok_or_else(|| StackError::Http {
+                status: 404,
+                message: format!("no app info found for app {app_id}"),
+            })?;
 
         // Resolve the `included[]` localizations and age-rating declarations.
         let mut localizations = Vec::new();
@@ -3719,10 +3939,7 @@ impl AppStoreClient {
     /// [`StackError::PendingAgreements`] on a pending-agreements 403,
     /// [`StackError::Http`] on any other non-2xx response, [`StackError::Decode`]
     /// on malformed JSON, or [`StackError::Network`] on transport failure.
-    pub(crate) async fn fetch_icon_url(
-        &self,
-        app_id: &str,
-    ) -> Result<Option<String>, StackError> {
+    pub(crate) async fn fetch_icon_url(&self, app_id: &str) -> Result<Option<String>, StackError> {
         let url = format!(
             "{}/v1/builds?filter[app]={app_id}&sort=-uploadedDate&limit=1",
             self.base_url
@@ -4756,6 +4973,293 @@ mod tests {
 
         let err = client(server.uri()).delete_version("V1").await.unwrap_err();
         assert!(matches!(err, StackError::Http { status: 403, .. }));
+    }
+
+    #[tokio::test]
+    async fn submit_for_review_chains_three_calls_with_platform() {
+        let server = MockServer::start().await;
+
+        // 1. Create submission — platform present, app relationship set.
+        Mock::given(method("POST"))
+            .and(path("/v1/reviewSubmissions"))
+            .and(wiremock::matchers::body_partial_json(serde_json::json!({
+                "data": {
+                    "type": "reviewSubmissions",
+                    "attributes": { "platform": "IOS" },
+                    "relationships": {
+                        "app": { "data": { "type": "apps", "id": "APP1" } }
+                    }
+                }
+            })))
+            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
+                "data": { "type": "reviewSubmissions", "id": "sub-1" }
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        // 2. Attach the version as a submission item.
+        Mock::given(method("POST"))
+            .and(path("/v1/reviewSubmissionItems"))
+            .and(wiremock::matchers::body_partial_json(serde_json::json!({
+                "data": {
+                    "type": "reviewSubmissionItems",
+                    "relationships": {
+                        "reviewSubmission": {
+                            "data": { "type": "reviewSubmissions", "id": "sub-1" }
+                        },
+                        "appStoreVersion": {
+                            "data": { "type": "appStoreVersions", "id": "VER1" }
+                        }
+                    }
+                }
+            })))
+            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
+                "data": { "type": "reviewSubmissionItems", "id": "item-1" }
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        // 3. Mark the submission submitted (ASC attribute key is `submitted`).
+        Mock::given(method("PATCH"))
+            .and(path("/v1/reviewSubmissions/sub-1"))
+            .and(wiremock::matchers::body_partial_json(serde_json::json!({
+                "data": {
+                    "type": "reviewSubmissions",
+                    "id": "sub-1",
+                    "attributes": { "submitted": true }
+                }
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": { "type": "reviewSubmissions", "id": "sub-1" }
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let result = client(server.uri())
+            .submit_for_review("APP1", "VER1", Some("IOS"))
+            .await;
+        assert!(result.is_ok());
+        // Each `.expect(1)` is verified on server drop.
+    }
+
+    #[tokio::test]
+    async fn submit_for_review_omits_attributes_when_platform_absent() {
+        let server = MockServer::start().await;
+
+        // The create body must omit `attributes` entirely when platform is None.
+        Mock::given(method("POST"))
+            .and(path("/v1/reviewSubmissions"))
+            .and(|req: &wiremock::Request| {
+                let body: serde_json::Value = serde_json::from_slice(&req.body).unwrap_or_default();
+                body["data"].get("attributes").is_none()
+            })
+            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
+                "data": { "type": "reviewSubmissions", "id": "sub-2" }
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        Mock::given(method("POST"))
+            .and(path("/v1/reviewSubmissionItems"))
+            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
+                "data": { "type": "reviewSubmissionItems", "id": "item-2" }
+            })))
+            .mount(&server)
+            .await;
+
+        Mock::given(method("PATCH"))
+            .and(path("/v1/reviewSubmissions/sub-2"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": { "type": "reviewSubmissions", "id": "sub-2" }
+            })))
+            .mount(&server)
+            .await;
+
+        let result = client(server.uri())
+            .submit_for_review("APP1", "VER1", None)
+            .await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn submit_for_review_surfaces_pending_agreements_on_create() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/reviewSubmissions"))
+            .respond_with(ResponseTemplate::new(403).set_body_json(serde_json::json!({
+                "errors": [{ "detail": "The agreement is pending." }]
+            })))
+            .mount(&server)
+            .await;
+
+        let err = client(server.uri())
+            .submit_for_review("APP1", "VER1", Some("IOS"))
+            .await
+            .unwrap_err();
+        assert!(matches!(err, StackError::PendingAgreements { .. }));
+    }
+
+    #[tokio::test]
+    async fn cancel_review_patches_active_submission() {
+        let server = MockServer::start().await;
+
+        // GET filtered by the active states returns one submission.
+        Mock::given(method("GET"))
+            .and(path("/v1/reviewSubmissions"))
+            .and(query_param("filter[state]", "WAITING_FOR_REVIEW,IN_REVIEW"))
+            .and(query_param("filter[app]", "APP1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": [{ "type": "reviewSubmissions", "id": "sub-9" }]
+            })))
+            .mount(&server)
+            .await;
+
+        // PATCH sets `canceled: true`.
+        Mock::given(method("PATCH"))
+            .and(path("/v1/reviewSubmissions/sub-9"))
+            .and(wiremock::matchers::body_partial_json(serde_json::json!({
+                "data": {
+                    "type": "reviewSubmissions",
+                    "id": "sub-9",
+                    "attributes": { "canceled": true }
+                }
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": { "type": "reviewSubmissions", "id": "sub-9" }
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        assert!(client(server.uri()).cancel_review("APP1").await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn cancel_review_is_noop_when_no_active_submission() {
+        let server = MockServer::start().await;
+
+        // Empty page → no PATCH issued. The absence of a PATCH mock proves no
+        // PATCH is attempted (any unmatched request would 404 and fail).
+        Mock::given(method("GET"))
+            .and(path("/v1/reviewSubmissions"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": []
+            })))
+            .mount(&server)
+            .await;
+
+        assert!(client(server.uri()).cancel_review("APP1").await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn release_version_posts_release_request() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/appStoreVersionReleaseRequests"))
+            .and(wiremock::matchers::body_partial_json(serde_json::json!({
+                "data": {
+                    "type": "appStoreVersionReleaseRequests",
+                    "relationships": {
+                        "appStoreVersion": {
+                            "data": { "type": "appStoreVersions", "id": "VER1" }
+                        }
+                    }
+                }
+            })))
+            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
+                "data": { "type": "appStoreVersionReleaseRequests", "id": "rel-1" }
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        assert!(client(server.uri()).release_version("VER1").await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn release_version_surfaces_http_error() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/appStoreVersionReleaseRequests"))
+            .respond_with(ResponseTemplate::new(409).set_body_string("conflict"))
+            .mount(&server)
+            .await;
+
+        let err = client(server.uri())
+            .release_version("VER1")
+            .await
+            .unwrap_err();
+        assert!(matches!(err, StackError::Http { status: 409, .. }));
+    }
+
+    #[tokio::test]
+    async fn reject_version_patches_first_submission() {
+        let server = MockServer::start().await;
+
+        // GET with NO state filter returns the first submission.
+        Mock::given(method("GET"))
+            .and(path("/v1/reviewSubmissions"))
+            .and(query_param("filter[app]", "APP1"))
+            .and(wiremock::matchers::query_param_is_missing("filter[state]"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": [{ "type": "reviewSubmissions", "id": "sub-r" }]
+            })))
+            .mount(&server)
+            .await;
+
+        Mock::given(method("PATCH"))
+            .and(path("/v1/reviewSubmissions/sub-r"))
+            .and(wiremock::matchers::body_partial_json(serde_json::json!({
+                "data": {
+                    "type": "reviewSubmissions",
+                    "id": "sub-r",
+                    "attributes": { "canceled": true }
+                }
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": { "type": "reviewSubmissions", "id": "sub-r" }
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        assert!(client(server.uri()).reject_version("APP1").await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn reject_version_is_noop_when_no_submission() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v1/reviewSubmissions"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": []
+            })))
+            .mount(&server)
+            .await;
+
+        assert!(client(server.uri()).reject_version("APP1").await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn cancel_review_surfaces_pending_agreements_on_get() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v1/reviewSubmissions"))
+            .respond_with(ResponseTemplate::new(403).set_body_json(serde_json::json!({
+                "errors": [{ "detail": "The agreement is pending acceptance." }]
+            })))
+            .mount(&server)
+            .await;
+
+        let err = client(server.uri())
+            .cancel_review("APP1")
+            .await
+            .unwrap_err();
+        assert!(matches!(err, StackError::PendingAgreements { .. }));
     }
 
     #[tokio::test]
@@ -6946,8 +7450,14 @@ mod tests {
 
         // Category ids come from the app-info RELATIONSHIPS.
         assert_eq!(detail.primary_category_id.as_deref(), Some("CAT_PRIMARY"));
-        assert_eq!(detail.primary_subcategory_one_id.as_deref(), Some("SUB_PRIMARY"));
-        assert_eq!(detail.secondary_category_id.as_deref(), Some("CAT_SECONDARY"));
+        assert_eq!(
+            detail.primary_subcategory_one_id.as_deref(),
+            Some("SUB_PRIMARY")
+        );
+        assert_eq!(
+            detail.secondary_category_id.as_deref(),
+            Some("CAT_SECONDARY")
+        );
         assert_eq!(
             detail.secondary_subcategory_one_id.as_deref(),
             Some("SUB_SECONDARY")
@@ -6963,7 +7473,10 @@ mod tests {
         let age_rating = detail.age_rating.expect("age rating present");
         assert_eq!(age_rating.id, "decl-1");
         assert_eq!(age_rating.gambling_simulated.as_deref(), Some("NONE"));
-        assert_eq!(age_rating.violence_realistic.as_deref(), Some("INFREQUENT_OR_MILD"));
+        assert_eq!(
+            age_rating.violence_realistic.as_deref(),
+            Some("INFREQUENT_OR_MILD")
+        );
         assert_eq!(age_rating.is_advertising, Some(true));
         assert_eq!(age_rating.is_gambling, Some(false));
         assert_eq!(age_rating.is_unrestricted_web_access, Some(true));
@@ -6990,7 +7503,10 @@ mod tests {
             .mount(&server)
             .await;
 
-        let err = client(server.uri()).fetch_app_info("app-1").await.unwrap_err();
+        let err = client(server.uri())
+            .fetch_app_info("app-1")
+            .await
+            .unwrap_err();
         assert!(matches!(err, StackError::Http { status: 404, .. }));
     }
 
@@ -7005,7 +7521,10 @@ mod tests {
             .mount(&server)
             .await;
 
-        let err = client(server.uri()).fetch_app_info("app-1").await.unwrap_err();
+        let err = client(server.uri())
+            .fetch_app_info("app-1")
+            .await
+            .unwrap_err();
         match err {
             StackError::PendingAgreements { message } => {
                 assert!(message.contains("pending agreements"))

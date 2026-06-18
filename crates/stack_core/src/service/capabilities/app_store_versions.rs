@@ -14,7 +14,9 @@ use crate::error::StackError;
 /// `Arc<AppStoreVersions>` shared across the tokio runtime.
 ///
 /// Covers both reads (list versions) and writes (create, update, delete a
-/// version) — see RUST_CORE_PLAN.md Phase 2.
+/// version), plus the version lifecycle writes (submit for review, cancel an
+/// in-flight review, manually release an approved version, and reject a
+/// submission) — see RUST_CORE_PLAN.md Phase 2.
 #[async_trait]
 pub(crate) trait AppStoreVersionsImpl: Send + Sync {
     /// Lists the App Store versions for `app_id`, up to `limit`.
@@ -46,6 +48,25 @@ pub(crate) trait AppStoreVersionsImpl: Send + Sync {
 
     /// Deletes the version identified by `id`.
     async fn delete_version(&self, id: String) -> Result<(), StackError>;
+
+    /// Submits `version_id` (of `app_id`) for App Store review, optionally
+    /// scoping the submission to `platform`.
+    async fn submit_for_review(
+        &self,
+        app_id: String,
+        version_id: String,
+        platform: Option<String>,
+    ) -> Result<(), StackError>;
+
+    /// Cancels the active (waiting-for-review or in-review) submission for
+    /// `app_id`, if any.
+    async fn cancel_review(&self, app_id: String) -> Result<(), StackError>;
+
+    /// Manually releases the approved version identified by `version_id`.
+    async fn release_version(&self, version_id: String) -> Result<(), StackError>;
+
+    /// Rejects the most recent submission for `app_id`, if any.
+    async fn reject_version(&self, app_id: String) -> Result<(), StackError>;
 }
 
 /// UniFFI-exported App Store Versions capability handle. A thin, binding-friendly
@@ -129,5 +150,69 @@ impl AppStoreVersions {
     /// transport failure.
     pub async fn delete_version(&self, id: String) -> Result<(), StackError> {
         self.inner.delete_version(id).await
+    }
+
+    /// Submits the version `version_id` of `app_id` for App Store review.
+    ///
+    /// When `platform` is `Some`, the review submission is scoped to that raw
+    /// ASC platform value (`IOS` / `MAC_OS` / `TV_OS` / `VISION_OS`); when
+    /// `None`, the submission carries no platform attribute. This drives three
+    /// sequential App Store Connect requests (create submission, attach the
+    /// version as a submission item, then mark the submission submitted).
+    ///
+    /// # Errors
+    /// [`StackError::PendingAgreements`] on a pending-agreements 403,
+    /// [`StackError::Http`] on any other non-2xx response, [`StackError::Decode`]
+    /// on malformed JSON, or [`StackError::Network`] on transport failure.
+    pub async fn submit_for_review(
+        &self,
+        app_id: String,
+        version_id: String,
+        platform: Option<String>,
+    ) -> Result<(), StackError> {
+        self.inner
+            .submit_for_review(app_id, version_id, platform)
+            .await
+    }
+
+    /// Cancels the active submission for `app_id`.
+    ///
+    /// Looks up the first submission in the `WAITING_FOR_REVIEW` or `IN_REVIEW`
+    /// state for `app_id` and marks it canceled. When no such submission exists
+    /// this is a no-op that returns `Ok(())`.
+    ///
+    /// # Errors
+    /// [`StackError::PendingAgreements`] on a pending-agreements 403,
+    /// [`StackError::Http`] on any other non-2xx response, [`StackError::Decode`]
+    /// on malformed JSON, or [`StackError::Network`] on transport failure.
+    pub async fn cancel_review(&self, app_id: String) -> Result<(), StackError> {
+        self.inner.cancel_review(app_id).await
+    }
+
+    /// Manually releases the approved version identified by `version_id`.
+    ///
+    /// Issues a single App Store Connect release request for the version. Any
+    /// 2xx is treated as success.
+    ///
+    /// # Errors
+    /// [`StackError::PendingAgreements`] on a pending-agreements 403,
+    /// [`StackError::Http`] on any other non-2xx response, or
+    /// [`StackError::Network`] on transport failure.
+    pub async fn release_version(&self, version_id: String) -> Result<(), StackError> {
+        self.inner.release_version(version_id).await
+    }
+
+    /// Rejects the most recent submission for `app_id`.
+    ///
+    /// Looks up the first submission for `app_id` (regardless of state) and
+    /// marks it canceled. When no submission exists this is a no-op that returns
+    /// `Ok(())`.
+    ///
+    /// # Errors
+    /// [`StackError::PendingAgreements`] on a pending-agreements 403,
+    /// [`StackError::Http`] on any other non-2xx response, [`StackError::Decode`]
+    /// on malformed JSON, or [`StackError::Network`] on transport failure.
+    pub async fn reject_version(&self, app_id: String) -> Result<(), StackError> {
+        self.inner.reject_version(app_id).await
     }
 }
