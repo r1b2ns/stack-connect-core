@@ -6,7 +6,7 @@ use serde_json::json;
 use crate::auth::es256::AppStoreAuthenticator;
 use crate::domain::{
     AgeRatingDeclarationInfo, AppCategoryInfo, AppInfo, AppInfoDetails, AppInfoLocalizationInfo,
-    AppStoreLocalizationInfo, AppStoreVersionInfo, BetaAppLocalizationInfo,
+    AppReviewDetailInfo, AppStoreLocalizationInfo, AppStoreVersionInfo, BetaAppLocalizationInfo,
     BetaAppReviewDetailInfo, BetaBuildLocalizationInfo, BetaGroupInfo, BetaTesterInfo,
     BuildDetailInfo, BuildInfo, BuildsPage, CustomerReview, CustomerReviewsPage, PhasedReleaseInfo,
     ReviewResponse, ReviewSubmission, ScreenshotInfo, ScreenshotSetInfo,
@@ -1512,6 +1512,65 @@ impl BetaAppReviewDetailResource {
             demo_account_password: self.attributes.demo_account_password,
             is_demo_account_required: self.attributes.is_demo_account_required,
             notes: self.attributes.notes,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// App review detail (JSON:API)
+// ---------------------------------------------------------------------------
+
+/// A JSON:API single-resource document wrapping one `appStoreReviewDetails`, as
+/// returned by the version-relationship fetch (`GET`) and the update (`PATCH`)
+/// endpoints: `{ "data": { ... } }`. App Store Connect exposes at most one app
+/// review detail per version, so this is a single object, not a list; `data`
+/// may be null/absent when none is attached.
+#[derive(Deserialize)]
+struct AppReviewDetailDocument {
+    #[serde(default)]
+    data: Option<AppReviewDetailResource>,
+}
+
+#[derive(Deserialize)]
+struct AppReviewDetailResource {
+    id: String,
+    #[serde(default)]
+    attributes: AppReviewDetailAttributes,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct AppReviewDetailAttributes {
+    #[serde(default)]
+    contact_first_name: Option<String>,
+    #[serde(default)]
+    contact_last_name: Option<String>,
+    #[serde(default)]
+    contact_email: Option<String>,
+    #[serde(default)]
+    contact_phone: Option<String>,
+    #[serde(default)]
+    notes: Option<String>,
+    #[serde(default)]
+    demo_account_name: Option<String>,
+    #[serde(default)]
+    demo_account_password: Option<String>,
+    #[serde(default)]
+    is_demo_account_required: Option<bool>,
+}
+
+impl AppReviewDetailResource {
+    fn into_app_review_detail_info(self) -> AppReviewDetailInfo {
+        AppReviewDetailInfo {
+            id: self.id,
+            contact_first_name: self.attributes.contact_first_name,
+            contact_last_name: self.attributes.contact_last_name,
+            contact_email: self.attributes.contact_email,
+            contact_phone: self.attributes.contact_phone,
+            notes: self.attributes.notes,
+            demo_account_name: self.attributes.demo_account_name,
+            demo_account_password: self.attributes.demo_account_password,
+            is_demo_account_required: self.attributes.is_demo_account_required,
         }
     }
 }
@@ -4660,6 +4719,160 @@ impl AppStoreClient {
         let document: BetaAppReviewDetailDocument = serde_json::from_str(&response_body)
             .map_err(|e| StackError::decode(format!("beta app review detail response: {e}")))?;
         Ok(document.data.into_beta_app_review_detail_info())
+    }
+
+    /// Fetches the single app review detail for `version_id`, or `None` when
+    /// there is no app review detail.
+    ///
+    /// `GET /v1/appStoreVersions/{version_id}/appStoreReviewDetail` — the
+    /// version's singular relationship endpoint, which returns a single-resource
+    /// document (`{ "data": { ... } }`), not a list. There is no pagination.
+    /// Returns `Ok(None)` when the document's `data` is null/absent or the
+    /// relationship endpoint answers 404 (no detail attached).
+    ///
+    /// # Errors
+    /// [`StackError::PendingAgreements`] on a pending-agreements 403,
+    /// [`StackError::Http`] on any other non-2xx response, [`StackError::Decode`]
+    /// on malformed JSON, or [`StackError::Network`] on transport failure.
+    pub(crate) async fn fetch_app_review_detail(
+        &self,
+        version_id: &str,
+    ) -> Result<Option<AppReviewDetailInfo>, StackError> {
+        let url = format!(
+            "{}/v1/appStoreVersions/{version_id}/appStoreReviewDetail",
+            self.base_url
+        );
+        let token = self.auth.bearer_token().await?;
+
+        let response = self
+            .http
+            .get(&url)
+            .bearer_auth(token)
+            .send()
+            .await
+            .map_err(|e| StackError::network(e.to_string()))?;
+
+        let status = response.status();
+        // No app review detail on the version → ASC returns 404; treat as absent.
+        if status.as_u16() == 404 {
+            return Ok(None);
+        }
+        let response_body = response
+            .text()
+            .await
+            .map_err(|e| StackError::network(e.to_string()))?;
+        if !status.is_success() {
+            if let Some(err) = pending_agreements_error(status.as_u16(), &response_body) {
+                return Err(err);
+            }
+            return Err(StackError::Http {
+                status: status.as_u16(),
+                message: response_body,
+            });
+        }
+
+        let document: AppReviewDetailDocument = serde_json::from_str(&response_body)
+            .map_err(|e| StackError::decode(format!("app review detail response: {e}")))?;
+        Ok(document
+            .data
+            .map(AppReviewDetailResource::into_app_review_detail_info))
+    }
+
+    /// Updates the app review detail identified by `detail_id`, replacing only
+    /// the provided attributes.
+    ///
+    /// `PATCH /v1/appStoreReviewDetails/{detail_id}` (note the plural path
+    /// segment, in contrast to the singular `appStoreReviewDetail` relationship
+    /// used for the fetch) with a JSON:API body that includes only the `Some`
+    /// attributes and no relationships. Success is any 2xx (`200 OK`); the
+    /// returned single-resource document is mapped into an [`AppReviewDetailInfo`].
+    ///
+    /// # Errors
+    /// [`StackError::PendingAgreements`] on a pending-agreements 403,
+    /// [`StackError::Http`] on any other non-2xx response, [`StackError::Decode`]
+    /// on malformed JSON, or [`StackError::Network`] on transport failure.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn update_app_review_detail(
+        &self,
+        detail_id: &str,
+        contact_first_name: Option<&str>,
+        contact_last_name: Option<&str>,
+        contact_email: Option<&str>,
+        contact_phone: Option<&str>,
+        notes: Option<&str>,
+        demo_account_name: Option<&str>,
+        demo_account_password: Option<&str>,
+        is_demo_account_required: Option<bool>,
+    ) -> Result<AppReviewDetailInfo, StackError> {
+        let url = format!("{}/v1/appStoreReviewDetails/{detail_id}", self.base_url);
+        let token = self.auth.bearer_token().await?;
+
+        let mut attributes = serde_json::Map::new();
+        if let Some(value) = contact_first_name {
+            attributes.insert("contactFirstName".into(), json!(value));
+        }
+        if let Some(value) = contact_last_name {
+            attributes.insert("contactLastName".into(), json!(value));
+        }
+        if let Some(value) = contact_email {
+            attributes.insert("contactEmail".into(), json!(value));
+        }
+        if let Some(value) = contact_phone {
+            attributes.insert("contactPhone".into(), json!(value));
+        }
+        if let Some(value) = notes {
+            attributes.insert("notes".into(), json!(value));
+        }
+        if let Some(value) = demo_account_name {
+            attributes.insert("demoAccountName".into(), json!(value));
+        }
+        if let Some(value) = demo_account_password {
+            attributes.insert("demoAccountPassword".into(), json!(value));
+        }
+        if let Some(value) = is_demo_account_required {
+            attributes.insert("isDemoAccountRequired".into(), json!(value));
+        }
+
+        let request_body = json!({
+            "data": {
+                "type": "appStoreReviewDetails",
+                "id": detail_id,
+                "attributes": attributes
+            }
+        });
+
+        let response = self
+            .http
+            .patch(&url)
+            .bearer_auth(token)
+            .json(&request_body)
+            .send()
+            .await
+            .map_err(|e| StackError::network(e.to_string()))?;
+
+        let status = response.status();
+        let response_body = response
+            .text()
+            .await
+            .map_err(|e| StackError::network(e.to_string()))?;
+        if !status.is_success() {
+            if let Some(err) = pending_agreements_error(status.as_u16(), &response_body) {
+                return Err(err);
+            }
+            return Err(StackError::Http {
+                status: status.as_u16(),
+                message: response_body,
+            });
+        }
+
+        let document: AppReviewDetailDocument = serde_json::from_str(&response_body)
+            .map_err(|e| StackError::decode(format!("app review detail response: {e}")))?;
+        document
+            .data
+            .map(AppReviewDetailResource::into_app_review_detail_info)
+            .ok_or_else(|| {
+                StackError::decode("app review detail response: missing data".to_string())
+            })
     }
 
     /// Authenticated `PATCH` of `request_body` to `url`, succeeding on any 2xx
@@ -9099,6 +9312,202 @@ mod tests {
 
         let err = client(server.uri())
             .update_beta_app_review_detail(
+                "detail-1",
+                Some("Ada"),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(err, StackError::Http { status: 404, .. }));
+    }
+
+    #[tokio::test]
+    async fn fetch_app_review_detail_maps_all_fields() {
+        let server = MockServer::start().await;
+
+        // The version's singular relationship endpoint returns a single-resource
+        // document with every attribute populated.
+        Mock::given(method("GET"))
+            .and(path("/v1/appStoreVersions/ver-1/appStoreReviewDetail"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": {
+                    "type": "appStoreReviewDetails",
+                    "id": "detail-1",
+                    "attributes": {
+                        "contactFirstName": "Ada",
+                        "contactLastName": "Lovelace",
+                        "contactEmail": "ada@example.com",
+                        "contactPhone": "+15551234567",
+                        "notes": "Use the demo account to reach the paywall.",
+                        "demoAccountName": "demo-user",
+                        "demoAccountPassword": "s3cr3t",
+                        "isDemoAccountRequired": true
+                    }
+                }
+            })))
+            .mount(&server)
+            .await;
+
+        let detail = client(server.uri())
+            .fetch_app_review_detail("ver-1")
+            .await
+            .unwrap()
+            .expect("expected an app review detail");
+
+        assert_eq!(detail.id, "detail-1");
+        assert_eq!(detail.contact_first_name.as_deref(), Some("Ada"));
+        assert_eq!(detail.contact_last_name.as_deref(), Some("Lovelace"));
+        assert_eq!(detail.contact_email.as_deref(), Some("ada@example.com"));
+        assert_eq!(detail.contact_phone.as_deref(), Some("+15551234567"));
+        assert_eq!(
+            detail.notes.as_deref(),
+            Some("Use the demo account to reach the paywall.")
+        );
+        assert_eq!(detail.demo_account_name.as_deref(), Some("demo-user"));
+        assert_eq!(detail.demo_account_password.as_deref(), Some("s3cr3t"));
+        assert_eq!(detail.is_demo_account_required, Some(true));
+    }
+
+    #[tokio::test]
+    async fn fetch_app_review_detail_returns_none_when_data_null() {
+        let server = MockServer::start().await;
+
+        // ASC may return a document with a null `data` when no app review detail
+        // is attached to the version.
+        Mock::given(method("GET"))
+            .and(path("/v1/appStoreVersions/ver-1/appStoreReviewDetail"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": null
+            })))
+            .mount(&server)
+            .await;
+
+        let detail = client(server.uri())
+            .fetch_app_review_detail("ver-1")
+            .await
+            .unwrap();
+        assert!(detail.is_none());
+    }
+
+    #[tokio::test]
+    async fn fetch_app_review_detail_returns_none_on_404() {
+        let server = MockServer::start().await;
+
+        // A 404 (no app-review-detail relationship) resolves to `Ok(None)`.
+        Mock::given(method("GET"))
+            .and(path("/v1/appStoreVersions/ver-1/appStoreReviewDetail"))
+            .respond_with(ResponseTemplate::new(404).set_body_string("not found"))
+            .mount(&server)
+            .await;
+
+        let detail = client(server.uri())
+            .fetch_app_review_detail("ver-1")
+            .await
+            .unwrap();
+        assert!(detail.is_none());
+    }
+
+    #[tokio::test]
+    async fn update_app_review_detail_patches_and_maps() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("PATCH"))
+            // Note the PLURAL path resource, distinct from the singular
+            // relationship segment used by the fetch.
+            .and(path("/v1/appStoreReviewDetails/detail-1"))
+            // Only the provided attributes should be present; no relationships.
+            // `isDemoAccountRequired` is sent as a bool.
+            .and(wiremock::matchers::body_partial_json(serde_json::json!({
+                "data": {
+                    "type": "appStoreReviewDetails",
+                    "id": "detail-1",
+                    "attributes": {
+                        "contactEmail": "ada@example.com",
+                        "notes": "No demo account needed.",
+                        "isDemoAccountRequired": false
+                    }
+                }
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": {
+                    "type": "appStoreReviewDetails",
+                    "id": "detail-1",
+                    "attributes": {
+                        "contactFirstName": "Ada",
+                        "contactLastName": "Lovelace",
+                        "contactEmail": "ada@example.com",
+                        "contactPhone": "+15551234567",
+                        "notes": "No demo account needed.",
+                        "demoAccountName": "demo-user",
+                        "demoAccountPassword": "s3cr3t",
+                        "isDemoAccountRequired": false
+                    }
+                }
+            })))
+            .mount(&server)
+            .await;
+
+        let detail = client(server.uri())
+            .update_app_review_detail(
+                "detail-1",
+                None,
+                None,
+                Some("ada@example.com"),
+                None,
+                Some("No demo account needed."),
+                None,
+                None,
+                Some(false),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(detail.id, "detail-1");
+        assert_eq!(detail.contact_email.as_deref(), Some("ada@example.com"));
+        assert_eq!(detail.notes.as_deref(), Some("No demo account needed."));
+        assert_eq!(detail.is_demo_account_required, Some(false));
+    }
+
+    #[tokio::test]
+    async fn update_app_review_detail_surfaces_pending_agreements() {
+        let server = MockServer::start().await;
+        Mock::given(method("PATCH"))
+            .and(path("/v1/appStoreReviewDetails/detail-1"))
+            .respond_with(ResponseTemplate::new(403).set_body_json(serde_json::json!({
+                "errors": [{ "detail": "The agreement is pending." }]
+            })))
+            .mount(&server)
+            .await;
+
+        let err = client(server.uri())
+            .update_app_review_detail("detail-1", None, None, None, None, None, None, None, None)
+            .await
+            .unwrap_err();
+        match err {
+            StackError::PendingAgreements { message } => {
+                assert!(message.contains("pending agreements"))
+            }
+            other => panic!("expected PendingAgreements, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn update_app_review_detail_surfaces_http_error() {
+        let server = MockServer::start().await;
+        Mock::given(method("PATCH"))
+            .and(path("/v1/appStoreReviewDetails/detail-1"))
+            .respond_with(ResponseTemplate::new(404).set_body_string("not found"))
+            .mount(&server)
+            .await;
+
+        let err = client(server.uri())
+            .update_app_review_detail(
                 "detail-1",
                 Some("Ada"),
                 None,

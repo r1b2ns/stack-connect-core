@@ -5,11 +5,11 @@ use async_trait::async_trait;
 use super::client::AppStoreClient;
 use crate::auth::es256::AppStoreAuthenticator;
 use crate::domain::{
-    AppCategoryInfo, AppInfo, AppInfoDetails, AppInfoLocalizationInfo, AppStoreLocalizationInfo,
-    AppStoreVersionInfo, BetaAppLocalizationInfo, BetaAppReviewDetailInfo,
-    BetaBuildLocalizationInfo, BetaGroupInfo, BetaTesterInfo, BuildDetailInfo, BuildInfo,
-    BuildsPage, CustomerReview, CustomerReviewsPage, PhasedReleaseInfo, ReviewResponse,
-    ReviewSubmission, ScreenshotSetInfo,
+    AppCategoryInfo, AppInfo, AppInfoDetails, AppInfoLocalizationInfo, AppReviewDetailInfo,
+    AppStoreLocalizationInfo, AppStoreVersionInfo, BetaAppLocalizationInfo,
+    BetaAppReviewDetailInfo, BetaBuildLocalizationInfo, BetaGroupInfo, BetaTesterInfo,
+    BuildDetailInfo, BuildInfo, BuildsPage, CustomerReview, CustomerReviewsPage, PhasedReleaseInfo,
+    ReviewResponse, ReviewSubmission, ScreenshotSetInfo,
 };
 use crate::error::StackError;
 use crate::service::capabilities::app_metadata::{AppMetadata, AppMetadataImpl};
@@ -322,6 +322,41 @@ impl AppStoreVersionsImpl for AppStoreAppStoreVersions {
         localization_id: String,
     ) -> Result<Vec<ScreenshotSetInfo>, StackError> {
         self.client.fetch_screenshot_sets(&localization_id).await
+    }
+
+    async fn fetch_app_review_detail(
+        &self,
+        version_id: String,
+    ) -> Result<Option<AppReviewDetailInfo>, StackError> {
+        self.client.fetch_app_review_detail(&version_id).await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn update_app_review_detail(
+        &self,
+        detail_id: String,
+        contact_first_name: Option<String>,
+        contact_last_name: Option<String>,
+        contact_email: Option<String>,
+        contact_phone: Option<String>,
+        notes: Option<String>,
+        demo_account_name: Option<String>,
+        demo_account_password: Option<String>,
+        is_demo_account_required: Option<bool>,
+    ) -> Result<AppReviewDetailInfo, StackError> {
+        self.client
+            .update_app_review_detail(
+                &detail_id,
+                contact_first_name.as_deref(),
+                contact_last_name.as_deref(),
+                contact_email.as_deref(),
+                contact_phone.as_deref(),
+                notes.as_deref(),
+                demo_account_name.as_deref(),
+                demo_account_password.as_deref(),
+                is_demo_account_required,
+            )
+            .await
     }
 }
 

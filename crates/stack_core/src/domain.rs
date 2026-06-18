@@ -219,6 +219,26 @@ pub struct BetaAppReviewDetailInfo {
     pub notes: Option<String>,
 }
 
+/// The App Store version "App Review Information" detail: the app-review contact
+/// (name, email, phone), optional demo account credentials, and reviewer notes
+/// surfaced at submission time. App Store Connect exposes exactly one per version
+/// (the singular `appStoreReviewDetail` relationship). All attributes are
+/// optional. This is version-scoped, distinct from [`BetaAppReviewDetailInfo`]
+/// (which is the TestFlight/app-scoped beta review detail).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, uniffi::Record)]
+#[serde(rename_all = "camelCase")]
+pub struct AppReviewDetailInfo {
+    pub id: String,
+    pub contact_first_name: Option<String>,
+    pub contact_last_name: Option<String>,
+    pub contact_email: Option<String>,
+    pub contact_phone: Option<String>,
+    pub notes: Option<String>,
+    pub demo_account_name: Option<String>,
+    pub demo_account_password: Option<String>,
+    pub is_demo_account_required: Option<bool>,
+}
+
 /// An App Store app-info localization, keyed by `locale`. Carries the per-locale
 /// App Store listing metadata: the `name` and `subtitle` shown on the product
 /// page, plus the three privacy links/text (`privacy_policy_url`,

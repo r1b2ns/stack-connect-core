@@ -3,7 +3,8 @@ use std::sync::Arc;
 use async_trait::async_trait;
 
 use crate::domain::{
-    AppStoreLocalizationInfo, AppStoreVersionInfo, PhasedReleaseInfo, ScreenshotSetInfo,
+    AppReviewDetailInfo, AppStoreLocalizationInfo, AppStoreVersionInfo, PhasedReleaseInfo,
+    ScreenshotSetInfo,
 };
 use crate::error::StackError;
 
@@ -126,6 +127,29 @@ pub(crate) trait AppStoreVersionsImpl: Send + Sync {
         &self,
         localization_id: String,
     ) -> Result<Vec<ScreenshotSetInfo>, StackError>;
+
+    /// Fetches the single app review detail for `version_id`, or `None` when
+    /// there is no app review detail.
+    async fn fetch_app_review_detail(
+        &self,
+        version_id: String,
+    ) -> Result<Option<AppReviewDetailInfo>, StackError>;
+
+    /// Updates the app review detail `detail_id`, replacing only the provided
+    /// attributes, and returns the updated detail.
+    #[allow(clippy::too_many_arguments)]
+    async fn update_app_review_detail(
+        &self,
+        detail_id: String,
+        contact_first_name: Option<String>,
+        contact_last_name: Option<String>,
+        contact_email: Option<String>,
+        contact_phone: Option<String>,
+        notes: Option<String>,
+        demo_account_name: Option<String>,
+        demo_account_password: Option<String>,
+        is_demo_account_required: Option<bool>,
+    ) -> Result<AppReviewDetailInfo, StackError>;
 }
 
 /// UniFFI-exported App Store Versions capability handle. A thin, binding-friendly
@@ -407,5 +431,66 @@ impl AppStoreVersions {
         localization_id: String,
     ) -> Result<Vec<ScreenshotSetInfo>, StackError> {
         self.inner.fetch_screenshot_sets(localization_id).await
+    }
+
+    /// Fetches the single app review detail for `version_id` — the version's
+    /// "App Review Information": the app-review contact and optional demo account
+    /// credentials shown at submission time.
+    ///
+    /// Resolves the singular `appStoreReviewDetail` relationship of the version.
+    /// Returns `Ok(None)` when no app review detail exists (the document's `data`
+    /// is null/absent, or the relationship endpoint answers 404).
+    ///
+    /// # Errors
+    /// [`StackError::PendingAgreements`] when App Store Connect reports pending
+    /// agreements, [`StackError::Http`] on any other non-2xx response,
+    /// [`StackError::Decode`] on malformed JSON, or [`StackError::Network`] on
+    /// transport failure.
+    pub async fn fetch_app_review_detail(
+        &self,
+        version_id: String,
+    ) -> Result<Option<AppReviewDetailInfo>, StackError> {
+        self.inner.fetch_app_review_detail(version_id).await
+    }
+
+    /// Updates the app review detail `detail_id`, replacing only the provided
+    /// attributes, and returns the updated detail. Every attribute is optional:
+    /// `contact_*` set the app-review contact, `notes` are the reviewer notes,
+    /// `demo_account_*` set the demo account credentials, and
+    /// `is_demo_account_required` toggles whether a demo account is needed. Only
+    /// the `Some` attributes are sent in the PATCH body; `None` attributes are
+    /// omitted entirely (and so left untouched on App Store Connect).
+    ///
+    /// # Errors
+    /// [`StackError::PendingAgreements`] when App Store Connect reports pending
+    /// agreements, [`StackError::Http`] on any other non-2xx response,
+    /// [`StackError::Decode`] on malformed JSON, or [`StackError::Network`] on
+    /// transport failure.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn update_app_review_detail(
+        &self,
+        detail_id: String,
+        contact_first_name: Option<String>,
+        contact_last_name: Option<String>,
+        contact_email: Option<String>,
+        contact_phone: Option<String>,
+        notes: Option<String>,
+        demo_account_name: Option<String>,
+        demo_account_password: Option<String>,
+        is_demo_account_required: Option<bool>,
+    ) -> Result<AppReviewDetailInfo, StackError> {
+        self.inner
+            .update_app_review_detail(
+                detail_id,
+                contact_first_name,
+                contact_last_name,
+                contact_email,
+                contact_phone,
+                notes,
+                demo_account_name,
+                demo_account_password,
+                is_demo_account_required,
+            )
+            .await
     }
 }
