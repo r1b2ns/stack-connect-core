@@ -243,11 +243,7 @@ impl BetaGroups {
     /// [`StackError::PendingAgreements`] when App Store Connect reports pending
     /// agreements, [`StackError::Http`] on any other non-2xx response, or
     /// [`StackError::Network`] on transport failure.
-    pub async fn resend_invite(
-        &self,
-        tester_id: String,
-        app_id: String,
-    ) -> Result<(), StackError> {
+    pub async fn resend_invite(&self, tester_id: String, app_id: String) -> Result<(), StackError> {
         self.inner.resend_invite(tester_id, app_id).await
     }
 }

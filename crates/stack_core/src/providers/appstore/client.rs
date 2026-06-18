@@ -6,8 +6,8 @@ use serde_json::json;
 use crate::auth::es256::AppStoreAuthenticator;
 use crate::domain::{
     AppInfo, AppStoreVersionInfo, BetaAppLocalizationInfo, BetaAppReviewDetailInfo,
-    BetaBuildLocalizationInfo, BetaGroupInfo, BetaTesterInfo, BuildInfo, CustomerReview,
-    CustomerReviewsPage, ReviewResponse, ReviewSubmission,
+    BetaBuildLocalizationInfo, BetaGroupInfo, BetaTesterInfo, BuildDetailInfo, BuildInfo,
+    BuildsPage, CustomerReview, CustomerReviewsPage, ReviewResponse, ReviewSubmission,
 };
 use crate::error::StackError;
 
@@ -380,13 +380,29 @@ impl AppStoreVersionResource {
 // Builds (JSON:API)
 // ---------------------------------------------------------------------------
 
-/// A JSON:API document page of `builds` resources.
+/// A JSON:API document page of `builds` resources, with related resources
+/// (`preReleaseVersion`, `buildBetaDetail`, `betaAppReviewSubmission`,
+/// `betaGroups`, `betaBuildLocalizations`) carried in the heterogeneous
+/// `included[]` when requested via `include`.
 #[derive(Deserialize)]
 struct BuildsResponse {
     #[serde(default)]
     data: Vec<BuildResource>,
     #[serde(default)]
+    included: Vec<BuildIncluded>,
+    #[serde(default)]
     links: Links,
+}
+
+/// A JSON:API single-resource document wrapping one `builds`, with related
+/// resources carried in `included[]`. Used by the build-detail and
+/// current-build paths.
+#[derive(Deserialize)]
+struct BuildDocument {
+    #[serde(default)]
+    data: Option<BuildResource>,
+    #[serde(default)]
+    included: Vec<BuildIncluded>,
 }
 
 #[derive(Deserialize)]
@@ -394,6 +410,8 @@ struct BuildResource {
     id: String,
     #[serde(default)]
     attributes: BuildAttributes,
+    #[serde(default)]
+    relationships: BuildRelationships,
 }
 
 #[derive(Deserialize, Default)]
@@ -411,20 +429,222 @@ struct BuildAttributes {
     min_os_version: Option<String>,
     #[serde(default)]
     expiration_date: Option<String>,
+    #[serde(default)]
+    computed_min_mac_os_version: Option<String>,
+    #[serde(default)]
+    computed_min_vision_os_version: Option<String>,
+    #[serde(default)]
+    build_audience_type: Option<String>,
+    #[serde(default)]
+    uses_non_exempt_encryption: Option<bool>,
+    #[serde(default)]
+    icon_asset_token: Option<IconAssetToken>,
 }
 
-impl BuildResource {
-    fn into_build_info(self, app_id: &str) -> BuildInfo {
-        BuildInfo {
-            id: self.id,
-            app_id: app_id.to_string(),
-            version: self.attributes.version,
-            uploaded_date: self.attributes.uploaded_date,
-            expired: self.attributes.expired,
-            processing_state: self.attributes.processing_state,
-            min_os_version: self.attributes.min_os_version,
-            expiration_date: self.attributes.expiration_date,
+/// The build's `iconAssetToken` template object. The icon URL is computed by
+/// substituting `{w}`/`{h}`/`{f}` placeholders in `template_url`.
+#[derive(Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct IconAssetToken {
+    #[serde(default)]
+    template_url: Option<String>,
+    #[serde(default)]
+    width: Option<u32>,
+    #[serde(default)]
+    height: Option<u32>,
+}
+
+impl IconAssetToken {
+    /// Computes the concrete icon URL by substituting the `{w}`, `{h}`, and `{f}`
+    /// placeholders in `template_url` (defaults: width/height `512`, format
+    /// `png`). Returns `None` when no template URL is present. Mirrors the iOS
+    /// `toIconUrl()` helper.
+    fn to_icon_url(&self) -> Option<String> {
+        let template = self.template_url.as_deref()?;
+        let width = self.width.unwrap_or(512);
+        let height = self.height.unwrap_or(512);
+        Some(
+            template
+                .replace("{w}", &width.to_string())
+                .replace("{h}", &height.to_string())
+                .replace("{f}", "png"),
+        )
+    }
+}
+
+/// The `builds` to-one and to-many relationships we resolve against `included`.
+#[derive(Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct BuildRelationships {
+    #[serde(default)]
+    pre_release_version: ToOneRelationship,
+    #[serde(default)]
+    build_beta_detail: ToOneRelationship,
+    #[serde(default)]
+    beta_app_review_submission: ToOneRelationship,
+    #[serde(default)]
+    beta_groups: ToManyRelationship,
+    #[serde(default)]
+    beta_build_localizations: ToManyRelationship,
+}
+
+/// A JSON:API to-many relationship: `{ "data": [{ "type": ..., "id": ... }, ...] }`.
+#[derive(Deserialize, Default)]
+struct ToManyRelationship {
+    #[serde(default)]
+    data: Vec<ResourceIdentifier>,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct PreReleaseVersionAttributes {
+    #[serde(default)]
+    version: Option<String>,
+    #[serde(default)]
+    platform: Option<String>,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct BuildBetaDetailAttributes {
+    #[serde(default)]
+    external_build_state: Option<String>,
+    #[serde(default)]
+    internal_build_state: Option<String>,
+    #[serde(default)]
+    auto_notify_enabled: Option<bool>,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct BetaAppReviewSubmissionAttributes {
+    #[serde(default)]
+    beta_review_state: Option<String>,
+    #[serde(default)]
+    submitted_date: Option<String>,
+}
+
+/// The heterogeneous `included[]` entries of a build document, dispatched by
+/// their JSON:API `type`. Unknown types deserialize to [`BuildIncluded::Other`]
+/// and are ignored.
+#[derive(Deserialize)]
+#[serde(tag = "type")]
+enum BuildIncluded {
+    #[serde(rename = "preReleaseVersions")]
+    PreReleaseVersions {
+        id: String,
+        #[serde(default)]
+        attributes: PreReleaseVersionAttributes,
+    },
+    #[serde(rename = "buildBetaDetails")]
+    BuildBetaDetails {
+        id: String,
+        #[serde(default)]
+        attributes: BuildBetaDetailAttributes,
+    },
+    #[serde(rename = "betaAppReviewSubmissions")]
+    BetaAppReviewSubmissions {
+        id: String,
+        #[serde(default)]
+        attributes: BetaAppReviewSubmissionAttributes,
+    },
+    #[serde(rename = "betaGroups")]
+    BetaGroups(BetaGroupResource),
+    #[serde(rename = "betaBuildLocalizations")]
+    BetaBuildLocalizations(BetaBuildLocalizationResource),
+    #[serde(other)]
+    Other,
+}
+
+/// Typed index of a build document's `included[]`, keyed by resource id, so each
+/// of a build's relationship ids can be resolved into the enrichment it carries.
+#[derive(Default)]
+struct IncludedIndex {
+    pre_release_versions: HashMap<String, PreReleaseVersionAttributes>,
+    build_beta_details: HashMap<String, BuildBetaDetailAttributes>,
+    beta_app_review_submissions: HashMap<String, BetaAppReviewSubmissionAttributes>,
+    beta_groups: HashMap<String, BetaGroupResource>,
+    beta_build_localizations: HashMap<String, BetaBuildLocalizationResource>,
+}
+
+impl IncludedIndex {
+    /// Builds the index by consuming the heterogeneous `included[]`, routing each
+    /// entry into its per-type map and discarding unknown types.
+    fn from_included(included: Vec<BuildIncluded>) -> Self {
+        let mut index = Self::default();
+        for resource in included {
+            match resource {
+                BuildIncluded::PreReleaseVersions { id, attributes } => {
+                    index.pre_release_versions.insert(id, attributes);
+                }
+                BuildIncluded::BuildBetaDetails { id, attributes } => {
+                    index.build_beta_details.insert(id, attributes);
+                }
+                BuildIncluded::BetaAppReviewSubmissions { id, attributes } => {
+                    index.beta_app_review_submissions.insert(id, attributes);
+                }
+                BuildIncluded::BetaGroups(resource) => {
+                    index.beta_groups.insert(resource.id.clone(), resource);
+                }
+                BuildIncluded::BetaBuildLocalizations(resource) => {
+                    index
+                        .beta_build_localizations
+                        .insert(resource.id.clone(), resource);
+                }
+                BuildIncluded::Other => {}
+            }
         }
+        index
+    }
+}
+
+/// Maps a build resource into an enriched [`BuildInfo`], resolving each
+/// relationship id against `included`. `app_id` is the owning app id, which may
+/// be `""` when not known at the call site (the group / detail / current paths).
+fn build_info_from(resource: &BuildResource, app_id: &str, included: &IncludedIndex) -> BuildInfo {
+    let attributes = &resource.attributes;
+    let relationships = &resource.relationships;
+
+    let pre_release = relationships
+        .pre_release_version
+        .data
+        .as_ref()
+        .and_then(|rel| included.pre_release_versions.get(&rel.id));
+    let beta_detail = relationships
+        .build_beta_detail
+        .data
+        .as_ref()
+        .and_then(|rel| included.build_beta_details.get(&rel.id));
+    let review_submission = relationships
+        .beta_app_review_submission
+        .data
+        .as_ref()
+        .and_then(|rel| included.beta_app_review_submissions.get(&rel.id));
+
+    BuildInfo {
+        id: resource.id.clone(),
+        app_id: app_id.to_string(),
+        version: attributes.version.clone(),
+        uploaded_date: attributes.uploaded_date.clone(),
+        expired: attributes.expired,
+        processing_state: attributes.processing_state.clone(),
+        min_os_version: attributes.min_os_version.clone(),
+        expiration_date: attributes.expiration_date.clone(),
+        marketing_version: pre_release.and_then(|p| p.version.clone()),
+        platform: pre_release.and_then(|p| p.platform.clone()),
+        external_build_state: beta_detail.and_then(|d| d.external_build_state.clone()),
+        internal_build_state: beta_detail.and_then(|d| d.internal_build_state.clone()),
+        auto_notify_enabled: beta_detail.and_then(|d| d.auto_notify_enabled),
+        beta_review_state: review_submission.and_then(|s| s.beta_review_state.clone()),
+        submitted_date: review_submission.and_then(|s| s.submitted_date.clone()),
+        computed_min_mac_os_version: attributes.computed_min_mac_os_version.clone(),
+        computed_min_vision_os_version: attributes.computed_min_vision_os_version.clone(),
+        build_audience_type: attributes.build_audience_type.clone(),
+        uses_non_exempt_encryption: attributes.uses_non_exempt_encryption,
+        icon_url: attributes
+            .icon_asset_token
+            .as_ref()
+            .and_then(IconAssetToken::to_icon_url),
     }
 }
 
@@ -495,6 +715,22 @@ impl BetaGroupResource {
             has_access_to_all_builds: self.attributes.has_access_to_all_builds,
             public_link_enabled: self.attributes.public_link_enabled,
             public_link: self.attributes.public_link,
+            feedback_enabled: self.attributes.feedback_enabled,
+        }
+    }
+
+    /// Borrowing variant of [`Self::into_beta_group_info`] for resources held in
+    /// an [`IncludedIndex`] (which cannot be consumed by value).
+    fn to_beta_group_info(&self, app_id: &str) -> BetaGroupInfo {
+        BetaGroupInfo {
+            id: self.id.clone(),
+            app_id: app_id.to_string(),
+            name: self.attributes.name.clone(),
+            created_date: self.attributes.created_date.clone(),
+            is_internal_group: self.attributes.is_internal_group,
+            has_access_to_all_builds: self.attributes.has_access_to_all_builds,
+            public_link_enabled: self.attributes.public_link_enabled,
+            public_link: self.attributes.public_link.clone(),
             feedback_enabled: self.attributes.feedback_enabled,
         }
     }
@@ -648,6 +884,16 @@ impl BetaBuildLocalizationResource {
             id: self.id,
             locale: self.attributes.locale.unwrap_or_default(),
             whats_new: self.attributes.whats_new,
+        }
+    }
+
+    /// Borrowing variant of [`Self::into_beta_build_localization_info`] for
+    /// resources held in an [`IncludedIndex`] (which cannot be consumed by value).
+    fn to_beta_build_localization_info(&self) -> BetaBuildLocalizationInfo {
+        BetaBuildLocalizationInfo {
+            id: self.id.clone(),
+            locale: self.attributes.locale.clone().unwrap_or_default(),
+            whats_new: self.attributes.whats_new.clone(),
         }
     }
 }
@@ -1297,10 +1543,13 @@ impl AppStoreClient {
     }
 
     /// Lists the builds for `app_id`, newest first (by upload date), mapping each
-    /// into a [`BuildInfo`] with `app_id` set from the parameter.
+    /// into an enriched [`BuildInfo`] with `app_id` set from the parameter.
     ///
-    /// `GET /v1/builds?filter[app]={app_id}&sort=-uploadedDate&limit={limit}`,
-    /// following `links.next` pagination until exhausted.
+    /// `GET /v1/builds?filter[app]={app_id}&sort=-uploadedDate&limit={limit}\
+    /// &include=preReleaseVersion,buildBetaDetail,betaAppReviewSubmission`,
+    /// following `links.next` pagination until exhausted. The `include` resolves
+    /// the marketing version / platform / build states / review state / icon
+    /// enrichment from each page's `included[]`.
     ///
     /// # Errors
     /// [`StackError::Http`] on a non-2xx page, [`StackError::Decode`] on malformed
@@ -1312,7 +1561,8 @@ impl AppStoreClient {
     ) -> Result<Vec<BuildInfo>, StackError> {
         let mut builds = Vec::new();
         let mut next_url = Some(format!(
-            "{}/v1/builds?filter[app]={app_id}&sort=-uploadedDate&limit={limit}",
+            "{}/v1/builds?filter[app]={app_id}&sort=-uploadedDate&limit={limit}\
+             &include=preReleaseVersion,buildBetaDetail,betaAppReviewSubmission",
             self.base_url
         ));
 
@@ -1320,13 +1570,222 @@ impl AppStoreClient {
             let body = self.get_page(&url).await?;
             let page: BuildsResponse = serde_json::from_str(&body)
                 .map_err(|e| StackError::decode(format!("builds response: {e}")))?;
-            builds.extend(page.data.into_iter().map(|b| b.into_build_info(app_id)));
+            let index = IncludedIndex::from_included(page.included);
+            builds.extend(page.data.iter().map(|b| build_info_from(b, app_id, &index)));
 
             // `links.next` is an absolute URL; follow it verbatim until absent.
             next_url = page.links.next.filter(|u| !u.is_empty());
         }
 
         Ok(builds)
+    }
+
+    /// Fetches a SINGLE page of builds for incremental (load-more) paging,
+    /// returning the enriched builds plus an opaque `next_token`.
+    ///
+    /// When `page_token` is `Some(url)` the URL — a prior call's `next_token`,
+    /// itself the JSON:API `links.next` (absolute, already encoding sort / filter /
+    /// cursor / include) — is fetched verbatim. Otherwise the first page is built
+    /// from `app_id`, the newest-first sort, `limit`, the enrichment `include`,
+    /// and, when present, `filter[preReleaseVersion.platform]` (`platform`) and a
+    /// comma-joined `filter[processingState]` (`processing_states`). Unlike
+    /// [`Self::fetch_builds`], `links.next` is NOT followed — its value is returned
+    /// as `next_token` (`None` on the last page) for the caller to pass back.
+    ///
+    /// # Errors
+    /// [`StackError::PendingAgreements`] when App Store Connect reports pending
+    /// agreements, [`StackError::Http`] on any other non-2xx page,
+    /// [`StackError::Decode`] on malformed JSON, or [`StackError::Network`] on
+    /// transport failure.
+    pub(crate) async fn fetch_builds_page(
+        &self,
+        app_id: &str,
+        platform: Option<&str>,
+        processing_states: &[String],
+        limit: u32,
+        page_token: Option<&str>,
+    ) -> Result<BuildsPage, StackError> {
+        let url = match page_token {
+            Some(token) => token.to_string(),
+            None => {
+                let mut url = format!(
+                    "{}/v1/builds?filter[app]={app_id}&sort=-uploadedDate&limit={limit}\
+                     &include=preReleaseVersion,buildBetaDetail,betaAppReviewSubmission",
+                    self.base_url
+                );
+                if let Some(platform) = platform {
+                    url.push_str("&filter[preReleaseVersion.platform]=");
+                    url.push_str(platform);
+                }
+                if !processing_states.is_empty() {
+                    url.push_str("&filter[processingState]=");
+                    url.push_str(&processing_states.join(","));
+                }
+                url
+            }
+        };
+
+        let body = self.get_page(&url).await?;
+        let page: BuildsResponse = serde_json::from_str(&body)
+            .map_err(|e| StackError::decode(format!("builds response: {e}")))?;
+        let index = IncludedIndex::from_included(page.included);
+        let builds = page
+            .data
+            .iter()
+            .map(|b| build_info_from(b, app_id, &index))
+            .collect();
+
+        // `links.next` is the opaque token for the next page; `None` when absent.
+        let next_token = page.links.next.filter(|u| !u.is_empty());
+        Ok(BuildsPage { builds, next_token })
+    }
+
+    /// Lists the builds belonging to the beta group `group_id`, newest first,
+    /// mapping each into an enriched [`BuildInfo`]. The owning app id is not known
+    /// from this call site, so `BuildInfo::app_id` is left empty.
+    ///
+    /// `GET /v1/builds?filter[betaGroups]={group_id}&sort=-uploadedDate&limit={limit}\
+    /// &include=preReleaseVersion,buildBetaDetail,betaAppReviewSubmission`,
+    /// following `links.next` pagination until exhausted.
+    ///
+    /// # Errors
+    /// [`StackError::Http`] on a non-2xx page, [`StackError::Decode`] on malformed
+    /// JSON, or [`StackError::Network`] on transport failure.
+    pub(crate) async fn fetch_builds_for_group(
+        &self,
+        group_id: &str,
+        limit: u32,
+    ) -> Result<Vec<BuildInfo>, StackError> {
+        let mut builds = Vec::new();
+        let mut next_url = Some(format!(
+            "{}/v1/builds?filter[betaGroups]={group_id}&sort=-uploadedDate&limit={limit}\
+             &include=preReleaseVersion,buildBetaDetail,betaAppReviewSubmission",
+            self.base_url
+        ));
+
+        while let Some(url) = next_url {
+            let body = self.get_page(&url).await?;
+            let page: BuildsResponse = serde_json::from_str(&body)
+                .map_err(|e| StackError::decode(format!("builds response: {e}")))?;
+            let index = IncludedIndex::from_included(page.included);
+            builds.extend(page.data.iter().map(|b| build_info_from(b, "", &index)));
+
+            // `links.next` is an absolute URL; follow it verbatim until absent.
+            next_url = page.links.next.filter(|u| !u.is_empty());
+        }
+
+        Ok(builds)
+    }
+
+    /// Fetches the full detail of the build `build_id`: the enriched build plus
+    /// its associated beta groups and "What to Test" localizations resolved from
+    /// the single-resource document's `included[]`. The owning app id is not known
+    /// from this call site, so `BuildInfo::app_id` is left empty.
+    ///
+    /// `GET /v1/builds/{build_id}?include=preReleaseVersion,buildBetaDetail,\
+    /// betaAppReviewSubmission,betaGroups,betaBuildLocalizations\
+    /// &limit[betaBuildLocalizations]=50&limit[betaGroups]=50`.
+    ///
+    /// # Errors
+    /// [`StackError::Http`] on a non-2xx page, [`StackError::Decode`] on malformed
+    /// JSON, or [`StackError::Network`] on transport failure.
+    pub(crate) async fn fetch_build_detail(
+        &self,
+        build_id: &str,
+    ) -> Result<BuildDetailInfo, StackError> {
+        let url = format!(
+            "{}/v1/builds/{build_id}?include=preReleaseVersion,buildBetaDetail,\
+             betaAppReviewSubmission,betaGroups,betaBuildLocalizations\
+             &limit[betaBuildLocalizations]=50&limit[betaGroups]=50",
+            self.base_url
+        );
+        let body = self.get_page(&url).await?;
+        let document: BuildDocument = serde_json::from_str(&body)
+            .map_err(|e| StackError::decode(format!("build detail response: {e}")))?;
+
+        let resource = document
+            .data
+            .ok_or_else(|| StackError::decode("build detail response: missing data".to_string()))?;
+        let index = IncludedIndex::from_included(document.included);
+
+        let build = build_info_from(&resource, "", &index);
+
+        let beta_groups = resource
+            .relationships
+            .beta_groups
+            .data
+            .iter()
+            .filter_map(|rel| index.beta_groups.get(&rel.id))
+            .map(|group| group.to_beta_group_info(""))
+            .collect();
+
+        let localizations = resource
+            .relationships
+            .beta_build_localizations
+            .data
+            .iter()
+            .filter_map(|rel| index.beta_build_localizations.get(&rel.id))
+            .map(BetaBuildLocalizationResource::to_beta_build_localization_info)
+            .collect();
+
+        Ok(BuildDetailInfo {
+            build,
+            beta_groups,
+            localizations,
+        })
+    }
+
+    /// Fetches the build currently attached to the App Store version
+    /// `version_id`, via its singular `build` to-one relationship document. The
+    /// build carries no enrichment (no `include`), and the owning app id is not
+    /// known from this call site, so `BuildInfo::app_id` is left empty.
+    ///
+    /// `GET /v1/appStoreVersions/{version_id}/build`. The document's `data` may be
+    /// `null`/absent when no build is attached → `Ok(None)`. A `404` likewise
+    /// resolves to `Ok(None)`.
+    ///
+    /// # Errors
+    /// [`StackError::Http`] on a non-2xx page other than 404, [`StackError::Decode`]
+    /// on malformed JSON, or [`StackError::Network`] on transport failure.
+    pub(crate) async fn fetch_current_build(
+        &self,
+        version_id: &str,
+    ) -> Result<Option<BuildInfo>, StackError> {
+        let url = format!("{}/v1/appStoreVersions/{version_id}/build", self.base_url);
+        let token = self.auth.bearer_token().await?;
+        let response = self
+            .http
+            .get(&url)
+            .bearer_auth(token)
+            .send()
+            .await
+            .map_err(|e| StackError::network(e.to_string()))?;
+
+        let status = response.status();
+        // No build attached to the version → ASC returns 404; treat as absent.
+        if status.as_u16() == 404 {
+            return Ok(None);
+        }
+        let body = response
+            .text()
+            .await
+            .map_err(|e| StackError::network(e.to_string()))?;
+        if !status.is_success() {
+            if let Some(err) = pending_agreements_error(status.as_u16(), &body) {
+                return Err(err);
+            }
+            return Err(StackError::Http {
+                status: status.as_u16(),
+                message: body,
+            });
+        }
+
+        let document: BuildDocument = serde_json::from_str(&body)
+            .map_err(|e| StackError::decode(format!("current build response: {e}")))?;
+        let index = IncludedIndex::default();
+        Ok(document
+            .data
+            .map(|resource| build_info_from(&resource, "", &index)))
     }
 
     /// Marks the build identified by `build_id` as expired.
@@ -2078,9 +2537,10 @@ impl AppStoreClient {
 
         while let Some(url) = next_url {
             let body = self.get_page(&url).await?;
-            let page: BetaBuildLocalizationsResponse = serde_json::from_str(&body).map_err(|e| {
-                StackError::decode(format!("beta build localizations response: {e}"))
-            })?;
+            let page: BetaBuildLocalizationsResponse =
+                serde_json::from_str(&body).map_err(|e| {
+                    StackError::decode(format!("beta build localizations response: {e}"))
+                })?;
             localizations.extend(
                 page.data
                     .into_iter()
@@ -2238,9 +2698,8 @@ impl AppStoreClient {
 
         while let Some(url) = next_url {
             let body = self.get_page(&url).await?;
-            let page: BetaAppLocalizationsResponse = serde_json::from_str(&body).map_err(|e| {
-                StackError::decode(format!("beta app localizations response: {e}"))
-            })?;
+            let page: BetaAppLocalizationsResponse = serde_json::from_str(&body)
+                .map_err(|e| StackError::decode(format!("beta app localizations response: {e}")))?;
             localizations.extend(
                 page.data
                     .into_iter()
@@ -3380,13 +3839,19 @@ mod tests {
         let server = MockServer::start().await;
         let next = format!("{}/v1/builds?cursor=PAGE2", server.uri());
 
-        // Page 1: a fully-populated build, plus the `links.next` cursor. The first
-        // request must carry the app filter, the newest-first sort, and the limit.
+        // Page 1: a fully-populated build with enrichment relationships resolved
+        // from `included[]`, plus the `links.next` cursor. The first request must
+        // carry the app filter, the newest-first sort, the limit, and the
+        // enrichment `include`.
         Mock::given(method("GET"))
             .and(path("/v1/builds"))
             .and(query_param("filter[app]", "APP1"))
             .and(query_param("sort", "-uploadedDate"))
             .and(query_param("limit", "20"))
+            .and(query_param(
+                "include",
+                "preReleaseVersion,buildBetaDetail,betaAppReviewSubmission",
+            ))
             .and(wiremock::matchers::query_param_is_missing("cursor"))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                 "data": [{
@@ -3398,9 +3863,45 @@ mod tests {
                         "expired": false,
                         "processingState": "VALID",
                         "minOsVersion": "17.0",
-                        "expirationDate": "2026-06-01T12:00:00Z"
+                        "expirationDate": "2026-06-01T12:00:00Z",
+                        "buildAudienceType": "APP_STORE_ELIGIBLE",
+                        "usesNonExemptEncryption": false,
+                        "iconAssetToken": {
+                            "templateUrl": "https://cdn.example.com/icon/{w}x{h}.{f}",
+                            "width": 1024,
+                            "height": 1024
+                        }
+                    },
+                    "relationships": {
+                        "preReleaseVersion": { "data": { "type": "preReleaseVersions", "id": "prv-1" } },
+                        "buildBetaDetail": { "data": { "type": "buildBetaDetails", "id": "bbd-1" } },
+                        "betaAppReviewSubmission": { "data": { "type": "betaAppReviewSubmissions", "id": "bars-1" } }
                     }
                 }],
+                "included": [
+                    {
+                        "type": "preReleaseVersions",
+                        "id": "prv-1",
+                        "attributes": { "version": "1.2.3", "platform": "IOS" }
+                    },
+                    {
+                        "type": "buildBetaDetails",
+                        "id": "bbd-1",
+                        "attributes": {
+                            "externalBuildState": "READY_FOR_BETA_TESTING",
+                            "internalBuildState": "IN_BETA_TESTING",
+                            "autoNotifyEnabled": true
+                        }
+                    },
+                    {
+                        "type": "betaAppReviewSubmissions",
+                        "id": "bars-1",
+                        "attributes": {
+                            "betaReviewState": "APPROVED",
+                            "submittedDate": "2026-03-02T09:00:00Z"
+                        }
+                    }
+                ],
                 "links": { "next": next }
             })))
             .mount(&server)
@@ -3438,6 +3939,32 @@ mod tests {
             first.expiration_date.as_deref(),
             Some("2026-06-01T12:00:00Z")
         );
+        // Enrichment resolved from `included[]` and the icon-token attribute.
+        assert_eq!(first.marketing_version.as_deref(), Some("1.2.3"));
+        assert_eq!(first.platform.as_deref(), Some("IOS"));
+        assert_eq!(
+            first.external_build_state.as_deref(),
+            Some("READY_FOR_BETA_TESTING")
+        );
+        assert_eq!(
+            first.internal_build_state.as_deref(),
+            Some("IN_BETA_TESTING")
+        );
+        assert_eq!(first.auto_notify_enabled, Some(true));
+        assert_eq!(first.beta_review_state.as_deref(), Some("APPROVED"));
+        assert_eq!(
+            first.submitted_date.as_deref(),
+            Some("2026-03-02T09:00:00Z")
+        );
+        assert_eq!(
+            first.build_audience_type.as_deref(),
+            Some("APP_STORE_ELIGIBLE")
+        );
+        assert_eq!(first.uses_non_exempt_encryption, Some(false));
+        assert_eq!(
+            first.icon_url.as_deref(),
+            Some("https://cdn.example.com/icon/1024x1024.png")
+        );
 
         let second = &builds[1];
         assert_eq!(second.id, "build-2");
@@ -3451,6 +3978,12 @@ mod tests {
         assert!(second.processing_state.is_none());
         assert!(second.min_os_version.is_none());
         assert!(second.expiration_date.is_none());
+        // No relationships / included on the sparse build → enrichment is absent.
+        assert!(second.marketing_version.is_none());
+        assert!(second.platform.is_none());
+        assert!(second.external_build_state.is_none());
+        assert!(second.beta_review_state.is_none());
+        assert!(second.icon_url.is_none());
     }
 
     #[tokio::test]
@@ -3470,6 +4003,338 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn fetch_builds_page_applies_filters_and_returns_next_token() {
+        let server = MockServer::start().await;
+        let next = format!("{}/v1/builds?cursor=PAGE2", server.uri());
+
+        // First page: must carry the app filter, sort, limit, enrichment include,
+        // the platform filter, and the comma-joined processing-state filter.
+        Mock::given(method("GET"))
+            .and(path("/v1/builds"))
+            .and(query_param("filter[app]", "APP1"))
+            .and(query_param("sort", "-uploadedDate"))
+            .and(query_param("limit", "10"))
+            .and(query_param(
+                "include",
+                "preReleaseVersion,buildBetaDetail,betaAppReviewSubmission",
+            ))
+            .and(query_param("filter[preReleaseVersion.platform]", "IOS"))
+            .and(query_param("filter[processingState]", "VALID,PROCESSING"))
+            .and(wiremock::matchers::query_param_is_missing("cursor"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": [{
+                    "type": "builds",
+                    "id": "build-1",
+                    "attributes": { "version": "7" },
+                    "relationships": {
+                        "preReleaseVersion": { "data": { "type": "preReleaseVersions", "id": "prv-1" } }
+                    }
+                }],
+                "included": [{
+                    "type": "preReleaseVersions",
+                    "id": "prv-1",
+                    "attributes": { "version": "3.0.0", "platform": "IOS" }
+                }],
+                "links": { "next": next }
+            })))
+            .mount(&server)
+            .await;
+
+        let page = client(server.uri())
+            .fetch_builds_page(
+                "APP1",
+                Some("IOS"),
+                &["VALID".to_string(), "PROCESSING".to_string()],
+                10,
+                None,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(page.builds.len(), 1);
+        assert_eq!(page.builds[0].id, "build-1");
+        assert_eq!(page.builds[0].app_id, "APP1");
+        assert_eq!(page.builds[0].marketing_version.as_deref(), Some("3.0.0"));
+        assert_eq!(page.builds[0].platform.as_deref(), Some("IOS"));
+        // `next_token` is the opaque `links.next` cursor URL, returned verbatim.
+        assert_eq!(
+            page.next_token.as_deref(),
+            Some(format!("{}/v1/builds?cursor=PAGE2", server.uri()).as_str())
+        );
+    }
+
+    #[tokio::test]
+    async fn fetch_builds_page_follows_opaque_cursor_token() {
+        let server = MockServer::start().await;
+
+        // The page_token path fetches the cursor URL verbatim — no filters are
+        // re-applied, and the last page reports no `next_token`.
+        Mock::given(method("GET"))
+            .and(path("/v1/builds"))
+            .and(query_param("cursor", "PAGE2"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": [{
+                    "type": "builds",
+                    "id": "build-2",
+                    "attributes": { "version": "8" }
+                }],
+                "links": {}
+            })))
+            .mount(&server)
+            .await;
+
+        let token = format!("{}/v1/builds?cursor=PAGE2", server.uri());
+        let page = client(server.uri())
+            .fetch_builds_page("APP1", None, &[], 10, Some(&token))
+            .await
+            .unwrap();
+
+        assert_eq!(page.builds.len(), 1);
+        assert_eq!(page.builds[0].id, "build-2");
+        assert!(page.next_token.is_none());
+    }
+
+    #[tokio::test]
+    async fn fetch_builds_page_surfaces_pending_agreements() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v1/builds"))
+            .respond_with(ResponseTemplate::new(403).set_body_json(serde_json::json!({
+                "errors": [{ "detail": "The agreement is pending." }]
+            })))
+            .mount(&server)
+            .await;
+
+        let err = client(server.uri())
+            .fetch_builds_page("APP1", None, &[], 10, None)
+            .await
+            .unwrap_err();
+        match err {
+            StackError::PendingAgreements { message } => {
+                assert!(message.contains("pending agreements"))
+            }
+            other => panic!("expected PendingAgreements, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn fetch_builds_for_group_maps_and_paginates() {
+        let server = MockServer::start().await;
+        let next = format!("{}/v1/builds?cursor=GPAGE2", server.uri());
+
+        // First page: filtered by beta group, newest first, with enrichment.
+        Mock::given(method("GET"))
+            .and(path("/v1/builds"))
+            .and(query_param("filter[betaGroups]", "group-1"))
+            .and(query_param("sort", "-uploadedDate"))
+            .and(query_param("limit", "25"))
+            .and(query_param(
+                "include",
+                "preReleaseVersion,buildBetaDetail,betaAppReviewSubmission",
+            ))
+            .and(wiremock::matchers::query_param_is_missing("cursor"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": [{
+                    "type": "builds",
+                    "id": "build-1",
+                    "attributes": { "version": "10" },
+                    "relationships": {
+                        "buildBetaDetail": { "data": { "type": "buildBetaDetails", "id": "bbd-1" } }
+                    }
+                }],
+                "included": [{
+                    "type": "buildBetaDetails",
+                    "id": "bbd-1",
+                    "attributes": { "externalBuildState": "IN_BETA_TESTING" }
+                }],
+                "links": { "next": next }
+            })))
+            .mount(&server)
+            .await;
+
+        // Second page: another build and no further page.
+        Mock::given(method("GET"))
+            .and(path("/v1/builds"))
+            .and(query_param("cursor", "GPAGE2"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": [{
+                    "type": "builds",
+                    "id": "build-2",
+                    "attributes": { "version": "11" }
+                }],
+                "links": {}
+            })))
+            .mount(&server)
+            .await;
+
+        let builds = client(server.uri())
+            .fetch_builds_for_group("group-1", 25)
+            .await
+            .unwrap();
+
+        assert_eq!(builds.len(), 2);
+        assert_eq!(builds[0].id, "build-1");
+        // The owning app id is unknown from this call site → empty.
+        assert_eq!(builds[0].app_id, "");
+        assert_eq!(
+            builds[0].external_build_state.as_deref(),
+            Some("IN_BETA_TESTING")
+        );
+        assert_eq!(builds[1].id, "build-2");
+    }
+
+    #[tokio::test]
+    async fn fetch_build_detail_maps_build_groups_and_localizations() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/v1/builds/build-1"))
+            .and(query_param(
+                "include",
+                "preReleaseVersion,buildBetaDetail,betaAppReviewSubmission,betaGroups,betaBuildLocalizations",
+            ))
+            .and(query_param("limit[betaBuildLocalizations]", "50"))
+            .and(query_param("limit[betaGroups]", "50"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": {
+                    "type": "builds",
+                    "id": "build-1",
+                    "attributes": { "version": "42", "processingState": "VALID" },
+                    "relationships": {
+                        "preReleaseVersion": { "data": { "type": "preReleaseVersions", "id": "prv-1" } },
+                        "betaGroups": { "data": [
+                            { "type": "betaGroups", "id": "group-1" },
+                            { "type": "betaGroups", "id": "group-2" }
+                        ] },
+                        "betaBuildLocalizations": { "data": [
+                            { "type": "betaBuildLocalizations", "id": "loc-1" }
+                        ] }
+                    }
+                },
+                "included": [
+                    {
+                        "type": "preReleaseVersions",
+                        "id": "prv-1",
+                        "attributes": { "version": "4.5.6", "platform": "IOS" }
+                    },
+                    {
+                        "type": "betaGroups",
+                        "id": "group-1",
+                        "attributes": { "name": "Internal", "isInternalGroup": true }
+                    },
+                    {
+                        "type": "betaGroups",
+                        "id": "group-2",
+                        "attributes": { "name": "External", "isInternalGroup": false }
+                    },
+                    {
+                        "type": "betaBuildLocalizations",
+                        "id": "loc-1",
+                        "attributes": { "locale": "en-US", "whatsNew": "Bug fixes" }
+                    }
+                ]
+            })))
+            .mount(&server)
+            .await;
+
+        let detail = client(server.uri())
+            .fetch_build_detail("build-1")
+            .await
+            .unwrap();
+
+        assert_eq!(detail.build.id, "build-1");
+        assert_eq!(detail.build.app_id, "");
+        assert_eq!(detail.build.marketing_version.as_deref(), Some("4.5.6"));
+        assert_eq!(detail.build.platform.as_deref(), Some("IOS"));
+
+        assert_eq!(detail.beta_groups.len(), 2);
+        assert_eq!(detail.beta_groups[0].id, "group-1");
+        assert_eq!(detail.beta_groups[0].name.as_deref(), Some("Internal"));
+        assert_eq!(detail.beta_groups[0].is_internal_group, Some(true));
+        assert_eq!(detail.beta_groups[1].id, "group-2");
+
+        assert_eq!(detail.localizations.len(), 1);
+        assert_eq!(detail.localizations[0].id, "loc-1");
+        assert_eq!(detail.localizations[0].locale, "en-US");
+        assert_eq!(
+            detail.localizations[0].whats_new.as_deref(),
+            Some("Bug fixes")
+        );
+    }
+
+    #[tokio::test]
+    async fn fetch_current_build_maps_attached_build() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/v1/appStoreVersions/ver-1/build"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": {
+                    "type": "builds",
+                    "id": "build-99",
+                    "attributes": {
+                        "version": "99",
+                        "processingState": "VALID"
+                    }
+                }
+            })))
+            .mount(&server)
+            .await;
+
+        let build = client(server.uri())
+            .fetch_current_build("ver-1")
+            .await
+            .unwrap();
+
+        let build = build.expect("expected an attached build");
+        assert_eq!(build.id, "build-99");
+        assert_eq!(build.app_id, "");
+        assert_eq!(build.version.as_deref(), Some("99"));
+        assert_eq!(build.processing_state.as_deref(), Some("VALID"));
+        // No `include` on this path → enrichment is absent.
+        assert!(build.marketing_version.is_none());
+        assert!(build.icon_url.is_none());
+    }
+
+    #[tokio::test]
+    async fn fetch_current_build_returns_none_when_data_null() {
+        let server = MockServer::start().await;
+
+        // ASC may return a document with a null `data` when no build is attached.
+        Mock::given(method("GET"))
+            .and(path("/v1/appStoreVersions/ver-1/build"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": null
+            })))
+            .mount(&server)
+            .await;
+
+        let build = client(server.uri())
+            .fetch_current_build("ver-1")
+            .await
+            .unwrap();
+        assert!(build.is_none());
+    }
+
+    #[tokio::test]
+    async fn fetch_current_build_returns_none_on_404() {
+        let server = MockServer::start().await;
+
+        // A 404 (no build relationship) resolves to `Ok(None)`, not an error.
+        Mock::given(method("GET"))
+            .and(path("/v1/appStoreVersions/ver-1/build"))
+            .respond_with(ResponseTemplate::new(404).set_body_string("not found"))
+            .mount(&server)
+            .await;
+
+        let build = client(server.uri())
+            .fetch_current_build("ver-1")
+            .await
+            .unwrap();
+        assert!(build.is_none());
+    }
+
+    #[tokio::test]
     async fn expire_build_patches_expired_attribute() {
         let server = MockServer::start().await;
         Mock::given(method("PATCH"))
@@ -3486,10 +4351,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        assert!(client(server.uri())
-            .expire_build("build-1")
-            .await
-            .is_ok());
+        assert!(client(server.uri()).expire_build("build-1").await.is_ok());
     }
 
     #[tokio::test]
@@ -4375,7 +5237,10 @@ mod tests {
         let first = &localizations[0];
         assert_eq!(first.id, "loc-1");
         assert_eq!(first.locale, "en-US");
-        assert_eq!(first.whats_new.as_deref(), Some("Bug fixes and improvements."));
+        assert_eq!(
+            first.whats_new.as_deref(),
+            Some("Bug fixes and improvements.")
+        );
 
         let second = &localizations[1];
         assert_eq!(second.id, "loc-2");
@@ -4670,7 +5535,10 @@ mod tests {
             localization.feedback_email.as_deref(),
             Some("beta@example.com")
         );
-        assert_eq!(localization.description.as_deref(), Some("Try the new flows."));
+        assert_eq!(
+            localization.description.as_deref(),
+            Some("Try the new flows.")
+        );
     }
 
     #[tokio::test]
@@ -4925,15 +5793,7 @@ mod tests {
 
         let err = client(server.uri())
             .update_beta_app_review_detail(
-                "detail-1",
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
+                "detail-1", None, None, None, None, None, None, None, None,
             )
             .await
             .unwrap_err();

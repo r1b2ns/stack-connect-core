@@ -73,9 +73,7 @@ impl BetaAppLocalizations {
         app_id: String,
         limit: u32,
     ) -> Result<Vec<BetaAppLocalizationInfo>, StackError> {
-        self.inner
-            .fetch_beta_app_localizations(app_id, limit)
-            .await
+        self.inner.fetch_beta_app_localizations(app_id, limit).await
     }
 
     /// Creates a beta app localization for `app_id` in `locale`, returning the

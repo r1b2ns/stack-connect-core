@@ -6,8 +6,8 @@ use super::client::AppStoreClient;
 use crate::auth::es256::AppStoreAuthenticator;
 use crate::domain::{
     AppInfo, AppStoreVersionInfo, BetaAppLocalizationInfo, BetaAppReviewDetailInfo,
-    BetaBuildLocalizationInfo, BetaGroupInfo, BetaTesterInfo, BuildInfo, CustomerReview,
-    CustomerReviewsPage, ReviewResponse, ReviewSubmission,
+    BetaBuildLocalizationInfo, BetaGroupInfo, BetaTesterInfo, BuildDetailInfo, BuildInfo,
+    BuildsPage, CustomerReview, CustomerReviewsPage, ReviewResponse, ReviewSubmission,
 };
 use crate::error::StackError;
 use crate::service::capabilities::app_store_versions::{AppStoreVersions, AppStoreVersionsImpl};
@@ -239,15 +239,49 @@ impl BuildsImpl for AppStoreBuilds {
         self.client.fetch_builds(&app_id, limit).await
     }
 
+    async fn fetch_builds_page(
+        &self,
+        app_id: String,
+        platform: Option<String>,
+        processing_states: Vec<String>,
+        limit: u32,
+        page_token: Option<String>,
+    ) -> Result<BuildsPage, StackError> {
+        self.client
+            .fetch_builds_page(
+                &app_id,
+                platform.as_deref(),
+                &processing_states,
+                limit,
+                page_token.as_deref(),
+            )
+            .await
+    }
+
+    async fn fetch_builds_for_group(
+        &self,
+        group_id: String,
+        limit: u32,
+    ) -> Result<Vec<BuildInfo>, StackError> {
+        self.client.fetch_builds_for_group(&group_id, limit).await
+    }
+
+    async fn fetch_build_detail(&self, build_id: String) -> Result<BuildDetailInfo, StackError> {
+        self.client.fetch_build_detail(&build_id).await
+    }
+
+    async fn fetch_current_build(
+        &self,
+        version_id: String,
+    ) -> Result<Option<BuildInfo>, StackError> {
+        self.client.fetch_current_build(&version_id).await
+    }
+
     async fn expire_build(&self, build_id: String) -> Result<(), StackError> {
         self.client.expire_build(&build_id).await
     }
 
-    async fn attach_build(
-        &self,
-        version_id: String,
-        build_id: String,
-    ) -> Result<(), StackError> {
+    async fn attach_build(&self, version_id: String, build_id: String) -> Result<(), StackError> {
         self.client.attach_build(&version_id, &build_id).await
     }
 

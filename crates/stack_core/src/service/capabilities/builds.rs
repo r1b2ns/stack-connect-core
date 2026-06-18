@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 
-use crate::domain::BuildInfo;
+use crate::domain::{BuildDetailInfo, BuildInfo, BuildsPage};
 use crate::error::StackError;
 
 /// Internal, non-exported contract for the Builds capability. Kept off the FFI
@@ -21,15 +21,42 @@ pub(crate) trait BuildsImpl: Send + Sync {
     /// Lists the builds for `app_id`, newest first, up to `limit`.
     async fn fetch_builds(&self, app_id: String, limit: u32) -> Result<Vec<BuildInfo>, StackError>;
 
+    /// Fetches a single page of builds for `app_id`, optionally filtered by
+    /// `platform` and `processing_states`, newest first, up to `limit`, returning
+    /// an opaque `next_token` for load-more paging.
+    async fn fetch_builds_page(
+        &self,
+        app_id: String,
+        platform: Option<String>,
+        processing_states: Vec<String>,
+        limit: u32,
+        page_token: Option<String>,
+    ) -> Result<BuildsPage, StackError>;
+
+    /// Lists the builds belonging to the beta group `group_id`, newest first, up
+    /// to `limit`, following pagination to the end.
+    async fn fetch_builds_for_group(
+        &self,
+        group_id: String,
+        limit: u32,
+    ) -> Result<Vec<BuildInfo>, StackError>;
+
+    /// Fetches the full detail of the build `build_id` — the enriched build plus
+    /// its beta groups and "What to Test" localizations.
+    async fn fetch_build_detail(&self, build_id: String) -> Result<BuildDetailInfo, StackError>;
+
+    /// Fetches the build currently attached to the App Store version `version_id`,
+    /// or `None` when no build is attached.
+    async fn fetch_current_build(
+        &self,
+        version_id: String,
+    ) -> Result<Option<BuildInfo>, StackError>;
+
     /// Marks the build `build_id` as expired.
     async fn expire_build(&self, build_id: String) -> Result<(), StackError>;
 
     /// Attaches the build `build_id` to the App Store version `version_id`.
-    async fn attach_build(
-        &self,
-        version_id: String,
-        build_id: String,
-    ) -> Result<(), StackError>;
+    async fn attach_build(&self, version_id: String, build_id: String) -> Result<(), StackError>;
 
     /// Submits the build `build_id` for beta (TestFlight) review.
     async fn submit_build_for_beta_review(&self, build_id: String) -> Result<(), StackError>;
@@ -80,6 +107,76 @@ impl Builds {
         self.inner.fetch_builds(app_id, limit).await
     }
 
+    /// Fetches a single page of builds for `app_id`, newest first (by upload
+    /// date), up to `limit`. When `platform` is `Some`, only builds for that
+    /// platform are returned; when `processing_states` is non-empty, only builds
+    /// in those states are returned. Pass a prior call's `next_token` back as
+    /// `page_token` to load the next page.
+    ///
+    /// # Errors
+    /// [`StackError::PendingAgreements`] when App Store Connect reports pending
+    /// agreements, [`StackError::Http`] on any other non-2xx page,
+    /// [`StackError::Decode`] on malformed JSON, or [`StackError::Network`] on
+    /// transport failure.
+    pub async fn fetch_builds_page(
+        &self,
+        app_id: String,
+        platform: Option<String>,
+        processing_states: Vec<String>,
+        limit: u32,
+        page_token: Option<String>,
+    ) -> Result<BuildsPage, StackError> {
+        self.inner
+            .fetch_builds_page(app_id, platform, processing_states, limit, page_token)
+            .await
+    }
+
+    /// Lists the builds belonging to the beta group `group_id`, newest first (by
+    /// upload date), up to `limit`, following pagination to the end.
+    ///
+    /// # Errors
+    /// [`StackError::PendingAgreements`] when App Store Connect reports pending
+    /// agreements, [`StackError::Http`] on any other non-2xx page,
+    /// [`StackError::Decode`] on malformed JSON, or [`StackError::Network`] on
+    /// transport failure.
+    pub async fn fetch_builds_for_group(
+        &self,
+        group_id: String,
+        limit: u32,
+    ) -> Result<Vec<BuildInfo>, StackError> {
+        self.inner.fetch_builds_for_group(group_id, limit).await
+    }
+
+    /// Fetches the full detail of the build `build_id`: the enriched build plus
+    /// its associated beta groups and per-locale "What to Test" localizations.
+    ///
+    /// # Errors
+    /// [`StackError::PendingAgreements`] when App Store Connect reports pending
+    /// agreements, [`StackError::Http`] on any other non-2xx response,
+    /// [`StackError::Decode`] on malformed JSON, or [`StackError::Network`] on
+    /// transport failure.
+    pub async fn fetch_build_detail(
+        &self,
+        build_id: String,
+    ) -> Result<BuildDetailInfo, StackError> {
+        self.inner.fetch_build_detail(build_id).await
+    }
+
+    /// Fetches the build currently attached to the App Store version `version_id`,
+    /// or `None` when no build is attached.
+    ///
+    /// # Errors
+    /// [`StackError::PendingAgreements`] when App Store Connect reports pending
+    /// agreements, [`StackError::Http`] on any other non-2xx response,
+    /// [`StackError::Decode`] on malformed JSON, or [`StackError::Network`] on
+    /// transport failure.
+    pub async fn fetch_current_build(
+        &self,
+        version_id: String,
+    ) -> Result<Option<BuildInfo>, StackError> {
+        self.inner.fetch_current_build(version_id).await
+    }
+
     /// Marks the build `build_id` as expired (sets its `expired` attribute to
     /// `true`).
     ///
@@ -113,10 +210,7 @@ impl Builds {
     /// [`StackError::PendingAgreements`] when App Store Connect reports pending
     /// agreements, [`StackError::Http`] on any other non-2xx response, or
     /// [`StackError::Network`] on transport failure.
-    pub async fn submit_build_for_beta_review(
-        &self,
-        build_id: String,
-    ) -> Result<(), StackError> {
+    pub async fn submit_build_for_beta_review(&self, build_id: String) -> Result<(), StackError> {
         self.inner.submit_build_for_beta_review(build_id).await
     }
 

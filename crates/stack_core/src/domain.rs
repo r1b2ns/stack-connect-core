@@ -79,6 +79,15 @@ pub struct AppStoreVersionInfo {
 /// A build (TestFlight / App Store Connect) of an app. `version` is the build
 /// number (the ASC `version` attribute, distinct from a version string). Dates
 /// are raw ISO8601 strings; the core does no date parsing (the host owns that).
+///
+/// Beyond the build's own attributes this record also carries enrichment
+/// resolved from JSON:API `included` related resources — the marketing version
+/// and platform (from `preReleaseVersion`), the external/internal build states
+/// and auto-notify flag (from `buildBetaDetail`), and the beta review state and
+/// submission date (from `betaAppReviewSubmission`). These enrichment fields are
+/// only populated when the corresponding relationship is requested via `include`
+/// (and present); they are `None` otherwise. `icon_url` is computed from the
+/// build's `iconAssetToken` template.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, uniffi::Record)]
 #[serde(rename_all = "camelCase")]
 pub struct BuildInfo {
@@ -90,6 +99,51 @@ pub struct BuildInfo {
     pub processing_state: Option<String>,
     pub min_os_version: Option<String>,
     pub expiration_date: Option<String>,
+    /// From included `preReleaseVersion.attributes.version`.
+    pub marketing_version: Option<String>,
+    /// From included `preReleaseVersion.attributes.platform`.
+    pub platform: Option<String>,
+    /// From included `buildBetaDetail.attributes.externalBuildState`.
+    pub external_build_state: Option<String>,
+    /// From included `buildBetaDetail.attributes.internalBuildState`.
+    pub internal_build_state: Option<String>,
+    /// From included `buildBetaDetail.attributes.autoNotifyEnabled`.
+    pub auto_notify_enabled: Option<bool>,
+    /// From included `betaAppReviewSubmission.attributes.betaReviewState`.
+    pub beta_review_state: Option<String>,
+    /// From included `betaAppReviewSubmission.attributes.submittedDate` (raw ISO8601).
+    pub submitted_date: Option<String>,
+    /// Build attribute `computedMinMacOsVersion`.
+    pub computed_min_mac_os_version: Option<String>,
+    /// Build attribute `computedMinVisionOsVersion`.
+    pub computed_min_vision_os_version: Option<String>,
+    /// Build attribute `buildAudienceType`.
+    pub build_audience_type: Option<String>,
+    /// Build attribute `usesNonExemptEncryption`.
+    pub uses_non_exempt_encryption: Option<bool>,
+    /// Computed from the build's `iconAssetToken` template (`{w}`/`{h}`/`{f}`
+    /// substituted). `None` when no template URL is present.
+    pub icon_url: Option<String>,
+}
+
+/// One page of builds plus an opaque token to fetch the next page. `next_token`
+/// is `None` on the last page; otherwise pass it back verbatim as the next call's
+/// `page_token` (it is the JSON:API `links.next` URL). Mirrors
+/// [`CustomerReviewsPage`].
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct BuildsPage {
+    pub builds: Vec<BuildInfo>,
+    pub next_token: Option<String>,
+}
+
+/// The full detail of a single build: the enriched [`BuildInfo`] plus its
+/// associated beta groups and per-locale "What to Test" localizations, all
+/// resolved from the JSON:API `included` section of the build document.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct BuildDetailInfo {
+    pub build: BuildInfo,
+    pub beta_groups: Vec<BetaGroupInfo>,
+    pub localizations: Vec<BetaBuildLocalizationInfo>,
 }
 
 /// A TestFlight beta group (internal or external) of an app. Dates are raw
