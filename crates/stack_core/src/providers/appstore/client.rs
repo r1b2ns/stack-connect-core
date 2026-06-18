@@ -216,6 +216,23 @@ struct ReviewSubmissionRelationships {
     submitted_by_actor: ToOneRelationship,
 }
 
+/// A JSON:API document page of `reviewSubmissionItems`, returned by
+/// `GET /v1/reviewSubmissions/{id}/items`. Only each item's `id` is needed (to
+/// `DELETE` it) plus `links.next` to follow pagination; any `included[]` is
+/// ignored.
+#[derive(Deserialize, Default)]
+struct ReviewSubmissionItemsResponse {
+    #[serde(default)]
+    data: Vec<ReviewSubmissionItemResource>,
+    #[serde(default)]
+    links: Links,
+}
+
+#[derive(Deserialize)]
+struct ReviewSubmissionItemResource {
+    id: String,
+}
+
 /// The heterogeneous `included[]` entries, dispatched by their JSON:API `type`.
 /// Unknown types deserialize to [`IncludedResource::Other`] and are ignored.
 #[derive(Deserialize)]
@@ -2433,14 +2450,36 @@ impl AppStoreClient {
         self.post_json_2xx(&url, &request_body).await.map(|_| ())
     }
 
-    /// Rejects the most recent submission for `app_id`.
+    /// Discards the active submissions for `app_id`, returning the version out of
+    /// review.
     ///
-    /// Like [`Self::cancel_review`] but the lookup `GET
-    /// /v1/reviewSubmissions?filter[app]={app_id}` carries no state filter, so
-    /// the first submission in any state is targeted. When none exists this is a
-    /// no-op that returns `Ok(())`. The active submission is then canceled via
-    /// `PATCH /v1/reviewSubmissions/{id}` with `canceled: true`. Both requests
-    /// route through the shared pending-agreements 403 guard.
+    /// 1. `GET /v1/reviewSubmissions?filter[app]={app_id}\
+    ///    &filter[state]=READY_FOR_REVIEW,WAITING_FOR_REVIEW,IN_REVIEW,\
+    ///    UNRESOLVED_ISSUES` — only *active*/cancellable submissions are
+    ///    fetched, so finished/historical submissions are never targeted. An
+    ///    empty page is a no-op that returns `Ok(())` (matching the host).
+    /// 2. **Every** submission in the page is processed (production has been
+    ///    observed with several stale `READY_FOR_REVIEW` submissions; clearing
+    ///    all of them is what reliably unsticks the version). The action
+    ///    branches on each submission's `state`:
+    ///    - `WAITING_FOR_REVIEW` / `IN_REVIEW` / `UNRESOLVED_ISSUES` → the
+    ///      submission has already been sent to review, so it is canceled via
+    ///      `PATCH /v1/reviewSubmissions/{id}` with `canceled: true` (the
+    ///      documented "Cancel Submission" action).
+    ///    - `READY_FOR_REVIEW` → the submission was created but not yet
+    ///      submitted. The `reviewSubmissions` resource does **not** allow
+    ///      `DELETE` (Apple returns `403 FORBIDDEN_ERROR`) and does **not**
+    ///      accept `canceled: true` in this state (Apple returns
+    ///      `409 STATE_ERROR.ENTITY_STATE_INVALID`). Instead its items are
+    ///      listed via `GET /v1/reviewSubmissions/{id}/items` and each one is
+    ///      removed via `DELETE /v1/reviewSubmissionItems/{itemId}`. Emptying
+    ///      the submission of its items returns the `appStoreVersion` to
+    ///      `PREPARE_FOR_SUBMISSION`.
+    ///    - any other state (or a missing `state`) → skipped, with no mutating
+    ///      call. We never blindly PATCH an unknown state: a non-cancellable
+    ///      submission would otherwise return `409 STATE_ERROR.ENTITY_STATE_INVALID`.
+    ///
+    /// All requests route through the shared pending-agreements 403 guard.
     ///
     /// # Errors
     /// [`StackError::PendingAgreements`] on a pending-agreements 403,
@@ -2448,10 +2487,117 @@ impl AppStoreClient {
     /// on malformed JSON, or [`StackError::Network`] on transport failure.
     pub(crate) async fn reject_version(&self, app_id: &str) -> Result<(), StackError> {
         let url = format!(
-            "{}/v1/reviewSubmissions?filter[app]={app_id}",
+            "{}/v1/reviewSubmissions?filter[app]={app_id}\
+             &filter[state]=READY_FOR_REVIEW,WAITING_FOR_REVIEW,IN_REVIEW,UNRESOLVED_ISSUES",
             self.base_url
         );
-        self.cancel_first_submission(&url).await
+        let body = self.get_page(&url).await?;
+        let page: ReviewSubmissionsResponse = serde_json::from_str(&body)
+            .map_err(|e| StackError::decode(format!("review submissions response: {e}")))?;
+
+        // Process every active submission, not just the first: production has
+        // been seen with several stale READY_FOR_REVIEW submissions, and the
+        // version only unsticks once they are all cleared. An empty page leaves
+        // the loop untouched and returns Ok(()) (host no-op behavior).
+        for submission in page.data {
+            match submission.attributes.state.as_deref() {
+                // Already sent to review: cancel the in-flight submission.
+                Some("WAITING_FOR_REVIEW") | Some("IN_REVIEW") | Some("UNRESOLVED_ISSUES") => {
+                    let patch_url =
+                        format!("{}/v1/reviewSubmissions/{}", self.base_url, submission.id);
+                    let patch_body = json!({
+                        "data": {
+                            "type": "reviewSubmissions",
+                            "id": submission.id,
+                            "attributes": { "canceled": true }
+                        }
+                    });
+                    let token = self.auth.bearer_token().await?;
+                    self.patch_no_content(&patch_url, &token, &patch_body)
+                        .await?;
+                }
+                // Created but not yet submitted: `reviewSubmissions` forbids
+                // DELETE and rejects `canceled: true` here, so drop the
+                // submission's items instead — emptying it returns the version
+                // to PREPARE_FOR_SUBMISSION.
+                Some("READY_FOR_REVIEW") => {
+                    self.delete_submission_items(&submission.id).await?;
+                }
+                // Unknown / non-cancellable state: never blindly PATCH (would 409).
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+
+    /// Removes every `reviewSubmissionItem` belonging to the submission `id`,
+    /// following `links.next` pagination across pages.
+    ///
+    /// `GET /v1/reviewSubmissions/{id}/items?include=appStoreVersion` lists the
+    /// items (normally one), then each is removed via
+    /// `DELETE /v1/reviewSubmissionItems/{itemId}`. Emptying a not-yet-submitted
+    /// submission of its items returns the version to `PREPARE_FOR_SUBMISSION`.
+    ///
+    /// # Errors
+    /// [`StackError::PendingAgreements`] on a pending-agreements 403,
+    /// [`StackError::Http`] on any other non-2xx response, [`StackError::Decode`]
+    /// on malformed JSON, or [`StackError::Network`] on transport failure.
+    async fn delete_submission_items(&self, id: &str) -> Result<(), StackError> {
+        let mut next_url = Some(format!(
+            "{}/v1/reviewSubmissions/{id}/items?include=appStoreVersion",
+            self.base_url
+        ));
+        while let Some(url) = next_url {
+            let page = self.fetch_submission_items_page(&url).await?;
+            for item in page.data {
+                self.delete_review_submission_item(&item.id).await?;
+            }
+            next_url = page.links.next;
+        }
+        Ok(())
+    }
+
+    /// Fetches and parses one page of a submission's `reviewSubmissionItems`.
+    ///
+    /// # Errors
+    /// [`StackError::PendingAgreements`] on a pending-agreements 403,
+    /// [`StackError::Http`] on any other non-2xx response, [`StackError::Decode`]
+    /// on malformed JSON, or [`StackError::Network`] on transport failure.
+    async fn fetch_submission_items_page(
+        &self,
+        url: &str,
+    ) -> Result<ReviewSubmissionItemsResponse, StackError> {
+        let body = self.get_page(url).await?;
+        serde_json::from_str(&body)
+            .map_err(|e| StackError::decode(format!("review submission items response: {e}")))
+    }
+
+    /// Deletes the review submission item identified by `item_id`.
+    ///
+    /// `DELETE /v1/reviewSubmissionItems/{item_id}`. Any 2xx (Apple returns
+    /// `204 No Content`) → `Ok(())`. Failures route through the shared
+    /// pending-agreements 403 guard.
+    ///
+    /// # Errors
+    /// [`StackError::PendingAgreements`] on a pending-agreements 403,
+    /// [`StackError::Http`] on any other non-2xx response, or
+    /// [`StackError::Network`] on transport failure.
+    async fn delete_review_submission_item(&self, item_id: &str) -> Result<(), StackError> {
+        let url = format!("{}/v1/reviewSubmissionItems/{item_id}", self.base_url);
+        let token = self.auth.bearer_token().await?;
+        let (status, body) = self
+            .send_and_read(self.http.delete(&url).bearer_auth(token))
+            .await?;
+        if status.is_success() {
+            return Ok(());
+        }
+        if let Some(err) = pending_agreements_error(status.as_u16(), &body) {
+            return Err(err);
+        }
+        Err(StackError::Http {
+            status: status.as_u16(),
+            message: body,
+        })
     }
 
     /// Fetches the phased (staged) release for `version_id`.
@@ -6481,20 +6627,28 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn reject_version_patches_first_submission() {
+    async fn reject_version_patches_in_review_submission() {
         let server = MockServer::start().await;
 
-        // GET with NO state filter returns the first submission.
+        // GET is filtered to active/cancellable states.
         Mock::given(method("GET"))
             .and(path("/v1/reviewSubmissions"))
             .and(query_param("filter[app]", "APP1"))
-            .and(wiremock::matchers::query_param_is_missing("filter[state]"))
+            .and(query_param(
+                "filter[state]",
+                "READY_FOR_REVIEW,WAITING_FOR_REVIEW,IN_REVIEW,UNRESOLVED_ISSUES",
+            ))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "data": [{ "type": "reviewSubmissions", "id": "sub-r" }]
+                "data": [{
+                    "type": "reviewSubmissions",
+                    "id": "sub-r",
+                    "attributes": { "state": "IN_REVIEW" }
+                }]
             })))
             .mount(&server)
             .await;
 
+        // An IN_REVIEW submission is canceled via PATCH { canceled: true }.
         Mock::given(method("PATCH"))
             .and(path("/v1/reviewSubmissions/sub-r"))
             .and(wiremock::matchers::body_partial_json(serde_json::json!({
@@ -6515,13 +6669,223 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn reject_version_is_noop_when_no_submission() {
+    async fn reject_version_deletes_items_of_ready_for_review_submission() {
         let server = MockServer::start().await;
+
+        // One READY_FOR_REVIEW submission.
         Mock::given(method("GET"))
             .and(path("/v1/reviewSubmissions"))
+            .and(query_param("filter[app]", "APP1"))
+            .and(query_param(
+                "filter[state]",
+                "READY_FOR_REVIEW,WAITING_FOR_REVIEW,IN_REVIEW,UNRESOLVED_ISSUES",
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": [{
+                    "type": "reviewSubmissions",
+                    "id": "sub-ready",
+                    "attributes": { "state": "READY_FOR_REVIEW" }
+                }]
+            })))
+            .mount(&server)
+            .await;
+
+        // Its items list returns two items.
+        Mock::given(method("GET"))
+            .and(path("/v1/reviewSubmissions/sub-ready/items"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": [
+                    { "type": "reviewSubmissionItems", "id": "item-1" },
+                    { "type": "reviewSubmissionItems", "id": "item-2" }
+                ]
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        // Each item is removed via DELETE /v1/reviewSubmissionItems/{itemId}.
+        // Exactly two DELETEs are expected (one per item).
+        Mock::given(method("DELETE"))
+            .and(path("/v1/reviewSubmissionItems/item-1"))
+            .respond_with(ResponseTemplate::new(204))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("DELETE"))
+            .and(path("/v1/reviewSubmissionItems/item-2"))
+            .respond_with(ResponseTemplate::new(204))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        // A DELETE on /v1/reviewSubmissions/* (forbidden by Apple) or a PATCH
+        // would hit no mock, 404, and fail the `is_ok()` assertion below.
+        assert!(client(server.uri()).reject_version("APP1").await.is_ok());
+        // `.expect(1)` on each mock is verified on server drop: two item DELETEs,
+        // one items GET, and no other mutating request occurred.
+    }
+
+    #[tokio::test]
+    async fn reject_version_deletes_items_of_all_ready_for_review_submissions() {
+        let server = MockServer::start().await;
+
+        // The page contains TWO stale READY_FOR_REVIEW submissions; both must be
+        // cleared (production has been seen with several).
+        Mock::given(method("GET"))
+            .and(path("/v1/reviewSubmissions"))
+            .and(query_param("filter[app]", "APP1"))
+            .and(query_param(
+                "filter[state]",
+                "READY_FOR_REVIEW,WAITING_FOR_REVIEW,IN_REVIEW,UNRESOLVED_ISSUES",
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": [
+                    {
+                        "type": "reviewSubmissions",
+                        "id": "sub-a",
+                        "attributes": { "state": "READY_FOR_REVIEW" }
+                    },
+                    {
+                        "type": "reviewSubmissions",
+                        "id": "sub-b",
+                        "attributes": { "state": "READY_FOR_REVIEW" }
+                    }
+                ]
+            })))
+            .mount(&server)
+            .await;
+
+        // Each submission's items are listed and its single item deleted.
+        Mock::given(method("GET"))
+            .and(path("/v1/reviewSubmissions/sub-a/items"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": [{ "type": "reviewSubmissionItems", "id": "item-a" }]
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/v1/reviewSubmissions/sub-b/items"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": [{ "type": "reviewSubmissionItems", "id": "item-b" }]
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        Mock::given(method("DELETE"))
+            .and(path("/v1/reviewSubmissionItems/item-a"))
+            .respond_with(ResponseTemplate::new(204))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("DELETE"))
+            .and(path("/v1/reviewSubmissionItems/item-b"))
+            .respond_with(ResponseTemplate::new(204))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        assert!(client(server.uri()).reject_version("APP1").await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn reject_version_surfaces_pending_agreements_on_item_delete() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/v1/reviewSubmissions"))
+            .and(query_param("filter[app]", "APP1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": [{
+                    "type": "reviewSubmissions",
+                    "id": "sub-ready",
+                    "attributes": { "state": "READY_FOR_REVIEW" }
+                }]
+            })))
+            .mount(&server)
+            .await;
+
+        Mock::given(method("GET"))
+            .and(path("/v1/reviewSubmissions/sub-ready/items"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": [{ "type": "reviewSubmissionItems", "id": "item-1" }]
+            })))
+            .mount(&server)
+            .await;
+
+        // The item DELETE comes back as a pending-agreements 403.
+        Mock::given(method("DELETE"))
+            .and(path("/v1/reviewSubmissionItems/item-1"))
+            .respond_with(ResponseTemplate::new(403).set_body_json(serde_json::json!({
+                "errors": [{ "detail": "The agreement is pending acceptance." }]
+            })))
+            .mount(&server)
+            .await;
+
+        let err = client(server.uri())
+            .reject_version("APP1")
+            .await
+            .unwrap_err();
+        assert!(matches!(err, StackError::PendingAgreements { .. }));
+    }
+
+    #[tokio::test]
+    async fn reject_version_is_noop_when_no_submission() {
+        let server = MockServer::start().await;
+        // GET returns an empty page; no PATCH/DELETE mock is mounted, so any
+        // mutating request would fail the test.
+        Mock::given(method("GET"))
+            .and(path("/v1/reviewSubmissions"))
+            .and(query_param("filter[app]", "APP1"))
+            .and(query_param(
+                "filter[state]",
+                "READY_FOR_REVIEW,WAITING_FOR_REVIEW,IN_REVIEW,UNRESOLVED_ISSUES",
+            ))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                 "data": []
             })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        assert!(client(server.uri()).reject_version("APP1").await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn reject_version_is_noop_for_non_cancellable_state() {
+        let server = MockServer::start().await;
+        // A submission in a state we don't act on (e.g. COMPLETING) must not be
+        // PATCHed or DELETEd — that is what previously caused a 409. No mutating
+        // mock is mounted, so any such request would fail the test.
+        Mock::given(method("GET"))
+            .and(path("/v1/reviewSubmissions"))
+            .and(query_param("filter[app]", "APP1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": [{
+                    "type": "reviewSubmissions",
+                    "id": "sub-x",
+                    "attributes": { "state": "COMPLETING" }
+                }]
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        assert!(client(server.uri()).reject_version("APP1").await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn reject_version_is_noop_when_state_missing() {
+        let server = MockServer::start().await;
+        // A submission with no `state` attribute is treated as non-cancellable.
+        Mock::given(method("GET"))
+            .and(path("/v1/reviewSubmissions"))
+            .and(query_param("filter[app]", "APP1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": [{ "type": "reviewSubmissions", "id": "sub-n" }]
+            })))
+            .expect(1)
             .mount(&server)
             .await;
 
