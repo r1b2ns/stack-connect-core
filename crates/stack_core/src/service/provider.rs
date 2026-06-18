@@ -4,6 +4,7 @@ use async_trait::async_trait;
 
 use crate::domain::AppInfo;
 use crate::error::StackError;
+use crate::service::capabilities::app_metadata::AppMetadata;
 use crate::service::capabilities::app_store_versions::AppStoreVersions;
 use crate::service::capabilities::beta_app_localizations::BetaAppLocalizations;
 use crate::service::capabilities::beta_app_review_detail::BetaAppReviewDetail;
@@ -27,6 +28,7 @@ pub enum Capability {
     BetaBuildLocalizations,
     BetaAppLocalizations,
     BetaAppReviewDetail,
+    AppMetadata,
 }
 
 /// Internal, non-exported contract every concrete plugin implements. Kept off the
@@ -92,6 +94,13 @@ pub(crate) trait ProviderImpl: Send + Sync {
     /// lacks [`Capability::BetaAppReviewDetail`]. Default `None` so providers opt
     /// in explicitly.
     fn beta_app_review_detail(&self) -> Option<Arc<BetaAppReviewDetail>> {
+        None
+    }
+
+    /// The App Metadata capability handle, or `None` if this provider lacks
+    /// [`Capability::AppMetadata`]. Default `None` so providers opt in
+    /// explicitly.
+    fn app_metadata(&self) -> Option<Arc<AppMetadata>> {
         None
     }
 }
@@ -177,6 +186,14 @@ impl Provider {
     /// `None` when the beta app review detail is unsupported.
     pub fn beta_app_review_detail(&self) -> Option<Arc<BetaAppReviewDetail>> {
         self.inner.beta_app_review_detail()
+    }
+
+    /// The App Metadata capability handle, or `None` when this provider does not
+    /// expose [`Capability::AppMetadata`]. This is the discovery mechanism: the
+    /// host calls `provider.app_metadata()` and gets `None` when app metadata is
+    /// unsupported.
+    pub fn app_metadata(&self) -> Option<Arc<AppMetadata>> {
+        self.inner.app_metadata()
     }
 }
 

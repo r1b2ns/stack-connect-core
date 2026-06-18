@@ -5,9 +5,10 @@ use serde_json::json;
 
 use crate::auth::es256::AppStoreAuthenticator;
 use crate::domain::{
-    AppInfo, AppStoreVersionInfo, BetaAppLocalizationInfo, BetaAppReviewDetailInfo,
-    BetaBuildLocalizationInfo, BetaGroupInfo, BetaTesterInfo, BuildDetailInfo, BuildInfo,
-    BuildsPage, CustomerReview, CustomerReviewsPage, ReviewResponse, ReviewSubmission,
+    AppInfo, AppInfoLocalizationInfo, AppStoreVersionInfo, BetaAppLocalizationInfo,
+    BetaAppReviewDetailInfo, BetaBuildLocalizationInfo, BetaGroupInfo, BetaTesterInfo,
+    BuildDetailInfo, BuildInfo, BuildsPage, CustomerReview, CustomerReviewsPage, ReviewResponse,
+    ReviewSubmission,
 };
 use crate::error::StackError;
 
@@ -943,6 +944,64 @@ impl BetaAppLocalizationResource {
             locale: self.attributes.locale.unwrap_or_default(),
             feedback_email: self.attributes.feedback_email,
             description: self.attributes.description,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// App info localizations (JSON:API)
+// ---------------------------------------------------------------------------
+
+/// A JSON:API document page of `appInfoLocalizations` resources.
+#[derive(Deserialize)]
+struct AppInfoLocalizationsResponse {
+    #[serde(default)]
+    data: Vec<AppInfoLocalizationResource>,
+    #[serde(default)]
+    links: Links,
+}
+
+/// A JSON:API single-resource document wrapping one `appInfoLocalizations`, as
+/// returned by the create (POST) and update (PATCH) endpoints: `{ "data": { ... } }`.
+#[derive(Deserialize)]
+struct AppInfoLocalizationDocument {
+    data: AppInfoLocalizationResource,
+}
+
+#[derive(Deserialize)]
+struct AppInfoLocalizationResource {
+    id: String,
+    #[serde(default)]
+    attributes: AppInfoLocalizationAttributes,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct AppInfoLocalizationAttributes {
+    #[serde(default)]
+    locale: Option<String>,
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    subtitle: Option<String>,
+    #[serde(default)]
+    privacy_policy_url: Option<String>,
+    #[serde(default)]
+    privacy_choices_url: Option<String>,
+    #[serde(default)]
+    privacy_policy_text: Option<String>,
+}
+
+impl AppInfoLocalizationResource {
+    fn into_app_info_localization_info(self) -> AppInfoLocalizationInfo {
+        AppInfoLocalizationInfo {
+            id: self.id,
+            locale: self.attributes.locale.unwrap_or_default(),
+            name: self.attributes.name,
+            subtitle: self.attributes.subtitle,
+            privacy_policy_url: self.attributes.privacy_policy_url,
+            privacy_choices_url: self.attributes.privacy_choices_url,
+            privacy_policy_text: self.attributes.privacy_policy_text,
         }
     }
 }
@@ -2849,6 +2908,288 @@ impl AppStoreClient {
         let document: BetaAppLocalizationDocument = serde_json::from_str(&response_body)
             .map_err(|e| StackError::decode(format!("beta app localization response: {e}")))?;
         Ok(document.data.into_beta_app_localization_info())
+    }
+
+    /// Lists the app-info localizations for `app_info_id`, mapping each into an
+    /// [`AppInfoLocalizationInfo`].
+    ///
+    /// `GET /v1/appInfos/{app_info_id}/appInfoLocalizations` — the appInfo's
+    /// relationship list endpoint (note this is under `/appInfos/{id}/`, not a
+    /// `filter[appInfo]` query) — following `links.next` pagination until
+    /// exhausted.
+    ///
+    /// # Errors
+    /// [`StackError::PendingAgreements`] on a pending-agreements 403,
+    /// [`StackError::Http`] on any other non-2xx page, [`StackError::Decode`] on
+    /// malformed JSON, or [`StackError::Network`] on transport failure.
+    pub(crate) async fn fetch_app_info_localizations(
+        &self,
+        app_info_id: &str,
+    ) -> Result<Vec<AppInfoLocalizationInfo>, StackError> {
+        let mut localizations = Vec::new();
+        let mut next_url = Some(format!(
+            "{}/v1/appInfos/{app_info_id}/appInfoLocalizations",
+            self.base_url
+        ));
+
+        while let Some(url) = next_url {
+            let body = self.get_page(&url).await?;
+            let page: AppInfoLocalizationsResponse = serde_json::from_str(&body)
+                .map_err(|e| StackError::decode(format!("app info localizations response: {e}")))?;
+            localizations.extend(
+                page.data
+                    .into_iter()
+                    .map(AppInfoLocalizationResource::into_app_info_localization_info),
+            );
+
+            // `links.next` is an absolute URL; follow it verbatim until absent.
+            next_url = page.links.next.filter(|u| !u.is_empty());
+        }
+
+        Ok(localizations)
+    }
+
+    /// Updates the app-info localization identified by `id`, always sending the
+    /// `name` attribute and sending `subtitle` only when `Some`.
+    ///
+    /// `PATCH /v1/appInfoLocalizations/{id}` with a JSON:API body that always
+    /// carries `name` and includes `subtitle` only when provided, and no
+    /// relationships. Success is any 2xx (`200 OK`); the returned single-resource
+    /// document is mapped into an [`AppInfoLocalizationInfo`].
+    ///
+    /// # Errors
+    /// [`StackError::PendingAgreements`] on a pending-agreements 403,
+    /// [`StackError::Http`] on any other non-2xx response, [`StackError::Decode`]
+    /// on malformed JSON, or [`StackError::Network`] on transport failure.
+    pub(crate) async fn update_app_info_localization(
+        &self,
+        id: &str,
+        name: &str,
+        subtitle: Option<&str>,
+    ) -> Result<AppInfoLocalizationInfo, StackError> {
+        let url = format!("{}/v1/appInfoLocalizations/{id}", self.base_url);
+        let token = self.auth.bearer_token().await?;
+
+        let mut attributes = serde_json::Map::new();
+        attributes.insert("name".into(), json!(name));
+        if let Some(value) = subtitle {
+            attributes.insert("subtitle".into(), json!(value));
+        }
+
+        let request_body = json!({
+            "data": {
+                "type": "appInfoLocalizations",
+                "id": id,
+                "attributes": attributes
+            }
+        });
+
+        let response = self
+            .http
+            .patch(&url)
+            .bearer_auth(token)
+            .json(&request_body)
+            .send()
+            .await
+            .map_err(|e| StackError::network(e.to_string()))?;
+
+        let status = response.status();
+        let response_body = response
+            .text()
+            .await
+            .map_err(|e| StackError::network(e.to_string()))?;
+        if !status.is_success() {
+            if let Some(err) = pending_agreements_error(status.as_u16(), &response_body) {
+                return Err(err);
+            }
+            return Err(StackError::Http {
+                status: status.as_u16(),
+                message: response_body,
+            });
+        }
+
+        let document: AppInfoLocalizationDocument = serde_json::from_str(&response_body)
+            .map_err(|e| StackError::decode(format!("app info localization response: {e}")))?;
+        Ok(document.data.into_app_info_localization_info())
+    }
+
+    /// Updates the privacy attributes of the app-info localization identified by
+    /// `id`, replacing only the provided privacy URL/text attributes.
+    ///
+    /// `PATCH /v1/appInfoLocalizations/{id}` with a JSON:API body that includes
+    /// only the `Some` privacy attributes
+    /// (`privacyPolicyUrl`/`privacyChoicesUrl`/`privacyPolicyText`) and no
+    /// relationships. Success is any 2xx (`200 OK`); the returned single-resource
+    /// document is mapped into an [`AppInfoLocalizationInfo`].
+    ///
+    /// # Errors
+    /// [`StackError::PendingAgreements`] on a pending-agreements 403,
+    /// [`StackError::Http`] on any other non-2xx response, [`StackError::Decode`]
+    /// on malformed JSON, or [`StackError::Network`] on transport failure.
+    pub(crate) async fn update_app_info_localization_privacy(
+        &self,
+        id: &str,
+        privacy_policy_url: Option<&str>,
+        privacy_choices_url: Option<&str>,
+        privacy_policy_text: Option<&str>,
+    ) -> Result<AppInfoLocalizationInfo, StackError> {
+        let url = format!("{}/v1/appInfoLocalizations/{id}", self.base_url);
+        let token = self.auth.bearer_token().await?;
+
+        let mut attributes = serde_json::Map::new();
+        if let Some(value) = privacy_policy_url {
+            attributes.insert("privacyPolicyUrl".into(), json!(value));
+        }
+        if let Some(value) = privacy_choices_url {
+            attributes.insert("privacyChoicesUrl".into(), json!(value));
+        }
+        if let Some(value) = privacy_policy_text {
+            attributes.insert("privacyPolicyText".into(), json!(value));
+        }
+
+        let request_body = json!({
+            "data": {
+                "type": "appInfoLocalizations",
+                "id": id,
+                "attributes": attributes
+            }
+        });
+
+        let response = self
+            .http
+            .patch(&url)
+            .bearer_auth(token)
+            .json(&request_body)
+            .send()
+            .await
+            .map_err(|e| StackError::network(e.to_string()))?;
+
+        let status = response.status();
+        let response_body = response
+            .text()
+            .await
+            .map_err(|e| StackError::network(e.to_string()))?;
+        if !status.is_success() {
+            if let Some(err) = pending_agreements_error(status.as_u16(), &response_body) {
+                return Err(err);
+            }
+            return Err(StackError::Http {
+                status: status.as_u16(),
+                message: response_body,
+            });
+        }
+
+        let document: AppInfoLocalizationDocument = serde_json::from_str(&response_body)
+            .map_err(|e| StackError::decode(format!("app info localization response: {e}")))?;
+        Ok(document.data.into_app_info_localization_info())
+    }
+
+    /// Creates an app-info localization for `app_info_id` in `locale`.
+    ///
+    /// `POST /v1/appInfoLocalizations` with a JSON:API body that always carries
+    /// the `locale` and `name` attributes and includes `subtitle` only when
+    /// `Some`, plus the `appInfo` relationship. Success is any 2xx
+    /// (`201 Created`); the returned single-resource document is mapped into an
+    /// [`AppInfoLocalizationInfo`].
+    ///
+    /// # Errors
+    /// [`StackError::PendingAgreements`] on a pending-agreements 403,
+    /// [`StackError::Http`] on any other non-2xx response, [`StackError::Decode`]
+    /// on malformed JSON, or [`StackError::Network`] on transport failure.
+    pub(crate) async fn create_app_info_localization(
+        &self,
+        app_info_id: &str,
+        locale: &str,
+        name: &str,
+        subtitle: Option<&str>,
+    ) -> Result<AppInfoLocalizationInfo, StackError> {
+        let url = format!("{}/v1/appInfoLocalizations", self.base_url);
+        let token = self.auth.bearer_token().await?;
+
+        let mut attributes = serde_json::Map::new();
+        attributes.insert("locale".into(), json!(locale));
+        attributes.insert("name".into(), json!(name));
+        if let Some(value) = subtitle {
+            attributes.insert("subtitle".into(), json!(value));
+        }
+
+        let request_body = json!({
+            "data": {
+                "type": "appInfoLocalizations",
+                "attributes": attributes,
+                "relationships": {
+                    "appInfo": {
+                        "data": { "type": "appInfos", "id": app_info_id }
+                    }
+                }
+            }
+        });
+
+        let response = self
+            .http
+            .post(&url)
+            .bearer_auth(token)
+            .json(&request_body)
+            .send()
+            .await
+            .map_err(|e| StackError::network(e.to_string()))?;
+
+        let status = response.status();
+        let response_body = response
+            .text()
+            .await
+            .map_err(|e| StackError::network(e.to_string()))?;
+        if !status.is_success() {
+            if let Some(err) = pending_agreements_error(status.as_u16(), &response_body) {
+                return Err(err);
+            }
+            return Err(StackError::Http {
+                status: status.as_u16(),
+                message: response_body,
+            });
+        }
+
+        let document: AppInfoLocalizationDocument = serde_json::from_str(&response_body)
+            .map_err(|e| StackError::decode(format!("app info localization response: {e}")))?;
+        Ok(document.data.into_app_info_localization_info())
+    }
+
+    /// Deletes the app-info localization identified by `id`.
+    ///
+    /// `DELETE /v1/appInfoLocalizations/{id}` — any 2xx response is success.
+    ///
+    /// # Errors
+    /// [`StackError::PendingAgreements`] on a pending-agreements 403,
+    /// [`StackError::Http`] on any other non-2xx response, or
+    /// [`StackError::Network`] on transport failure.
+    pub(crate) async fn delete_app_info_localization(&self, id: &str) -> Result<(), StackError> {
+        let url = format!("{}/v1/appInfoLocalizations/{id}", self.base_url);
+        let token = self.auth.bearer_token().await?;
+
+        let response = self
+            .http
+            .delete(&url)
+            .bearer_auth(token)
+            .send()
+            .await
+            .map_err(|e| StackError::network(e.to_string()))?;
+
+        let status = response.status();
+        let response_body = response
+            .text()
+            .await
+            .map_err(|e| StackError::network(e.to_string()))?;
+        if !status.is_success() {
+            if let Some(err) = pending_agreements_error(status.as_u16(), &response_body) {
+                return Err(err);
+            }
+            return Err(StackError::Http {
+                status: status.as_u16(),
+                message: response_body,
+            });
+        }
+
+        Ok(())
     }
 
     /// Fetches the single beta app review detail for `app_id`, mapping it into a
@@ -5622,6 +5963,321 @@ mod tests {
 
         let err = client(server.uri())
             .update_beta_app_localization("loc-1", Some("beta@example.com"), None)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, StackError::Http { status: 404, .. }));
+    }
+
+    #[tokio::test]
+    async fn fetch_app_info_localizations_maps_and_paginates() {
+        let server = MockServer::start().await;
+        let next = format!(
+            "{}/v1/appInfos/info-1/appInfoLocalizations?cursor=PAGE2",
+            server.uri()
+        );
+
+        // Page 1: a fully-populated localization (name, subtitle, and all three
+        // privacy attributes), plus the `links.next` cursor. The first request
+        // hits the appInfo-relationship endpoint.
+        Mock::given(method("GET"))
+            .and(path("/v1/appInfos/info-1/appInfoLocalizations"))
+            .and(wiremock::matchers::query_param_is_missing("cursor"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": [{
+                    "type": "appInfoLocalizations",
+                    "id": "aloc-1",
+                    "attributes": {
+                        "locale": "en-US",
+                        "name": "My App",
+                        "subtitle": "The best app",
+                        "privacyPolicyUrl": "https://example.com/privacy",
+                        "privacyChoicesUrl": "https://example.com/choices",
+                        "privacyPolicyText": "We respect your privacy."
+                    }
+                }],
+                "links": { "next": next }
+            })))
+            .mount(&server)
+            .await;
+
+        // Page 2: a sparse localization (only the locale present) and no further
+        // page, exercising the all-attributes-absent path.
+        Mock::given(method("GET"))
+            .and(path("/v1/appInfos/info-1/appInfoLocalizations"))
+            .and(query_param("cursor", "PAGE2"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": [{
+                    "type": "appInfoLocalizations",
+                    "id": "aloc-2",
+                    "attributes": {
+                        "locale": "pt-BR"
+                    }
+                }],
+                "links": {}
+            })))
+            .mount(&server)
+            .await;
+
+        let localizations = client(server.uri())
+            .fetch_app_info_localizations("info-1")
+            .await
+            .unwrap();
+        assert_eq!(localizations.len(), 2);
+
+        let first = &localizations[0];
+        assert_eq!(first.id, "aloc-1");
+        assert_eq!(first.locale, "en-US");
+        assert_eq!(first.name.as_deref(), Some("My App"));
+        assert_eq!(first.subtitle.as_deref(), Some("The best app"));
+        assert_eq!(
+            first.privacy_policy_url.as_deref(),
+            Some("https://example.com/privacy")
+        );
+        assert_eq!(
+            first.privacy_choices_url.as_deref(),
+            Some("https://example.com/choices")
+        );
+        assert_eq!(
+            first.privacy_policy_text.as_deref(),
+            Some("We respect your privacy.")
+        );
+
+        let second = &localizations[1];
+        assert_eq!(second.id, "aloc-2");
+        assert_eq!(second.locale, "pt-BR");
+        assert!(second.name.is_none());
+        assert!(second.subtitle.is_none());
+        assert!(second.privacy_policy_url.is_none());
+        assert!(second.privacy_choices_url.is_none());
+        assert!(second.privacy_policy_text.is_none());
+    }
+
+    #[tokio::test]
+    async fn fetch_app_info_localizations_surfaces_http_error() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v1/appInfos/info-1/appInfoLocalizations"))
+            .respond_with(ResponseTemplate::new(500).set_body_string("boom"))
+            .mount(&server)
+            .await;
+
+        let err = client(server.uri())
+            .fetch_app_info_localizations("info-1")
+            .await
+            .unwrap_err();
+        assert!(matches!(err, StackError::Http { status: 500, .. }));
+    }
+
+    #[tokio::test]
+    async fn update_app_info_localization_patches_and_maps() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("PATCH"))
+            .and(path("/v1/appInfoLocalizations/aloc-1"))
+            // `name` is always present; `subtitle` is included only when
+            // provided. No relationships.
+            .and(wiremock::matchers::body_partial_json(serde_json::json!({
+                "data": {
+                    "type": "appInfoLocalizations",
+                    "id": "aloc-1",
+                    "attributes": {
+                        "name": "New Name",
+                        "subtitle": "New Subtitle"
+                    }
+                }
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": {
+                    "type": "appInfoLocalizations",
+                    "id": "aloc-1",
+                    "attributes": {
+                        "locale": "en-US",
+                        "name": "New Name",
+                        "subtitle": "New Subtitle"
+                    }
+                }
+            })))
+            .mount(&server)
+            .await;
+
+        let localization = client(server.uri())
+            .update_app_info_localization("aloc-1", "New Name", Some("New Subtitle"))
+            .await
+            .unwrap();
+
+        assert_eq!(localization.id, "aloc-1");
+        assert_eq!(localization.locale, "en-US");
+        assert_eq!(localization.name.as_deref(), Some("New Name"));
+        assert_eq!(localization.subtitle.as_deref(), Some("New Subtitle"));
+    }
+
+    #[tokio::test]
+    async fn update_app_info_localization_privacy_sends_only_privacy_attrs() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("PATCH"))
+            .and(path("/v1/appInfoLocalizations/aloc-1"))
+            // Only the provided privacy attributes should be present; no name /
+            // subtitle and no relationships.
+            .and(wiremock::matchers::body_partial_json(serde_json::json!({
+                "data": {
+                    "type": "appInfoLocalizations",
+                    "id": "aloc-1",
+                    "attributes": {
+                        "privacyPolicyUrl": "https://example.com/privacy",
+                        "privacyPolicyText": "Updated privacy text."
+                    }
+                }
+            })))
+            // Reject any body that leaks a `name` attribute: this asserts the
+            // privacy update does not send the product-page attributes.
+            .and(|req: &wiremock::Request| {
+                let value: serde_json::Value = match serde_json::from_slice(&req.body) {
+                    Ok(value) => value,
+                    Err(_) => return false,
+                };
+                value
+                    .get("data")
+                    .and_then(|d| d.get("attributes"))
+                    .and_then(|a| a.as_object())
+                    .map(|attrs| {
+                        !attrs.contains_key("name")
+                            && !attrs.contains_key("subtitle")
+                            && !attrs.contains_key("privacyChoicesUrl")
+                    })
+                    .unwrap_or(false)
+            })
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": {
+                    "type": "appInfoLocalizations",
+                    "id": "aloc-1",
+                    "attributes": {
+                        "locale": "en-US",
+                        "name": "My App",
+                        "privacyPolicyUrl": "https://example.com/privacy",
+                        "privacyPolicyText": "Updated privacy text."
+                    }
+                }
+            })))
+            .mount(&server)
+            .await;
+
+        let localization = client(server.uri())
+            .update_app_info_localization_privacy(
+                "aloc-1",
+                Some("https://example.com/privacy"),
+                None,
+                Some("Updated privacy text."),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(localization.id, "aloc-1");
+        assert_eq!(
+            localization.privacy_policy_url.as_deref(),
+            Some("https://example.com/privacy")
+        );
+        assert_eq!(
+            localization.privacy_policy_text.as_deref(),
+            Some("Updated privacy text.")
+        );
+    }
+
+    #[tokio::test]
+    async fn create_app_info_localization_posts_and_maps() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/v1/appInfoLocalizations"))
+            // Assert the request always carries `locale` + `name`, includes the
+            // provided optional `subtitle`, and wires the appInfo relationship.
+            .and(wiremock::matchers::body_partial_json(serde_json::json!({
+                "data": {
+                    "type": "appInfoLocalizations",
+                    "attributes": {
+                        "locale": "fr-FR",
+                        "name": "Mon App",
+                        "subtitle": "La meilleure app"
+                    },
+                    "relationships": {
+                        "appInfo": { "data": { "type": "appInfos", "id": "info-1" } }
+                    }
+                }
+            })))
+            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
+                "data": {
+                    "type": "appInfoLocalizations",
+                    "id": "aloc-9",
+                    "attributes": {
+                        "locale": "fr-FR",
+                        "name": "Mon App",
+                        "subtitle": "La meilleure app"
+                    }
+                }
+            })))
+            .mount(&server)
+            .await;
+
+        let localization = client(server.uri())
+            .create_app_info_localization("info-1", "fr-FR", "Mon App", Some("La meilleure app"))
+            .await
+            .unwrap();
+
+        assert_eq!(localization.id, "aloc-9");
+        assert_eq!(localization.locale, "fr-FR");
+        assert_eq!(localization.name.as_deref(), Some("Mon App"));
+        assert_eq!(localization.subtitle.as_deref(), Some("La meilleure app"));
+    }
+
+    #[tokio::test]
+    async fn create_app_info_localization_surfaces_pending_agreements() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/appInfoLocalizations"))
+            .respond_with(ResponseTemplate::new(403).set_body_json(serde_json::json!({
+                "errors": [{ "detail": "The agreement is pending." }]
+            })))
+            .mount(&server)
+            .await;
+
+        let err = client(server.uri())
+            .create_app_info_localization("info-1", "en-US", "My App", None)
+            .await
+            .unwrap_err();
+        match err {
+            StackError::PendingAgreements { message } => {
+                assert!(message.contains("pending agreements"))
+            }
+            other => panic!("expected PendingAgreements, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn delete_app_info_localization_succeeds_on_2xx() {
+        let server = MockServer::start().await;
+        Mock::given(method("DELETE"))
+            .and(path("/v1/appInfoLocalizations/aloc-1"))
+            .respond_with(ResponseTemplate::new(204))
+            .mount(&server)
+            .await;
+
+        client(server.uri())
+            .delete_app_info_localization("aloc-1")
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn delete_app_info_localization_surfaces_http_error() {
+        let server = MockServer::start().await;
+        Mock::given(method("DELETE"))
+            .and(path("/v1/appInfoLocalizations/aloc-1"))
+            .respond_with(ResponseTemplate::new(404).set_body_string("not found"))
+            .mount(&server)
+            .await;
+
+        let err = client(server.uri())
+            .delete_app_info_localization("aloc-1")
             .await
             .unwrap_err();
         assert!(matches!(err, StackError::Http { status: 404, .. }));

@@ -202,6 +202,25 @@ pub struct BetaAppReviewDetailInfo {
     pub notes: Option<String>,
 }
 
+/// An App Store app-info localization, keyed by `locale`. Carries the per-locale
+/// App Store listing metadata: the `name` and `subtitle` shown on the product
+/// page, plus the three privacy links/text (`privacy_policy_url`,
+/// `privacy_choices_url`, `privacy_policy_text`). All attributes are optional;
+/// App Store Connect serializes them camelCase (`privacyPolicyUrl`,
+/// `privacyChoicesUrl`, `privacyPolicyText`), which `rename_all = "camelCase"`
+/// maps without any per-field rename.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, uniffi::Record)]
+#[serde(rename_all = "camelCase")]
+pub struct AppInfoLocalizationInfo {
+    pub id: String,
+    pub locale: String,
+    pub name: Option<String>,
+    pub subtitle: Option<String>,
+    pub privacy_policy_url: Option<String>,
+    pub privacy_choices_url: Option<String>,
+    pub privacy_policy_text: Option<String>,
+}
+
 /// A TestFlight beta tester. `invite_type` and `state` are the raw ASC values
 /// passed through verbatim; the core does no remapping.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, uniffi::Record)]

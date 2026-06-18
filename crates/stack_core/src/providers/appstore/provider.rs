@@ -5,11 +5,13 @@ use async_trait::async_trait;
 use super::client::AppStoreClient;
 use crate::auth::es256::AppStoreAuthenticator;
 use crate::domain::{
-    AppInfo, AppStoreVersionInfo, BetaAppLocalizationInfo, BetaAppReviewDetailInfo,
-    BetaBuildLocalizationInfo, BetaGroupInfo, BetaTesterInfo, BuildDetailInfo, BuildInfo,
-    BuildsPage, CustomerReview, CustomerReviewsPage, ReviewResponse, ReviewSubmission,
+    AppInfo, AppInfoLocalizationInfo, AppStoreVersionInfo, BetaAppLocalizationInfo,
+    BetaAppReviewDetailInfo, BetaBuildLocalizationInfo, BetaGroupInfo, BetaTesterInfo,
+    BuildDetailInfo, BuildInfo, BuildsPage, CustomerReview, CustomerReviewsPage, ReviewResponse,
+    ReviewSubmission,
 };
 use crate::error::StackError;
+use crate::service::capabilities::app_metadata::{AppMetadata, AppMetadataImpl};
 use crate::service::capabilities::app_store_versions::{AppStoreVersions, AppStoreVersionsImpl};
 use crate::service::capabilities::beta_app_localizations::{
     BetaAppLocalizations, BetaAppLocalizationsImpl,
@@ -61,6 +63,7 @@ impl ProviderImpl for AppStoreProvider {
             Capability::BetaBuildLocalizations,
             Capability::BetaAppLocalizations,
             Capability::BetaAppReviewDetail,
+            Capability::AppMetadata,
         ]
     }
 
@@ -118,6 +121,12 @@ impl ProviderImpl for AppStoreProvider {
                 client: Arc::clone(&self.client),
             },
         )))
+    }
+
+    fn app_metadata(&self) -> Option<Arc<AppMetadata>> {
+        Some(AppMetadata::new(Box::new(AppStoreAppMetadata {
+            client: Arc::clone(&self.client),
+        })))
     }
 }
 
@@ -542,6 +551,67 @@ impl BetaAppReviewDetailImpl for AppStoreBetaAppReviewDetail {
     }
 }
 
+/// App Store Connect implementation of the [`AppMetadataImpl`] capability
+/// contract. Holds a shared [`AppStoreClient`] so it reuses the provider's token
+/// cache.
+struct AppStoreAppMetadata {
+    client: Arc<AppStoreClient>,
+}
+
+#[async_trait]
+impl AppMetadataImpl for AppStoreAppMetadata {
+    async fn fetch_app_info_localizations(
+        &self,
+        app_info_id: String,
+    ) -> Result<Vec<AppInfoLocalizationInfo>, StackError> {
+        self.client.fetch_app_info_localizations(&app_info_id).await
+    }
+
+    async fn update_app_info_localization(
+        &self,
+        id: String,
+        name: String,
+        subtitle: Option<String>,
+    ) -> Result<AppInfoLocalizationInfo, StackError> {
+        self.client
+            .update_app_info_localization(&id, &name, subtitle.as_deref())
+            .await
+    }
+
+    async fn update_app_info_localization_privacy(
+        &self,
+        id: String,
+        privacy_policy_url: Option<String>,
+        privacy_choices_url: Option<String>,
+        privacy_policy_text: Option<String>,
+    ) -> Result<AppInfoLocalizationInfo, StackError> {
+        self.client
+            .update_app_info_localization_privacy(
+                &id,
+                privacy_policy_url.as_deref(),
+                privacy_choices_url.as_deref(),
+                privacy_policy_text.as_deref(),
+            )
+            .await
+    }
+
+    async fn create_app_info_localization(
+        &self,
+        app_info_id: String,
+        locale: String,
+        name: String,
+        subtitle: Option<String>,
+    ) -> Result<AppInfoLocalizationInfo, StackError> {
+        self.client
+            .create_app_info_localization(&app_info_id, &locale, &name, subtitle.as_deref())
+            .await
+    }
+
+    async fn delete_app_info_localization(&self, id: String) -> Result<(), StackError> {
+        self.client.delete_app_info_localization(&id).await
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -568,7 +638,8 @@ mod tests {
                 Capability::BetaGroups,
                 Capability::BetaBuildLocalizations,
                 Capability::BetaAppLocalizations,
-                Capability::BetaAppReviewDetail
+                Capability::BetaAppReviewDetail,
+                Capability::AppMetadata
             ]
         );
     }
@@ -635,5 +706,13 @@ mod tests {
         assert!(provider()
             .capabilities()
             .contains(&Capability::BetaAppReviewDetail));
+    }
+
+    #[test]
+    fn exposes_app_metadata_capability_handle() {
+        // App Store Connect supports App Metadata, so the accessor must return
+        // `Some`.
+        assert!(provider().app_metadata().is_some());
+        assert!(provider().capabilities().contains(&Capability::AppMetadata));
     }
 }
