@@ -221,6 +221,71 @@ pub struct AppInfoLocalizationInfo {
     pub privacy_policy_text: Option<String>,
 }
 
+/// The full App Info detail for an app: the app-info resource's own ids and
+/// category/age-rating wiring, merged with the owning app's `sku`,
+/// `primary_locale`, and `content_rights_declaration`. `localizations` reuses the
+/// sibling [`AppInfoLocalizationInfo`] record, and `age_rating` carries the
+/// resolved [`AgeRatingDeclarationInfo`] when present in the JSON:API `included`
+/// section. The category ids are resolved from the app-info resource's
+/// relationships (not its attributes). All optional fields are `None` when the
+/// corresponding attribute / relationship is absent.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, uniffi::Record)]
+#[serde(rename_all = "camelCase")]
+pub struct AppInfoDetails {
+    pub app_info_id: String,
+    pub app_id: String,
+    pub sku: Option<String>,
+    pub primary_locale: Option<String>,
+    pub content_rights_declaration: Option<String>,
+    pub primary_category_id: Option<String>,
+    pub primary_subcategory_one_id: Option<String>,
+    pub secondary_category_id: Option<String>,
+    pub secondary_subcategory_one_id: Option<String>,
+    pub age_rating_declaration_id: Option<String>,
+    pub app_store_age_rating: Option<String>,
+    pub localizations: Vec<AppInfoLocalizationInfo>,
+    pub age_rating: Option<AgeRatingDeclarationInfo>,
+}
+
+/// An App Store age-rating declaration. Every content attribute is a raw ASC
+/// enum string (e.g. `NONE` / `INFREQUENT_OR_MILD` / `FREQUENT_OR_INTENSE`)
+/// passed through verbatim; the four `is_*` flags are booleans. All attributes
+/// are optional and are `None` when absent from the response.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, uniffi::Record)]
+#[serde(rename_all = "camelCase")]
+pub struct AgeRatingDeclarationInfo {
+    pub id: String,
+    pub alcohol_tobacco_or_drug_use_or_references: Option<String>,
+    pub contests: Option<String>,
+    pub gambling_simulated: Option<String>,
+    pub guns_or_other_weapons: Option<String>,
+    pub medical_or_treatment_information: Option<String>,
+    pub profanity_or_crude_humor: Option<String>,
+    pub sexual_content_graphic_and_nudity: Option<String>,
+    pub sexual_content_or_nudity: Option<String>,
+    pub horror_or_fear_themes: Option<String>,
+    pub mature_or_suggestive_themes: Option<String>,
+    pub violence_cartoon_or_fantasy: Option<String>,
+    pub violence_realistic: Option<String>,
+    pub violence_realistic_prolonged_graphic_or_sadistic: Option<String>,
+    pub is_advertising: Option<bool>,
+    pub is_gambling: Option<bool>,
+    pub is_unrestricted_web_access: Option<bool>,
+    pub is_user_generated_content: Option<bool>,
+    pub age_rating_override_v2: Option<String>,
+}
+
+/// An App Store app category, with the ids of its subcategories. Deliberately
+/// NON-recursive (UniFFI-friendly): `subcategory_ids` carries only the ids of the
+/// nested subcategories, leaving the host to materialize the tree from a flat
+/// list of [`AppCategoryInfo`] values if it needs the nesting.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, uniffi::Record)]
+#[serde(rename_all = "camelCase")]
+pub struct AppCategoryInfo {
+    pub id: String,
+    pub subcategory_ids: Vec<String>,
+}
+
 /// A TestFlight beta tester. `invite_type` and `state` are the raw ASC values
 /// passed through verbatim; the core does no remapping.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, uniffi::Record)]

@@ -5,10 +5,10 @@ use async_trait::async_trait;
 use super::client::AppStoreClient;
 use crate::auth::es256::AppStoreAuthenticator;
 use crate::domain::{
-    AppInfo, AppInfoLocalizationInfo, AppStoreVersionInfo, BetaAppLocalizationInfo,
-    BetaAppReviewDetailInfo, BetaBuildLocalizationInfo, BetaGroupInfo, BetaTesterInfo,
-    BuildDetailInfo, BuildInfo, BuildsPage, CustomerReview, CustomerReviewsPage, ReviewResponse,
-    ReviewSubmission,
+    AppCategoryInfo, AppInfo, AppInfoDetails, AppInfoLocalizationInfo, AppStoreVersionInfo,
+    BetaAppLocalizationInfo, BetaAppReviewDetailInfo, BetaBuildLocalizationInfo, BetaGroupInfo,
+    BetaTesterInfo, BuildDetailInfo, BuildInfo, BuildsPage, CustomerReview, CustomerReviewsPage,
+    ReviewResponse, ReviewSubmission,
 };
 use crate::error::StackError;
 use crate::service::capabilities::app_metadata::{AppMetadata, AppMetadataImpl};
@@ -609,6 +609,100 @@ impl AppMetadataImpl for AppStoreAppMetadata {
 
     async fn delete_app_info_localization(&self, id: String) -> Result<(), StackError> {
         self.client.delete_app_info_localization(&id).await
+    }
+
+    async fn fetch_app_info(&self, app_id: String) -> Result<AppInfoDetails, StackError> {
+        self.client.fetch_app_info(&app_id).await
+    }
+
+    async fn fetch_app_categories(&self) -> Result<Vec<AppCategoryInfo>, StackError> {
+        self.client.fetch_app_categories().await
+    }
+
+    async fn update_app_info_category(
+        &self,
+        app_info_id: String,
+        primary_category_id: Option<String>,
+        subcategory_one_id: Option<String>,
+        secondary_category_id: Option<String>,
+        secondary_subcategory_one_id: Option<String>,
+    ) -> Result<(), StackError> {
+        self.client
+            .update_app_info_category(
+                &app_info_id,
+                primary_category_id.as_deref(),
+                subcategory_one_id.as_deref(),
+                secondary_category_id.as_deref(),
+                secondary_subcategory_one_id.as_deref(),
+            )
+            .await
+    }
+
+    async fn update_app(
+        &self,
+        id: String,
+        content_rights_declaration: Option<String>,
+        primary_locale: Option<String>,
+    ) -> Result<(), StackError> {
+        self.client
+            .update_app(
+                &id,
+                content_rights_declaration.as_deref(),
+                primary_locale.as_deref(),
+            )
+            .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn update_age_rating(
+        &self,
+        id: String,
+        alcohol_tobacco: String,
+        contests: String,
+        gambling_simulated: String,
+        guns_or_other_weapons: String,
+        medical_information: String,
+        profanity: String,
+        sexual_content_graphic: String,
+        sexual_content_or_nudity: String,
+        horror_or_fear: String,
+        mature_or_suggestive: String,
+        violence_cartoon: String,
+        violence_realistic: String,
+        violence_graphic: String,
+        is_advertising: bool,
+        is_gambling: bool,
+        is_unrestricted_web_access: bool,
+        is_user_generated_content: bool,
+        age_rating_override: String,
+    ) -> Result<(), StackError> {
+        self.client
+            .update_age_rating(
+                &id,
+                &alcohol_tobacco,
+                &contests,
+                &gambling_simulated,
+                &guns_or_other_weapons,
+                &medical_information,
+                &profanity,
+                &sexual_content_graphic,
+                &sexual_content_or_nudity,
+                &horror_or_fear,
+                &mature_or_suggestive,
+                &violence_cartoon,
+                &violence_realistic,
+                &violence_graphic,
+                is_advertising,
+                is_gambling,
+                is_unrestricted_web_access,
+                is_user_generated_content,
+                &age_rating_override,
+            )
+            .await
+    }
+
+    async fn fetch_icon_url(&self, app_id: String) -> Result<Option<String>, StackError> {
+        self.client.fetch_icon_url(&app_id).await
     }
 }
 

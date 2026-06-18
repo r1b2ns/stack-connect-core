@@ -5,10 +5,10 @@ use serde_json::json;
 
 use crate::auth::es256::AppStoreAuthenticator;
 use crate::domain::{
-    AppInfo, AppInfoLocalizationInfo, AppStoreVersionInfo, BetaAppLocalizationInfo,
-    BetaAppReviewDetailInfo, BetaBuildLocalizationInfo, BetaGroupInfo, BetaTesterInfo,
-    BuildDetailInfo, BuildInfo, BuildsPage, CustomerReview, CustomerReviewsPage, ReviewResponse,
-    ReviewSubmission,
+    AgeRatingDeclarationInfo, AppCategoryInfo, AppInfo, AppInfoDetails, AppInfoLocalizationInfo,
+    AppStoreVersionInfo, BetaAppLocalizationInfo, BetaAppReviewDetailInfo, BetaBuildLocalizationInfo,
+    BetaGroupInfo, BetaTesterInfo, BuildDetailInfo, BuildInfo, BuildsPage, CustomerReview,
+    CustomerReviewsPage, ReviewResponse, ReviewSubmission,
 };
 use crate::error::StackError;
 
@@ -1002,6 +1002,230 @@ impl AppInfoLocalizationResource {
             privacy_policy_url: self.attributes.privacy_policy_url,
             privacy_choices_url: self.attributes.privacy_choices_url,
             privacy_policy_text: self.attributes.privacy_policy_text,
+        }
+    }
+
+    /// Borrowing variant of [`Self::into_app_info_localization_info`] for
+    /// resources held in an `included` index (which cannot be consumed by value).
+    fn to_app_info_localization_info(&self) -> AppInfoLocalizationInfo {
+        AppInfoLocalizationInfo {
+            id: self.id.clone(),
+            locale: self.attributes.locale.clone().unwrap_or_default(),
+            name: self.attributes.name.clone(),
+            subtitle: self.attributes.subtitle.clone(),
+            privacy_policy_url: self.attributes.privacy_policy_url.clone(),
+            privacy_choices_url: self.attributes.privacy_choices_url.clone(),
+            privacy_policy_text: self.attributes.privacy_policy_text.clone(),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// App infos (JSON:API) — full App Info detail (categories + age rating)
+// ---------------------------------------------------------------------------
+
+/// A JSON:API document page of `appInfos` resources, with related
+/// `appInfoLocalizations` and `ageRatingDeclarations` carried in the
+/// heterogeneous `included[]` when requested via `include`. The category
+/// relationships are read directly from each app-info resource's
+/// `relationships`, so the category resources themselves need not be parsed.
+#[derive(Deserialize)]
+struct AppInfosResponse {
+    #[serde(default)]
+    data: Vec<AppInfoResource>,
+    #[serde(default)]
+    included: Vec<AppInfoIncluded>,
+}
+
+#[derive(Deserialize)]
+struct AppInfoResource {
+    id: String,
+    #[serde(default)]
+    attributes: AppInfoResourceAttributes,
+    #[serde(default)]
+    relationships: AppInfoResourceRelationships,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct AppInfoResourceAttributes {
+    #[serde(default)]
+    app_store_age_rating: Option<String>,
+}
+
+/// The `appInfos` relationships we resolve: the four category to-one links and
+/// the age-rating declaration to-one link.
+#[derive(Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct AppInfoResourceRelationships {
+    #[serde(default)]
+    primary_category: ToOneRelationship,
+    #[serde(default)]
+    primary_subcategory_one: ToOneRelationship,
+    #[serde(default)]
+    secondary_category: ToOneRelationship,
+    #[serde(default)]
+    secondary_subcategory_one: ToOneRelationship,
+    #[serde(default)]
+    age_rating_declaration: ToOneRelationship,
+}
+
+/// The heterogeneous `included[]` entries of an app-info document, dispatched by
+/// their JSON:API `type`. Only `appInfoLocalizations` and `ageRatingDeclarations`
+/// are read; unknown types (e.g. `appCategories`) deserialize to
+/// [`AppInfoIncluded::Other`] and are ignored.
+#[derive(Deserialize)]
+#[serde(tag = "type")]
+enum AppInfoIncluded {
+    #[serde(rename = "appInfoLocalizations")]
+    AppInfoLocalizations(AppInfoLocalizationResource),
+    #[serde(rename = "ageRatingDeclarations")]
+    AgeRatingDeclarations(AgeRatingDeclarationResource),
+    #[serde(other)]
+    Other,
+}
+
+#[derive(Deserialize)]
+struct AgeRatingDeclarationResource {
+    id: String,
+    #[serde(default)]
+    attributes: AgeRatingDeclarationAttributes,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct AgeRatingDeclarationAttributes {
+    #[serde(default)]
+    alcohol_tobacco_or_drug_use_or_references: Option<String>,
+    #[serde(default)]
+    contests: Option<String>,
+    #[serde(default)]
+    gambling_simulated: Option<String>,
+    #[serde(default)]
+    guns_or_other_weapons: Option<String>,
+    #[serde(default)]
+    medical_or_treatment_information: Option<String>,
+    #[serde(default)]
+    profanity_or_crude_humor: Option<String>,
+    #[serde(default)]
+    sexual_content_graphic_and_nudity: Option<String>,
+    #[serde(default)]
+    sexual_content_or_nudity: Option<String>,
+    #[serde(default)]
+    horror_or_fear_themes: Option<String>,
+    #[serde(default)]
+    mature_or_suggestive_themes: Option<String>,
+    #[serde(default)]
+    violence_cartoon_or_fantasy: Option<String>,
+    #[serde(default)]
+    violence_realistic: Option<String>,
+    #[serde(default)]
+    violence_realistic_prolonged_graphic_or_sadistic: Option<String>,
+    #[serde(default)]
+    is_advertising: Option<bool>,
+    #[serde(default)]
+    is_gambling: Option<bool>,
+    #[serde(default)]
+    is_unrestricted_web_access: Option<bool>,
+    #[serde(default)]
+    is_user_generated_content: Option<bool>,
+    #[serde(default)]
+    age_rating_override_v2: Option<String>,
+}
+
+impl AgeRatingDeclarationResource {
+    fn into_age_rating_declaration_info(self) -> AgeRatingDeclarationInfo {
+        let a = self.attributes;
+        AgeRatingDeclarationInfo {
+            id: self.id,
+            alcohol_tobacco_or_drug_use_or_references: a.alcohol_tobacco_or_drug_use_or_references,
+            contests: a.contests,
+            gambling_simulated: a.gambling_simulated,
+            guns_or_other_weapons: a.guns_or_other_weapons,
+            medical_or_treatment_information: a.medical_or_treatment_information,
+            profanity_or_crude_humor: a.profanity_or_crude_humor,
+            sexual_content_graphic_and_nudity: a.sexual_content_graphic_and_nudity,
+            sexual_content_or_nudity: a.sexual_content_or_nudity,
+            horror_or_fear_themes: a.horror_or_fear_themes,
+            mature_or_suggestive_themes: a.mature_or_suggestive_themes,
+            violence_cartoon_or_fantasy: a.violence_cartoon_or_fantasy,
+            violence_realistic: a.violence_realistic,
+            violence_realistic_prolonged_graphic_or_sadistic: a
+                .violence_realistic_prolonged_graphic_or_sadistic,
+            is_advertising: a.is_advertising,
+            is_gambling: a.is_gambling,
+            is_unrestricted_web_access: a.is_unrestricted_web_access,
+            is_user_generated_content: a.is_user_generated_content,
+            age_rating_override_v2: a.age_rating_override_v2,
+        }
+    }
+}
+
+/// A JSON:API single-resource document of one `apps`, narrowed to the
+/// `sku`/`primaryLocale`/`contentRightsDeclaration` attributes the App Info
+/// detail merges in: `{ "data": { ... } }`.
+#[derive(Deserialize)]
+struct AppDetailDocument {
+    data: AppDetailResource,
+}
+
+#[derive(Deserialize)]
+struct AppDetailResource {
+    #[serde(default)]
+    attributes: AppDetailAttributes,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct AppDetailAttributes {
+    #[serde(default)]
+    sku: Option<String>,
+    #[serde(default)]
+    primary_locale: Option<String>,
+    #[serde(default)]
+    content_rights_declaration: Option<String>,
+}
+
+// ---------------------------------------------------------------------------
+// App categories (JSON:API)
+// ---------------------------------------------------------------------------
+
+/// A JSON:API document page of `appCategories` resources. The subcategory ids
+/// are read from each top-level category's `relationships.subcategories`; the
+/// subcategory resources carried in `included[]` are not parsed (their ids are
+/// already present in the parent's relationships).
+#[derive(Deserialize)]
+struct AppCategoriesResponse {
+    #[serde(default)]
+    data: Vec<AppCategoryResource>,
+    #[serde(default)]
+    links: Links,
+}
+
+#[derive(Deserialize)]
+struct AppCategoryResource {
+    id: String,
+    #[serde(default)]
+    relationships: AppCategoryRelationships,
+}
+
+#[derive(Deserialize, Default)]
+struct AppCategoryRelationships {
+    #[serde(default)]
+    subcategories: ToManyRelationship,
+}
+
+impl AppCategoryResource {
+    fn into_app_category_info(self) -> AppCategoryInfo {
+        AppCategoryInfo {
+            id: self.id,
+            subcategory_ids: self
+                .relationships
+                .subcategories
+                .data
+                .into_iter()
+                .map(|rel| rel.id)
+                .collect(),
         }
     }
 }
@@ -3192,6 +3416,328 @@ impl AppStoreClient {
         Ok(())
     }
 
+    /// Fetches the full App Info detail for `app_id` via two requests, merged
+    /// into one [`AppInfoDetails`].
+    ///
+    /// 1. `GET /v1/apps/{app_id}/appInfos?include=ageRatingDeclaration,appInfoLocalizations,primaryCategory,primarySubcategoryOne,secondaryCategory,secondarySubcategoryOne&limit=1&limit[appInfoLocalizations]=50`
+    ///    — the FIRST `data` app-info resource supplies the `app_info_id`, the
+    ///    `appStoreAgeRating` attribute, the four category ids and the
+    ///    age-rating-declaration id from its RELATIONSHIPS, the localizations
+    ///    (from `included` `appInfoLocalizations`), and the age rating (from
+    ///    `included` `ageRatingDeclarations`).
+    /// 2. `GET /v1/apps/{app_id}?fields[apps]=sku,primaryLocale,contentRightsDeclaration`
+    ///    — supplies `sku`, `primary_locale`, and `content_rights_declaration`.
+    ///
+    /// # Errors
+    /// [`StackError::PendingAgreements`] on a pending-agreements 403,
+    /// [`StackError::Http`] on any other non-2xx response (including a 404-style
+    /// error when the app has no app-info resource), [`StackError::Decode`] on
+    /// malformed JSON, or [`StackError::Network`] on transport failure.
+    pub(crate) async fn fetch_app_info(
+        &self,
+        app_id: &str,
+    ) -> Result<AppInfoDetails, StackError> {
+        // Request 1: the app-info resource with category/age-rating/localization
+        // includes.
+        let app_infos_url = format!(
+            "{}/v1/apps/{app_id}/appInfos?include=ageRatingDeclaration,appInfoLocalizations,\
+             primaryCategory,primarySubcategoryOne,secondaryCategory,secondarySubcategoryOne\
+             &limit=1&limit[appInfoLocalizations]=50",
+            self.base_url
+        );
+        let body = self.get_page(&app_infos_url).await?;
+        let page: AppInfosResponse = serde_json::from_str(&body)
+            .map_err(|e| StackError::decode(format!("app infos response: {e}")))?;
+
+        let app_info = page.data.into_iter().next().ok_or_else(|| StackError::Http {
+            status: 404,
+            message: format!("no app info found for app {app_id}"),
+        })?;
+
+        // Resolve the `included[]` localizations and age-rating declarations.
+        let mut localizations = Vec::new();
+        let mut age_ratings: HashMap<String, AgeRatingDeclarationInfo> = HashMap::new();
+        for resource in page.included {
+            match resource {
+                AppInfoIncluded::AppInfoLocalizations(loc) => {
+                    localizations.push(loc.to_app_info_localization_info());
+                }
+                AppInfoIncluded::AgeRatingDeclarations(decl) => {
+                    age_ratings.insert(decl.id.clone(), decl.into_age_rating_declaration_info());
+                }
+                AppInfoIncluded::Other => {}
+            }
+        }
+
+        let relationships = &app_info.relationships;
+        let age_rating_declaration_id = relationships
+            .age_rating_declaration
+            .data
+            .as_ref()
+            .map(|rel| rel.id.clone());
+        let age_rating = age_rating_declaration_id
+            .as_ref()
+            .and_then(|id| age_ratings.get(id).cloned());
+
+        // Request 2: the owning app's sku / primaryLocale / contentRightsDeclaration.
+        let app_url = format!(
+            "{}/v1/apps/{app_id}?fields[apps]=sku,primaryLocale,contentRightsDeclaration",
+            self.base_url
+        );
+        let app_body = self.get_page(&app_url).await?;
+        let app_document: AppDetailDocument = serde_json::from_str(&app_body)
+            .map_err(|e| StackError::decode(format!("app detail response: {e}")))?;
+        let app_attributes = app_document.data.attributes;
+
+        Ok(AppInfoDetails {
+            app_info_id: app_info.id,
+            app_id: app_id.to_string(),
+            sku: app_attributes.sku,
+            primary_locale: app_attributes.primary_locale,
+            content_rights_declaration: app_attributes.content_rights_declaration,
+            primary_category_id: relationships
+                .primary_category
+                .data
+                .as_ref()
+                .map(|rel| rel.id.clone()),
+            primary_subcategory_one_id: relationships
+                .primary_subcategory_one
+                .data
+                .as_ref()
+                .map(|rel| rel.id.clone()),
+            secondary_category_id: relationships
+                .secondary_category
+                .data
+                .as_ref()
+                .map(|rel| rel.id.clone()),
+            secondary_subcategory_one_id: relationships
+                .secondary_subcategory_one
+                .data
+                .as_ref()
+                .map(|rel| rel.id.clone()),
+            age_rating_declaration_id,
+            app_store_age_rating: app_info.attributes.app_store_age_rating,
+            localizations,
+            age_rating,
+        })
+    }
+
+    /// Lists the top-level App Store categories (iOS), each with its subcategory
+    /// ids.
+    ///
+    /// `GET /v1/appCategories?filter[platforms]=IOS&exists[parent]=false&include=subcategories`,
+    /// following `links.next` pagination. Each top-level category's
+    /// subcategory ids are read from its `relationships.subcategories`.
+    ///
+    /// # Errors
+    /// [`StackError::PendingAgreements`] on a pending-agreements 403,
+    /// [`StackError::Http`] on any other non-2xx page, [`StackError::Decode`] on
+    /// malformed JSON, or [`StackError::Network`] on transport failure.
+    pub(crate) async fn fetch_app_categories(&self) -> Result<Vec<AppCategoryInfo>, StackError> {
+        let mut categories = Vec::new();
+        let mut next_url = Some(format!(
+            "{}/v1/appCategories?filter[platforms]=IOS&exists[parent]=false&include=subcategories",
+            self.base_url
+        ));
+
+        while let Some(url) = next_url {
+            let body = self.get_page(&url).await?;
+            let page: AppCategoriesResponse = serde_json::from_str(&body)
+                .map_err(|e| StackError::decode(format!("app categories response: {e}")))?;
+            categories.extend(
+                page.data
+                    .into_iter()
+                    .map(AppCategoryResource::into_app_category_info),
+            );
+
+            // `links.next` is an absolute URL; follow it verbatim until absent.
+            next_url = page.links.next.filter(|u| !u.is_empty());
+        }
+
+        Ok(categories)
+    }
+
+    /// Updates the category relationships of the app-info `app_info_id`.
+    ///
+    /// `PATCH /v1/appInfos/{app_info_id}` with a JSON:API body that wires a
+    /// relationship ONLY for each id that is `Some`
+    /// (`primaryCategory`/`primarySubcategoryOne`/`secondaryCategory`/
+    /// `secondarySubcategoryOne`, each `{ "data": { "type": "appCategories",
+    /// "id": ... } }`). Relationships whose id is `None` are omitted (not sent as
+    /// `null`). Any 2xx → `Ok(())`.
+    ///
+    /// # Errors
+    /// [`StackError::PendingAgreements`] on a pending-agreements 403,
+    /// [`StackError::Http`] on any other non-2xx response, or
+    /// [`StackError::Network`] on transport failure.
+    pub(crate) async fn update_app_info_category(
+        &self,
+        app_info_id: &str,
+        primary_category_id: Option<&str>,
+        subcategory_one_id: Option<&str>,
+        secondary_category_id: Option<&str>,
+        secondary_subcategory_one_id: Option<&str>,
+    ) -> Result<(), StackError> {
+        let url = format!("{}/v1/appInfos/{app_info_id}", self.base_url);
+        let token = self.auth.bearer_token().await?;
+
+        let mut relationships = serde_json::Map::new();
+        let mut insert_category = |key: &str, id: Option<&str>| {
+            if let Some(id) = id {
+                relationships.insert(
+                    key.into(),
+                    json!({ "data": { "type": "appCategories", "id": id } }),
+                );
+            }
+        };
+        insert_category("primaryCategory", primary_category_id);
+        insert_category("primarySubcategoryOne", subcategory_one_id);
+        insert_category("secondaryCategory", secondary_category_id);
+        insert_category("secondarySubcategoryOne", secondary_subcategory_one_id);
+
+        let request_body = json!({
+            "data": {
+                "type": "appInfos",
+                "id": app_info_id,
+                "relationships": relationships
+            }
+        });
+
+        self.patch_no_content(&url, &token, &request_body).await
+    }
+
+    /// Updates the app `id`, sending `contentRightsDeclaration` and/or
+    /// `primaryLocale` only when `Some`.
+    ///
+    /// `PATCH /v1/apps/{id}`. Any 2xx → `Ok(())`.
+    ///
+    /// # Errors
+    /// [`StackError::PendingAgreements`] on a pending-agreements 403,
+    /// [`StackError::Http`] on any other non-2xx response, or
+    /// [`StackError::Network`] on transport failure.
+    pub(crate) async fn update_app(
+        &self,
+        id: &str,
+        content_rights_declaration: Option<&str>,
+        primary_locale: Option<&str>,
+    ) -> Result<(), StackError> {
+        let url = format!("{}/v1/apps/{id}", self.base_url);
+        let token = self.auth.bearer_token().await?;
+
+        let mut attributes = serde_json::Map::new();
+        if let Some(value) = content_rights_declaration {
+            attributes.insert("contentRightsDeclaration".into(), json!(value));
+        }
+        if let Some(value) = primary_locale {
+            attributes.insert("primaryLocale".into(), json!(value));
+        }
+
+        let request_body = json!({
+            "data": {
+                "type": "apps",
+                "id": id,
+                "attributes": attributes
+            }
+        });
+
+        self.patch_no_content(&url, &token, &request_body).await
+    }
+
+    /// Updates the age-rating declaration `id`, sending all 18 attributes (all
+    /// required from the host).
+    ///
+    /// `PATCH /v1/ageRatingDeclarations/{id}`. Any 2xx → `Ok(())`.
+    ///
+    /// # Errors
+    /// [`StackError::PendingAgreements`] on a pending-agreements 403,
+    /// [`StackError::Http`] on any other non-2xx response, or
+    /// [`StackError::Network`] on transport failure.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn update_age_rating(
+        &self,
+        id: &str,
+        alcohol_tobacco: &str,
+        contests: &str,
+        gambling_simulated: &str,
+        guns_or_other_weapons: &str,
+        medical_information: &str,
+        profanity: &str,
+        sexual_content_graphic: &str,
+        sexual_content_or_nudity: &str,
+        horror_or_fear: &str,
+        mature_or_suggestive: &str,
+        violence_cartoon: &str,
+        violence_realistic: &str,
+        violence_graphic: &str,
+        is_advertising: bool,
+        is_gambling: bool,
+        is_unrestricted_web_access: bool,
+        is_user_generated_content: bool,
+        age_rating_override: &str,
+    ) -> Result<(), StackError> {
+        let url = format!("{}/v1/ageRatingDeclarations/{id}", self.base_url);
+        let token = self.auth.bearer_token().await?;
+
+        let request_body = json!({
+            "data": {
+                "type": "ageRatingDeclarations",
+                "id": id,
+                "attributes": {
+                    "alcoholTobaccoOrDrugUseOrReferences": alcohol_tobacco,
+                    "contests": contests,
+                    "gamblingSimulated": gambling_simulated,
+                    "gunsOrOtherWeapons": guns_or_other_weapons,
+                    "medicalOrTreatmentInformation": medical_information,
+                    "profanityOrCrudeHumor": profanity,
+                    "sexualContentGraphicAndNudity": sexual_content_graphic,
+                    "sexualContentOrNudity": sexual_content_or_nudity,
+                    "horrorOrFearThemes": horror_or_fear,
+                    "matureOrSuggestiveThemes": mature_or_suggestive,
+                    "violenceCartoonOrFantasy": violence_cartoon,
+                    "violenceRealistic": violence_realistic,
+                    "violenceRealisticProlongedGraphicOrSadistic": violence_graphic,
+                    "isAdvertising": is_advertising,
+                    "isGambling": is_gambling,
+                    "isUnrestrictedWebAccess": is_unrestricted_web_access,
+                    "isUserGeneratedContent": is_user_generated_content,
+                    "ageRatingOverrideV2": age_rating_override
+                }
+            }
+        });
+
+        self.patch_no_content(&url, &token, &request_body).await
+    }
+
+    /// Resolves the icon URL for `app_id` from its most recent build.
+    ///
+    /// `GET /v1/builds?filter[app]={app_id}&sort=-uploadedDate&limit=1` — the
+    /// first build's `iconAssetToken` is substituted via [`IconAssetToken::to_icon_url`]
+    /// (the same computation the build enrichment uses). Returns `Ok(None)` when
+    /// there is no build or no token.
+    ///
+    /// # Errors
+    /// [`StackError::PendingAgreements`] on a pending-agreements 403,
+    /// [`StackError::Http`] on any other non-2xx response, [`StackError::Decode`]
+    /// on malformed JSON, or [`StackError::Network`] on transport failure.
+    pub(crate) async fn fetch_icon_url(
+        &self,
+        app_id: &str,
+    ) -> Result<Option<String>, StackError> {
+        let url = format!(
+            "{}/v1/builds?filter[app]={app_id}&sort=-uploadedDate&limit=1",
+            self.base_url
+        );
+        let body = self.get_page(&url).await?;
+        let page: BuildsResponse = serde_json::from_str(&body)
+            .map_err(|e| StackError::decode(format!("builds response: {e}")))?;
+        Ok(page
+            .data
+            .into_iter()
+            .next()
+            .and_then(|build| build.attributes.icon_asset_token)
+            .and_then(|token| token.to_icon_url()))
+    }
+
     /// Fetches the single beta app review detail for `app_id`, mapping it into a
     /// [`BetaAppReviewDetailInfo`].
     ///
@@ -3327,6 +3873,43 @@ impl AppStoreClient {
         let document: BetaAppReviewDetailDocument = serde_json::from_str(&response_body)
             .map_err(|e| StackError::decode(format!("beta app review detail response: {e}")))?;
         Ok(document.data.into_beta_app_review_detail_info())
+    }
+
+    /// Authenticated `PATCH` of `request_body` to `url`, succeeding on any 2xx
+    /// (the response body is ignored). Mirrors the failure mapping of the other
+    /// write paths: pending-agreements 403 → [`StackError::PendingAgreements`],
+    /// any other non-2xx → [`StackError::Http`], transport → [`StackError::Network`].
+    async fn patch_no_content(
+        &self,
+        url: &str,
+        token: &str,
+        request_body: &serde_json::Value,
+    ) -> Result<(), StackError> {
+        let response = self
+            .http
+            .patch(url)
+            .bearer_auth(token)
+            .json(request_body)
+            .send()
+            .await
+            .map_err(|e| StackError::network(e.to_string()))?;
+
+        let status = response.status();
+        if status.is_success() {
+            return Ok(());
+        }
+
+        let body = response
+            .text()
+            .await
+            .map_err(|e| StackError::network(e.to_string()))?;
+        if let Some(err) = pending_agreements_error(status.as_u16(), &body) {
+            return Err(err);
+        }
+        Err(StackError::Http {
+            status: status.as_u16(),
+            message: body,
+        })
     }
 
     /// Authenticated `GET` of one JSON:API page, returning the raw body or mapping
@@ -6281,6 +6864,403 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(err, StackError::Http { status: 404, .. }));
+    }
+
+    #[tokio::test]
+    async fn fetch_app_info_merges_two_requests() {
+        let server = MockServer::start().await;
+
+        // Request 1: the app-info resource with category/age-rating ids in its
+        // relationships, the appStoreAgeRating attribute, and `included[]`
+        // carrying the localizations + the age-rating declaration.
+        Mock::given(method("GET"))
+            .and(path("/v1/apps/app-1/appInfos"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": [{
+                    "type": "appInfos",
+                    "id": "info-1",
+                    "attributes": { "appStoreAgeRating": "FOUR_PLUS" },
+                    "relationships": {
+                        "primaryCategory": { "data": { "type": "appCategories", "id": "CAT_PRIMARY" } },
+                        "primarySubcategoryOne": { "data": { "type": "appCategories", "id": "SUB_PRIMARY" } },
+                        "secondaryCategory": { "data": { "type": "appCategories", "id": "CAT_SECONDARY" } },
+                        "secondarySubcategoryOne": { "data": { "type": "appCategories", "id": "SUB_SECONDARY" } },
+                        "ageRatingDeclaration": { "data": { "type": "ageRatingDeclarations", "id": "decl-1" } }
+                    }
+                }],
+                "included": [
+                    {
+                        "type": "appInfoLocalizations",
+                        "id": "aloc-1",
+                        "attributes": { "locale": "en-US", "name": "My App", "subtitle": "Best" }
+                    },
+                    {
+                        "type": "ageRatingDeclarations",
+                        "id": "decl-1",
+                        "attributes": {
+                            "gamblingSimulated": "NONE",
+                            "violenceRealistic": "INFREQUENT_OR_MILD",
+                            "isAdvertising": true,
+                            "isGambling": false,
+                            "isUnrestrictedWebAccess": true,
+                            "isUserGeneratedContent": false,
+                            "ageRatingOverrideV2": "NONE"
+                        }
+                    },
+                    {
+                        "type": "appCategories",
+                        "id": "CAT_PRIMARY",
+                        "attributes": {}
+                    }
+                ]
+            })))
+            .mount(&server)
+            .await;
+
+        // Request 2: the owning app's sku / primaryLocale / contentRightsDeclaration.
+        Mock::given(method("GET"))
+            .and(path("/v1/apps/app-1"))
+            .and(query_param(
+                "fields[apps]",
+                "sku,primaryLocale,contentRightsDeclaration",
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": {
+                    "type": "apps",
+                    "id": "app-1",
+                    "attributes": {
+                        "sku": "SKU123",
+                        "primaryLocale": "en-US",
+                        "contentRightsDeclaration": "DOES_NOT_USE_THIRD_PARTY_CONTENT"
+                    }
+                }
+            })))
+            .mount(&server)
+            .await;
+
+        let detail = client(server.uri()).fetch_app_info("app-1").await.unwrap();
+
+        assert_eq!(detail.app_info_id, "info-1");
+        assert_eq!(detail.app_id, "app-1");
+        assert_eq!(detail.app_store_age_rating.as_deref(), Some("FOUR_PLUS"));
+
+        // Category ids come from the app-info RELATIONSHIPS.
+        assert_eq!(detail.primary_category_id.as_deref(), Some("CAT_PRIMARY"));
+        assert_eq!(detail.primary_subcategory_one_id.as_deref(), Some("SUB_PRIMARY"));
+        assert_eq!(detail.secondary_category_id.as_deref(), Some("CAT_SECONDARY"));
+        assert_eq!(
+            detail.secondary_subcategory_one_id.as_deref(),
+            Some("SUB_SECONDARY")
+        );
+        assert_eq!(detail.age_rating_declaration_id.as_deref(), Some("decl-1"));
+
+        // Localizations come from `included[]`.
+        assert_eq!(detail.localizations.len(), 1);
+        assert_eq!(detail.localizations[0].id, "aloc-1");
+        assert_eq!(detail.localizations[0].name.as_deref(), Some("My App"));
+
+        // Age rating resolved from `included[]` by the relationship id.
+        let age_rating = detail.age_rating.expect("age rating present");
+        assert_eq!(age_rating.id, "decl-1");
+        assert_eq!(age_rating.gambling_simulated.as_deref(), Some("NONE"));
+        assert_eq!(age_rating.violence_realistic.as_deref(), Some("INFREQUENT_OR_MILD"));
+        assert_eq!(age_rating.is_advertising, Some(true));
+        assert_eq!(age_rating.is_gambling, Some(false));
+        assert_eq!(age_rating.is_unrestricted_web_access, Some(true));
+        assert_eq!(age_rating.is_user_generated_content, Some(false));
+        assert_eq!(age_rating.age_rating_override_v2.as_deref(), Some("NONE"));
+
+        // App attributes come from the SECOND request.
+        assert_eq!(detail.sku.as_deref(), Some("SKU123"));
+        assert_eq!(detail.primary_locale.as_deref(), Some("en-US"));
+        assert_eq!(
+            detail.content_rights_declaration.as_deref(),
+            Some("DOES_NOT_USE_THIRD_PARTY_CONTENT")
+        );
+    }
+
+    #[tokio::test]
+    async fn fetch_app_info_errors_when_no_app_info() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v1/apps/app-1/appInfos"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": [], "included": []
+            })))
+            .mount(&server)
+            .await;
+
+        let err = client(server.uri()).fetch_app_info("app-1").await.unwrap_err();
+        assert!(matches!(err, StackError::Http { status: 404, .. }));
+    }
+
+    #[tokio::test]
+    async fn fetch_app_info_surfaces_pending_agreements() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v1/apps/app-1/appInfos"))
+            .respond_with(ResponseTemplate::new(403).set_body_json(serde_json::json!({
+                "errors": [{ "detail": "The agreement is pending." }]
+            })))
+            .mount(&server)
+            .await;
+
+        let err = client(server.uri()).fetch_app_info("app-1").await.unwrap_err();
+        match err {
+            StackError::PendingAgreements { message } => {
+                assert!(message.contains("pending agreements"))
+            }
+            other => panic!("expected PendingAgreements, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn fetch_app_categories_maps_subcategory_ids() {
+        let server = MockServer::start().await;
+        let next = format!(
+            "{}/v1/appCategories?filter[platforms]=IOS&exists[parent]=false&include=subcategories&cursor=PAGE2",
+            server.uri()
+        );
+
+        // Page 1: a top-level category with two subcategory relationships.
+        Mock::given(method("GET"))
+            .and(path("/v1/appCategories"))
+            .and(query_param("filter[platforms]", "IOS"))
+            .and(query_param("exists[parent]", "false"))
+            .and(wiremock::matchers::query_param_is_missing("cursor"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": [{
+                    "type": "appCategories",
+                    "id": "GAMES",
+                    "relationships": {
+                        "subcategories": {
+                            "data": [
+                                { "type": "appCategories", "id": "GAMES_ACTION" },
+                                { "type": "appCategories", "id": "GAMES_PUZZLE" }
+                            ]
+                        }
+                    }
+                }],
+                "included": [
+                    { "type": "appCategories", "id": "GAMES_ACTION", "attributes": {} },
+                    { "type": "appCategories", "id": "GAMES_PUZZLE", "attributes": {} }
+                ],
+                "links": { "next": next }
+            })))
+            .mount(&server)
+            .await;
+
+        // Page 2: a category with no subcategories, and no further page.
+        Mock::given(method("GET"))
+            .and(path("/v1/appCategories"))
+            .and(query_param("cursor", "PAGE2"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": [{
+                    "type": "appCategories",
+                    "id": "UTILITIES",
+                    "relationships": { "subcategories": { "data": [] } }
+                }],
+                "links": {}
+            })))
+            .mount(&server)
+            .await;
+
+        let categories = client(server.uri()).fetch_app_categories().await.unwrap();
+        assert_eq!(categories.len(), 2);
+        assert_eq!(categories[0].id, "GAMES");
+        assert_eq!(
+            categories[0].subcategory_ids,
+            vec!["GAMES_ACTION".to_string(), "GAMES_PUZZLE".to_string()]
+        );
+        assert_eq!(categories[1].id, "UTILITIES");
+        assert!(categories[1].subcategory_ids.is_empty());
+    }
+
+    #[tokio::test]
+    async fn update_app_info_category_sends_only_some_relationships() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("PATCH"))
+            .and(path("/v1/appInfos/info-1"))
+            // Provided relationships must be present.
+            .and(wiremock::matchers::body_partial_json(serde_json::json!({
+                "data": {
+                    "type": "appInfos",
+                    "id": "info-1",
+                    "relationships": {
+                        "primaryCategory": { "data": { "type": "appCategories", "id": "GAMES" } },
+                        "secondaryCategory": { "data": { "type": "appCategories", "id": "UTILITIES" } }
+                    }
+                }
+            })))
+            // Omitted relationships must NOT be present (not sent as null).
+            .and(|req: &wiremock::Request| {
+                let value: serde_json::Value = match serde_json::from_slice(&req.body) {
+                    Ok(value) => value,
+                    Err(_) => return false,
+                };
+                value
+                    .get("data")
+                    .and_then(|d| d.get("relationships"))
+                    .and_then(|r| r.as_object())
+                    .map(|rels| {
+                        !rels.contains_key("primarySubcategoryOne")
+                            && !rels.contains_key("secondarySubcategoryOne")
+                    })
+                    .unwrap_or(false)
+            })
+            .respond_with(ResponseTemplate::new(200))
+            .mount(&server)
+            .await;
+
+        client(server.uri())
+            .update_app_info_category("info-1", Some("GAMES"), None, Some("UTILITIES"), None)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn update_app_sends_only_some_attributes() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("PATCH"))
+            .and(path("/v1/apps/app-1"))
+            .and(wiremock::matchers::body_partial_json(serde_json::json!({
+                "data": {
+                    "type": "apps",
+                    "id": "app-1",
+                    "attributes": { "primaryLocale": "pt-BR" }
+                }
+            })))
+            // `contentRightsDeclaration` must be absent when `None`.
+            .and(|req: &wiremock::Request| {
+                let value: serde_json::Value = match serde_json::from_slice(&req.body) {
+                    Ok(value) => value,
+                    Err(_) => return false,
+                };
+                value
+                    .get("data")
+                    .and_then(|d| d.get("attributes"))
+                    .and_then(|a| a.as_object())
+                    .map(|attrs| !attrs.contains_key("contentRightsDeclaration"))
+                    .unwrap_or(false)
+            })
+            .respond_with(ResponseTemplate::new(200))
+            .mount(&server)
+            .await;
+
+        client(server.uri())
+            .update_app("app-1", None, Some("pt-BR"))
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn update_age_rating_sends_all_eighteen_attributes() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("PATCH"))
+            .and(path("/v1/ageRatingDeclarations/decl-1"))
+            .and(wiremock::matchers::body_partial_json(serde_json::json!({
+                "data": {
+                    "type": "ageRatingDeclarations",
+                    "id": "decl-1",
+                    "attributes": {
+                        "alcoholTobaccoOrDrugUseOrReferences": "NONE",
+                        "contests": "NONE",
+                        "gamblingSimulated": "NONE",
+                        "gunsOrOtherWeapons": "NONE",
+                        "medicalOrTreatmentInformation": "NONE",
+                        "profanityOrCrudeHumor": "NONE",
+                        "sexualContentGraphicAndNudity": "NONE",
+                        "sexualContentOrNudity": "NONE",
+                        "horrorOrFearThemes": "NONE",
+                        "matureOrSuggestiveThemes": "NONE",
+                        "violenceCartoonOrFantasy": "NONE",
+                        "violenceRealistic": "NONE",
+                        "violenceRealisticProlongedGraphicOrSadistic": "NONE",
+                        "isAdvertising": true,
+                        "isGambling": false,
+                        "isUnrestrictedWebAccess": true,
+                        "isUserGeneratedContent": false,
+                        "ageRatingOverrideV2": "NONE"
+                    }
+                }
+            })))
+            // Assert all 18 attribute keys are present.
+            .and(|req: &wiremock::Request| {
+                let value: serde_json::Value = match serde_json::from_slice(&req.body) {
+                    Ok(value) => value,
+                    Err(_) => return false,
+                };
+                value
+                    .get("data")
+                    .and_then(|d| d.get("attributes"))
+                    .and_then(|a| a.as_object())
+                    .map(|attrs| attrs.len() == 18)
+                    .unwrap_or(false)
+            })
+            .respond_with(ResponseTemplate::new(200))
+            .mount(&server)
+            .await;
+
+        client(server.uri())
+            .update_age_rating(
+                "decl-1", "NONE", "NONE", "NONE", "NONE", "NONE", "NONE", "NONE", "NONE", "NONE",
+                "NONE", "NONE", "NONE", "NONE", true, false, true, false, "NONE",
+            )
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn fetch_icon_url_computes_from_latest_build() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/v1/builds"))
+            .and(query_param("filter[app]", "app-1"))
+            .and(query_param("sort", "-uploadedDate"))
+            .and(query_param("limit", "1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": [{
+                    "type": "builds",
+                    "id": "build-1",
+                    "attributes": {
+                        "iconAssetToken": {
+                            "templateUrl": "https://img.example.com/{w}x{h}.{f}",
+                            "width": 1024,
+                            "height": 1024
+                        }
+                    }
+                }],
+                "links": {}
+            })))
+            .mount(&server)
+            .await;
+
+        let url = client(server.uri()).fetch_icon_url("app-1").await.unwrap();
+        assert_eq!(
+            url.as_deref(),
+            Some("https://img.example.com/1024x1024.png")
+        );
+    }
+
+    #[tokio::test]
+    async fn fetch_icon_url_returns_none_when_no_build() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/v1/builds"))
+            .and(query_param("filter[app]", "app-1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": [], "links": {}
+            })))
+            .mount(&server)
+            .await;
+
+        let url = client(server.uri()).fetch_icon_url("app-1").await.unwrap();
+        assert!(url.is_none());
     }
 
     #[tokio::test]
