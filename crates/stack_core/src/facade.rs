@@ -5,7 +5,7 @@
 use std::sync::Arc;
 
 use crate::error::StackError;
-use crate::ports::{BlobStore, CredentialStore};
+use crate::ports::{BlobStore, CredentialStore, DebugLogger};
 use crate::service::kind::{CredentialField, ServiceKind};
 use crate::service::provider::Provider;
 use crate::service::registry;
@@ -30,6 +30,11 @@ pub fn credential_schema(kind: ServiceKind) -> Vec<CredentialField> {
 /// callback and parses the key material — no network. The returned provider does
 /// the async work (`validate`, `fetch_apps`).
 ///
+/// When `debug_logger` is `Some`, every App Store Connect HTTP request the
+/// provider issues is logged as a runnable cURL (with pretty-printed JSON body)
+/// and its response (status + pretty-printed JSON). The host passes `None` in
+/// release builds and a native logger only when its debug launch flag is set.
+///
 /// # Errors
 /// [`StackError::InvalidCredentials`] if a required secret is missing.
 #[uniffi::export]
@@ -37,8 +42,9 @@ pub fn connect(
     kind: ServiceKind,
     account_id: String,
     store: Arc<dyn CredentialStore>,
+    debug_logger: Option<Arc<dyn DebugLogger>>,
 ) -> Result<Arc<Provider>, StackError> {
-    let inner = registry::build(kind, &account_id, &store)?;
+    let inner = registry::build(kind, &account_id, &store, debug_logger)?;
     Ok(Provider::new(inner))
 }
 

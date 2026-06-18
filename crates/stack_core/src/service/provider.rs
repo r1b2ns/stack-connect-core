@@ -4,6 +4,7 @@ use async_trait::async_trait;
 
 use crate::domain::AppInfo;
 use crate::error::StackError;
+use crate::service::capabilities::accessibility_declarations::AccessibilityDeclarations;
 use crate::service::capabilities::app_metadata::AppMetadata;
 use crate::service::capabilities::app_store_versions::AppStoreVersions;
 use crate::service::capabilities::beta_app_localizations::BetaAppLocalizations;
@@ -12,6 +13,7 @@ use crate::service::capabilities::beta_build_localizations::BetaBuildLocalizatio
 use crate::service::capabilities::beta_groups::BetaGroups;
 use crate::service::capabilities::builds::Builds;
 use crate::service::capabilities::reviews::Reviews;
+use crate::service::capabilities::users::Users;
 use crate::service::kind::ServiceKind;
 
 /// A capability a provider may expose. The host calls [`Provider::capabilities`]
@@ -29,6 +31,8 @@ pub enum Capability {
     BetaAppLocalizations,
     BetaAppReviewDetail,
     AppMetadata,
+    AccessibilityDeclarations,
+    Users,
 }
 
 /// Internal, non-exported contract every concrete plugin implements. Kept off the
@@ -101,6 +105,19 @@ pub(crate) trait ProviderImpl: Send + Sync {
     /// [`Capability::AppMetadata`]. Default `None` so providers opt in
     /// explicitly.
     fn app_metadata(&self) -> Option<Arc<AppMetadata>> {
+        None
+    }
+
+    /// The Accessibility Declarations capability handle, or `None` if this
+    /// provider lacks [`Capability::AccessibilityDeclarations`]. Default `None` so
+    /// providers opt in explicitly.
+    fn accessibility_declarations(&self) -> Option<Arc<AccessibilityDeclarations>> {
+        None
+    }
+
+    /// The Users capability handle, or `None` if this provider lacks
+    /// [`Capability::Users`]. Default `None` so providers opt in explicitly.
+    fn users(&self) -> Option<Arc<Users>> {
         None
     }
 }
@@ -194,6 +211,22 @@ impl Provider {
     /// unsupported.
     pub fn app_metadata(&self) -> Option<Arc<AppMetadata>> {
         self.inner.app_metadata()
+    }
+
+    /// The Accessibility Declarations capability handle, or `None` when this
+    /// provider does not expose [`Capability::AccessibilityDeclarations`]. This is
+    /// the discovery mechanism: the host calls
+    /// `provider.accessibility_declarations()` and gets `None` when accessibility
+    /// declarations are unsupported.
+    pub fn accessibility_declarations(&self) -> Option<Arc<AccessibilityDeclarations>> {
+        self.inner.accessibility_declarations()
+    }
+
+    /// The Users capability handle, or `None` when this provider does not expose
+    /// [`Capability::Users`]. This is the discovery mechanism: the host calls
+    /// `provider.users()` and gets `None` when user management is unsupported.
+    pub fn users(&self) -> Option<Arc<Users>> {
+        self.inner.users()
     }
 }
 

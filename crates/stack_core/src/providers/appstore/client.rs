@@ -1,17 +1,20 @@
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use serde::Deserialize;
 use serde_json::json;
 
 use crate::auth::es256::AppStoreAuthenticator;
 use crate::domain::{
-    AgeRatingDeclarationInfo, AppCategoryInfo, AppInfo, AppInfoDetails, AppInfoLocalizationInfo,
-    AppReviewDetailInfo, AppStoreLocalizationInfo, AppStoreVersionInfo, BetaAppLocalizationInfo,
-    BetaAppReviewDetailInfo, BetaBuildLocalizationInfo, BetaGroupInfo, BetaTesterInfo,
-    BuildDetailInfo, BuildInfo, BuildsPage, CustomerReview, CustomerReviewsPage, PhasedReleaseInfo,
-    ReviewResponse, ReviewSubmission, ScreenshotInfo, ScreenshotSetInfo,
+    AccessibilityDeclarationInfo, AgeRatingDeclarationInfo, AppCategoryInfo, AppInfo,
+    AppInfoDetails, AppInfoLocalizationInfo, AppReviewDetailInfo, AppStoreLocalizationInfo,
+    AppStoreVersionInfo, BetaAppLocalizationInfo, BetaAppReviewDetailInfo,
+    BetaBuildLocalizationInfo, BetaGroupInfo, BetaTesterInfo, BuildDetailInfo, BuildInfo,
+    BuildsPage, CustomerReview, CustomerReviewsPage, PhasedReleaseInfo, ReviewResponse,
+    ReviewSubmission, ScreenshotInfo, ScreenshotSetInfo, TeamMemberInfo, UserInfo,
 };
 use crate::error::StackError;
+use crate::ports::DebugLogger;
 
 const DEFAULT_BASE_URL: &str = "https://api.appstoreconnect.apple.com";
 
@@ -1007,6 +1010,88 @@ impl BetaAppLocalizationResource {
 }
 
 // ---------------------------------------------------------------------------
+// Accessibility declarations (JSON:API)
+// ---------------------------------------------------------------------------
+
+/// A JSON:API document page of `accessibilityDeclarations` resources.
+#[derive(Deserialize)]
+struct AccessibilityDeclarationsResponse {
+    #[serde(default)]
+    data: Vec<AccessibilityDeclarationResource>,
+    #[serde(default)]
+    links: Links,
+}
+
+/// A JSON:API single-resource document wrapping one `accessibilityDeclarations`,
+/// as returned by the create (POST) and update (PATCH) endpoints:
+/// `{ "data": { ... } }`.
+#[derive(Deserialize)]
+struct AccessibilityDeclarationDocument {
+    data: AccessibilityDeclarationResource,
+}
+
+#[derive(Deserialize)]
+struct AccessibilityDeclarationResource {
+    id: String,
+    #[serde(default)]
+    attributes: AccessibilityDeclarationAttributes,
+}
+
+/// App Store Connect `accessibilityDeclarations` attributes.
+///
+/// Note the wire key for the host's `supports_differentiate_without_color` is
+/// `supportsDifferentiateWithoutColorAlone` (with an `Alone` suffix), mapped
+/// explicitly below; the other eight `supports*` keys are 1:1.
+#[derive(Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct AccessibilityDeclarationAttributes {
+    #[serde(default)]
+    device_family: Option<String>,
+    #[serde(default)]
+    state: Option<String>,
+    #[serde(default)]
+    supports_audio_descriptions: Option<bool>,
+    #[serde(default)]
+    supports_captions: Option<bool>,
+    #[serde(default)]
+    supports_dark_interface: Option<bool>,
+    #[serde(default, rename = "supportsDifferentiateWithoutColorAlone")]
+    supports_differentiate_without_color: Option<bool>,
+    #[serde(default)]
+    supports_larger_text: Option<bool>,
+    #[serde(default)]
+    supports_reduced_motion: Option<bool>,
+    #[serde(default)]
+    supports_sufficient_contrast: Option<bool>,
+    #[serde(default)]
+    supports_voice_control: Option<bool>,
+    #[serde(default)]
+    supports_voiceover: Option<bool>,
+}
+
+impl AccessibilityDeclarationResource {
+    fn into_accessibility_declaration_info(self) -> AccessibilityDeclarationInfo {
+        let a = self.attributes;
+        AccessibilityDeclarationInfo {
+            id: self.id,
+            device_family: a.device_family.unwrap_or_default(),
+            state: a.state,
+            supports_audio_descriptions: a.supports_audio_descriptions.unwrap_or(false),
+            supports_captions: a.supports_captions.unwrap_or(false),
+            supports_dark_interface: a.supports_dark_interface.unwrap_or(false),
+            supports_differentiate_without_color: a
+                .supports_differentiate_without_color
+                .unwrap_or(false),
+            supports_larger_text: a.supports_larger_text.unwrap_or(false),
+            supports_reduced_motion: a.supports_reduced_motion.unwrap_or(false),
+            supports_sufficient_contrast: a.supports_sufficient_contrast.unwrap_or(false),
+            supports_voice_control: a.supports_voice_control.unwrap_or(false),
+            supports_voiceover: a.supports_voiceover.unwrap_or(false),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // App info localizations (JSON:API)
 // ---------------------------------------------------------------------------
 
@@ -1575,12 +1660,138 @@ impl AppReviewDetailResource {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Users & user invitations (JSON:API)
+// ---------------------------------------------------------------------------
+
+/// A JSON:API document page of `users` resources.
+#[derive(Deserialize)]
+struct UsersResponse {
+    #[serde(default)]
+    data: Vec<UserResource>,
+    #[serde(default)]
+    links: Links,
+}
+
+#[derive(Deserialize)]
+struct UserResource {
+    id: String,
+    #[serde(default)]
+    attributes: UserAttributes,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct UserAttributes {
+    #[serde(default)]
+    first_name: Option<String>,
+    #[serde(default)]
+    last_name: Option<String>,
+    /// App Store Connect stores the member's login email in `username`.
+    #[serde(default)]
+    username: Option<String>,
+    #[serde(default)]
+    roles: Vec<String>,
+    #[serde(default)]
+    all_apps_visible: Option<bool>,
+    #[serde(default)]
+    provisioning_allowed: Option<bool>,
+}
+
+impl UserResource {
+    fn into_team_member_info(self) -> TeamMemberInfo {
+        TeamMemberInfo {
+            id: self.id,
+            first_name: self.attributes.first_name,
+            last_name: self.attributes.last_name,
+            username: self.attributes.username,
+            roles: self.attributes.roles,
+        }
+    }
+
+    /// Maps an active member into the unified [`UserInfo`]: `email` is taken from
+    /// the `username` attribute, `is_pending` is `false`, and `expiration_date`
+    /// is always `None`.
+    fn into_active_user_info(self) -> UserInfo {
+        UserInfo {
+            id: self.id,
+            first_name: self.attributes.first_name,
+            last_name: self.attributes.last_name,
+            email: self.attributes.username,
+            roles: self.attributes.roles,
+            all_apps_visible: self.attributes.all_apps_visible.unwrap_or(false),
+            provisioning_allowed: self.attributes.provisioning_allowed.unwrap_or(false),
+            is_pending: false,
+            expiration_date: None,
+        }
+    }
+}
+
+/// A JSON:API document page of `userInvitations` resources.
+#[derive(Deserialize)]
+struct UserInvitationsResponse {
+    #[serde(default)]
+    data: Vec<UserInvitationResource>,
+    #[serde(default)]
+    links: Links,
+}
+
+#[derive(Deserialize)]
+struct UserInvitationResource {
+    id: String,
+    #[serde(default)]
+    attributes: UserInvitationAttributes,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct UserInvitationAttributes {
+    #[serde(default)]
+    first_name: Option<String>,
+    #[serde(default)]
+    last_name: Option<String>,
+    #[serde(default)]
+    email: Option<String>,
+    #[serde(default)]
+    roles: Vec<String>,
+    #[serde(default)]
+    all_apps_visible: Option<bool>,
+    #[serde(default)]
+    provisioning_allowed: Option<bool>,
+    #[serde(default)]
+    expiration_date: Option<String>,
+}
+
+impl UserInvitationResource {
+    /// Maps a pending invitation into the unified [`UserInfo`]: `email` and
+    /// `expiration_date` come from the invitation's own attributes and
+    /// `is_pending` is `true`.
+    fn into_pending_user_info(self) -> UserInfo {
+        UserInfo {
+            id: self.id,
+            first_name: self.attributes.first_name,
+            last_name: self.attributes.last_name,
+            email: self.attributes.email,
+            roles: self.attributes.roles,
+            all_apps_visible: self.attributes.all_apps_visible.unwrap_or(false),
+            provisioning_allowed: self.attributes.provisioning_allowed.unwrap_or(false),
+            is_pending: true,
+            expiration_date: self.attributes.expiration_date,
+        }
+    }
+}
+
 /// Minimal App Store Connect client: validate credentials and list apps.
 /// `base_url` is injectable so tests can point it at a mock server.
 pub(crate) struct AppStoreClient {
     base_url: String,
     http: reqwest::Client,
     auth: AppStoreAuthenticator,
+    /// Optional HTTP tracing sink. `None` by default; set via
+    /// [`Self::with_debug_logger`] when the host injects a logger through
+    /// `connect`. When present, [`Self::send_and_read`] logs every request as a
+    /// runnable cURL and every response.
+    debug_logger: Option<Arc<dyn DebugLogger>>,
 }
 
 impl AppStoreClient {
@@ -1593,7 +1804,55 @@ impl AppStoreClient {
             base_url: base_url.trim_end_matches('/').to_string(),
             http: reqwest::Client::new(),
             auth,
+            debug_logger: None,
         }
+    }
+
+    /// Attaches an optional HTTP tracing sink. Builder-style so existing callers
+    /// that only need `new(auth)` stay unchanged; `None` is a no-op (no logging).
+    pub(crate) fn with_debug_logger(mut self, logger: Option<Arc<dyn DebugLogger>>) -> Self {
+        self.debug_logger = logger;
+        self
+    }
+
+    /// Sends `builder`, returning the response status and body text. When a
+    /// [`Self::debug_logger`] is present, logs the outgoing request as a runnable
+    /// cURL (with pretty-printed JSON body) before sending and the response
+    /// (status + pretty-printed JSON body) after.
+    ///
+    /// This is the single choke point every HTTP call routes through, so logging
+    /// lives in one place and the send/read boilerplate is not duplicated.
+    ///
+    /// # Errors
+    /// [`StackError::Network`] on transport failure (sending or reading the body)
+    /// — the same mapping the call sites used before this method existed.
+    async fn send_and_read(
+        &self,
+        builder: reqwest::RequestBuilder,
+    ) -> Result<(reqwest::StatusCode, String), StackError> {
+        if let Some(logger) = &self.debug_logger {
+            // `try_clone` fails only for streaming bodies; the client uses
+            // in-memory `.json()`/empty bodies, so this clones in practice.
+            if let Some(req) = builder.try_clone().and_then(|b| b.build().ok()) {
+                logger.log(render_curl(&req));
+            }
+        }
+
+        let response = builder
+            .send()
+            .await
+            .map_err(|e| StackError::network(e.to_string()))?;
+        let status = response.status();
+        let body = response
+            .text()
+            .await
+            .map_err(|e| StackError::network(e.to_string()))?;
+
+        if let Some(logger) = &self.debug_logger {
+            logger.log(render_response(status, &body));
+        }
+
+        Ok((status, body))
     }
 
     /// Cheap credential check: `GET /v1/apps?limit=1`.
@@ -1604,20 +1863,13 @@ impl AppStoreClient {
     pub(crate) async fn validate(&self) -> Result<(), StackError> {
         let url = format!("{}/v1/apps?limit=1", self.base_url);
         let token = self.auth.bearer_token().await?;
-        let response = self
-            .http
-            .get(&url)
-            .bearer_auth(token)
-            .send()
-            .await
-            .map_err(|e| StackError::network(e.to_string()))?;
-
-        let status = response.status();
+        let (status, body) = self
+            .send_and_read(self.http.get(&url).bearer_auth(token))
+            .await?;
         if status.is_success() {
             return Ok(());
         }
 
-        let body = response.text().await.unwrap_or_default();
         Err(map_error_response(status.as_u16(), &body))
     }
 
@@ -1847,20 +2099,9 @@ impl AppStoreClient {
             }
         });
 
-        let response = self
-            .http
-            .post(&url)
-            .bearer_auth(token)
-            .json(&request_body)
-            .send()
-            .await
-            .map_err(|e| StackError::network(e.to_string()))?;
-
-        let status = response.status();
-        let response_body = response
-            .text()
-            .await
-            .map_err(|e| StackError::network(e.to_string()))?;
+        let (status, response_body) = self
+            .send_and_read(self.http.post(&url).bearer_auth(token).json(&request_body))
+            .await?;
         if !status.is_success() {
             if let Some(err) = pending_agreements_error(status.as_u16(), &response_body) {
                 return Err(err);
@@ -1887,23 +2128,12 @@ impl AppStoreClient {
     pub(crate) async fn delete_review_response(&self, response_id: &str) -> Result<(), StackError> {
         let url = format!("{}/v1/customerReviewResponses/{response_id}", self.base_url);
         let token = self.auth.bearer_token().await?;
-        let response = self
-            .http
-            .delete(&url)
-            .bearer_auth(token)
-            .send()
-            .await
-            .map_err(|e| StackError::network(e.to_string()))?;
-
-        let status = response.status();
+        let (status, body) = self
+            .send_and_read(self.http.delete(&url).bearer_auth(token))
+            .await?;
         if status.is_success() {
             return Ok(());
         }
-
-        let body = response
-            .text()
-            .await
-            .map_err(|e| StackError::network(e.to_string()))?;
         if let Some(err) = pending_agreements_error(status.as_u16(), &body) {
             return Err(err);
         }
@@ -1977,20 +2207,9 @@ impl AppStoreClient {
             }
         });
 
-        let response = self
-            .http
-            .post(&url)
-            .bearer_auth(token)
-            .json(&request_body)
-            .send()
-            .await
-            .map_err(|e| StackError::network(e.to_string()))?;
-
-        let status = response.status();
-        let response_body = response
-            .text()
-            .await
-            .map_err(|e| StackError::network(e.to_string()))?;
+        let (status, response_body) = self
+            .send_and_read(self.http.post(&url).bearer_auth(token).json(&request_body))
+            .await?;
         if !status.is_success() {
             if let Some(err) = pending_agreements_error(status.as_u16(), &response_body) {
                 return Err(err);
@@ -2049,24 +2268,12 @@ impl AppStoreClient {
             }
         });
 
-        let response = self
-            .http
-            .patch(&url)
-            .bearer_auth(token)
-            .json(&request_body)
-            .send()
-            .await
-            .map_err(|e| StackError::network(e.to_string()))?;
-
-        let status = response.status();
+        let (status, body) = self
+            .send_and_read(self.http.patch(&url).bearer_auth(token).json(&request_body))
+            .await?;
         if status.is_success() {
             return Ok(());
         }
-
-        let body = response
-            .text()
-            .await
-            .map_err(|e| StackError::network(e.to_string()))?;
         if let Some(err) = pending_agreements_error(status.as_u16(), &body) {
             return Err(err);
         }
@@ -2087,23 +2294,12 @@ impl AppStoreClient {
     pub(crate) async fn delete_version(&self, id: &str) -> Result<(), StackError> {
         let url = format!("{}/v1/appStoreVersions/{id}", self.base_url);
         let token = self.auth.bearer_token().await?;
-        let response = self
-            .http
-            .delete(&url)
-            .bearer_auth(token)
-            .send()
-            .await
-            .map_err(|e| StackError::network(e.to_string()))?;
-
-        let status = response.status();
+        let (status, body) = self
+            .send_and_read(self.http.delete(&url).bearer_auth(token))
+            .await?;
         if status.is_success() {
             return Ok(());
         }
-
-        let body = response
-            .text()
-            .await
-            .map_err(|e| StackError::network(e.to_string()))?;
         if let Some(err) = pending_agreements_error(status.as_u16(), &body) {
             return Err(err);
         }
@@ -2279,23 +2475,13 @@ impl AppStoreClient {
             self.base_url
         );
         let token = self.auth.bearer_token().await?;
-        let response = self
-            .http
-            .get(&url)
-            .bearer_auth(token)
-            .send()
-            .await
-            .map_err(|e| StackError::network(e.to_string()))?;
-
-        let status = response.status();
+        let (status, body) = self
+            .send_and_read(self.http.get(&url).bearer_auth(token))
+            .await?;
         // No phased release on the version → ASC returns 404; treat as absent.
         if status.as_u16() == 404 {
             return Ok(None);
         }
-        let body = response
-            .text()
-            .await
-            .map_err(|e| StackError::network(e.to_string()))?;
         if !status.is_success() {
             if let Some(err) = pending_agreements_error(status.as_u16(), &body) {
                 return Err(err);
@@ -2365,23 +2551,12 @@ impl AppStoreClient {
     pub(crate) async fn delete_phased_release(&self, id: &str) -> Result<(), StackError> {
         let url = format!("{}/v1/appStoreVersionPhasedReleases/{id}", self.base_url);
         let token = self.auth.bearer_token().await?;
-        let response = self
-            .http
-            .delete(&url)
-            .bearer_auth(token)
-            .send()
-            .await
-            .map_err(|e| StackError::network(e.to_string()))?;
-
-        let status = response.status();
+        let (status, body) = self
+            .send_and_read(self.http.delete(&url).bearer_auth(token))
+            .await?;
         if status.is_success() {
             return Ok(());
         }
-
-        let body = response
-            .text()
-            .await
-            .map_err(|e| StackError::network(e.to_string()))?;
         if let Some(err) = pending_agreements_error(status.as_u16(), &body) {
             return Err(err);
         }
@@ -2418,20 +2593,9 @@ impl AppStoreClient {
             }
         });
 
-        let response = self
-            .http
-            .patch(&url)
-            .bearer_auth(token)
-            .json(&request_body)
-            .send()
-            .await
-            .map_err(|e| StackError::network(e.to_string()))?;
-
-        let status = response.status();
-        let body = response
-            .text()
-            .await
-            .map_err(|e| StackError::network(e.to_string()))?;
+        let (status, body) = self
+            .send_and_read(self.http.patch(&url).bearer_auth(token).json(&request_body))
+            .await?;
         if !status.is_success() {
             if let Some(err) = pending_agreements_error(status.as_u16(), &body) {
                 return Err(err);
@@ -2485,20 +2649,9 @@ impl AppStoreClient {
         request_body: &serde_json::Value,
     ) -> Result<String, StackError> {
         let token = self.auth.bearer_token().await?;
-        let response = self
-            .http
-            .post(url)
-            .bearer_auth(token)
-            .json(request_body)
-            .send()
-            .await
-            .map_err(|e| StackError::network(e.to_string()))?;
-
-        let status = response.status();
-        let body = response
-            .text()
-            .await
-            .map_err(|e| StackError::network(e.to_string()))?;
+        let (status, body) = self
+            .send_and_read(self.http.post(url).bearer_auth(token).json(request_body))
+            .await?;
         if status.is_success() {
             return Ok(body);
         }
@@ -2722,23 +2875,13 @@ impl AppStoreClient {
     ) -> Result<Option<BuildInfo>, StackError> {
         let url = format!("{}/v1/appStoreVersions/{version_id}/build", self.base_url);
         let token = self.auth.bearer_token().await?;
-        let response = self
-            .http
-            .get(&url)
-            .bearer_auth(token)
-            .send()
-            .await
-            .map_err(|e| StackError::network(e.to_string()))?;
-
-        let status = response.status();
+        let (status, body) = self
+            .send_and_read(self.http.get(&url).bearer_auth(token))
+            .await?;
         // No build attached to the version → ASC returns 404; treat as absent.
         if status.as_u16() == 404 {
             return Ok(None);
         }
-        let body = response
-            .text()
-            .await
-            .map_err(|e| StackError::network(e.to_string()))?;
         if !status.is_success() {
             if let Some(err) = pending_agreements_error(status.as_u16(), &body) {
                 return Err(err);
@@ -2778,24 +2921,12 @@ impl AppStoreClient {
             }
         });
 
-        let response = self
-            .http
-            .patch(&url)
-            .bearer_auth(token)
-            .json(&request_body)
-            .send()
-            .await
-            .map_err(|e| StackError::network(e.to_string()))?;
-
-        let status = response.status();
+        let (status, body) = self
+            .send_and_read(self.http.patch(&url).bearer_auth(token).json(&request_body))
+            .await?;
         if status.is_success() {
             return Ok(());
         }
-
-        let body = response
-            .text()
-            .await
-            .map_err(|e| StackError::network(e.to_string()))?;
         if let Some(err) = pending_agreements_error(status.as_u16(), &body) {
             return Err(err);
         }
@@ -2829,24 +2960,12 @@ impl AppStoreClient {
             "data": { "type": "builds", "id": build_id }
         });
 
-        let response = self
-            .http
-            .patch(&url)
-            .bearer_auth(token)
-            .json(&request_body)
-            .send()
-            .await
-            .map_err(|e| StackError::network(e.to_string()))?;
-
-        let status = response.status();
+        let (status, body) = self
+            .send_and_read(self.http.patch(&url).bearer_auth(token).json(&request_body))
+            .await?;
         if status.is_success() {
             return Ok(());
         }
-
-        let body = response
-            .text()
-            .await
-            .map_err(|e| StackError::network(e.to_string()))?;
         if let Some(err) = pending_agreements_error(status.as_u16(), &body) {
             return Err(err);
         }
@@ -2882,24 +3001,12 @@ impl AppStoreClient {
             }
         });
 
-        let response = self
-            .http
-            .post(&url)
-            .bearer_auth(token)
-            .json(&request_body)
-            .send()
-            .await
-            .map_err(|e| StackError::network(e.to_string()))?;
-
-        let status = response.status();
+        let (status, body) = self
+            .send_and_read(self.http.post(&url).bearer_auth(token).json(&request_body))
+            .await?;
         if status.is_success() {
             return Ok(());
         }
-
-        let body = response
-            .text()
-            .await
-            .map_err(|e| StackError::network(e.to_string()))?;
         if let Some(err) = pending_agreements_error(status.as_u16(), &body) {
             return Err(err);
         }
@@ -2936,24 +3043,12 @@ impl AppStoreClient {
             .collect();
         let request_body = json!({ "data": data });
 
-        let response = self
-            .http
-            .post(&url)
-            .bearer_auth(token)
-            .json(&request_body)
-            .send()
-            .await
-            .map_err(|e| StackError::network(e.to_string()))?;
-
-        let status = response.status();
+        let (status, body) = self
+            .send_and_read(self.http.post(&url).bearer_auth(token).json(&request_body))
+            .await?;
         if status.is_success() {
             return Ok(());
         }
-
-        let body = response
-            .text()
-            .await
-            .map_err(|e| StackError::network(e.to_string()))?;
         if let Some(err) = pending_agreements_error(status.as_u16(), &body) {
             return Err(err);
         }
@@ -2987,24 +3082,17 @@ impl AppStoreClient {
             "data": [{ "type": "builds", "id": build_id }]
         });
 
-        let response = self
-            .http
-            .delete(&url)
-            .bearer_auth(token)
-            .json(&request_body)
-            .send()
-            .await
-            .map_err(|e| StackError::network(e.to_string()))?;
-
-        let status = response.status();
+        let (status, body) = self
+            .send_and_read(
+                self.http
+                    .delete(&url)
+                    .bearer_auth(token)
+                    .json(&request_body),
+            )
+            .await?;
         if status.is_success() {
             return Ok(());
         }
-
-        let body = response
-            .text()
-            .await
-            .map_err(|e| StackError::network(e.to_string()))?;
         if let Some(err) = pending_agreements_error(status.as_u16(), &body) {
             return Err(err);
         }
@@ -3130,20 +3218,9 @@ impl AppStoreClient {
             }
         });
 
-        let response = self
-            .http
-            .post(&url)
-            .bearer_auth(token)
-            .json(&request_body)
-            .send()
-            .await
-            .map_err(|e| StackError::network(e.to_string()))?;
-
-        let status = response.status();
-        let response_body = response
-            .text()
-            .await
-            .map_err(|e| StackError::network(e.to_string()))?;
+        let (status, response_body) = self
+            .send_and_read(self.http.post(&url).bearer_auth(token).json(&request_body))
+            .await?;
         if !status.is_success() {
             if let Some(err) = pending_agreements_error(status.as_u16(), &response_body) {
                 return Err(err);
@@ -3208,20 +3285,9 @@ impl AppStoreClient {
             }
         });
 
-        let response = self
-            .http
-            .patch(&url)
-            .bearer_auth(token)
-            .json(&request_body)
-            .send()
-            .await
-            .map_err(|e| StackError::network(e.to_string()))?;
-
-        let status = response.status();
-        let response_body = response
-            .text()
-            .await
-            .map_err(|e| StackError::network(e.to_string()))?;
+        let (status, response_body) = self
+            .send_and_read(self.http.patch(&url).bearer_auth(token).json(&request_body))
+            .await?;
         if !status.is_success() {
             if let Some(err) = pending_agreements_error(status.as_u16(), &response_body) {
                 return Err(err);
@@ -3249,23 +3315,12 @@ impl AppStoreClient {
     pub(crate) async fn delete_beta_group(&self, group_id: &str) -> Result<(), StackError> {
         let url = format!("{}/v1/betaGroups/{group_id}", self.base_url);
         let token = self.auth.bearer_token().await?;
-        let response = self
-            .http
-            .delete(&url)
-            .bearer_auth(token)
-            .send()
-            .await
-            .map_err(|e| StackError::network(e.to_string()))?;
-
-        let status = response.status();
+        let (status, body) = self
+            .send_and_read(self.http.delete(&url).bearer_auth(token))
+            .await?;
         if status.is_success() {
             return Ok(());
         }
-
-        let body = response
-            .text()
-            .await
-            .map_err(|e| StackError::network(e.to_string()))?;
         if let Some(err) = pending_agreements_error(status.as_u16(), &body) {
             return Err(err);
         }
@@ -3320,20 +3375,9 @@ impl AppStoreClient {
             }
         });
 
-        let response = self
-            .http
-            .post(&url)
-            .bearer_auth(token)
-            .json(&request_body)
-            .send()
-            .await
-            .map_err(|e| StackError::network(e.to_string()))?;
-
-        let status = response.status();
-        let response_body = response
-            .text()
-            .await
-            .map_err(|e| StackError::network(e.to_string()))?;
+        let (status, response_body) = self
+            .send_and_read(self.http.post(&url).bearer_auth(token).json(&request_body))
+            .await?;
         if !status.is_success() {
             if let Some(err) = pending_agreements_error(status.as_u16(), &response_body) {
                 return Err(err);
@@ -3374,24 +3418,17 @@ impl AppStoreClient {
             "data": [{ "type": "betaTesters", "id": tester_id }]
         });
 
-        let response = self
-            .http
-            .delete(&url)
-            .bearer_auth(token)
-            .json(&request_body)
-            .send()
-            .await
-            .map_err(|e| StackError::network(e.to_string()))?;
-
-        let status = response.status();
+        let (status, body) = self
+            .send_and_read(
+                self.http
+                    .delete(&url)
+                    .bearer_auth(token)
+                    .json(&request_body),
+            )
+            .await?;
         if status.is_success() {
             return Ok(());
         }
-
-        let body = response
-            .text()
-            .await
-            .map_err(|e| StackError::network(e.to_string()))?;
         if let Some(err) = pending_agreements_error(status.as_u16(), &body) {
             return Err(err);
         }
@@ -3456,24 +3493,12 @@ impl AppStoreClient {
             }
         });
 
-        let response = self
-            .http
-            .post(&url)
-            .bearer_auth(token)
-            .json(&request_body)
-            .send()
-            .await
-            .map_err(|e| StackError::network(e.to_string()))?;
-
-        let status = response.status();
+        let (status, body) = self
+            .send_and_read(self.http.post(&url).bearer_auth(token).json(&request_body))
+            .await?;
         if status.is_success() {
             return Ok(());
         }
-
-        let body = response
-            .text()
-            .await
-            .map_err(|e| StackError::network(e.to_string()))?;
         if let Some(err) = pending_agreements_error(status.as_u16(), &body) {
             return Err(err);
         }
@@ -3557,20 +3582,9 @@ impl AppStoreClient {
             }
         });
 
-        let response = self
-            .http
-            .post(&url)
-            .bearer_auth(token)
-            .json(&request_body)
-            .send()
-            .await
-            .map_err(|e| StackError::network(e.to_string()))?;
-
-        let status = response.status();
-        let response_body = response
-            .text()
-            .await
-            .map_err(|e| StackError::network(e.to_string()))?;
+        let (status, response_body) = self
+            .send_and_read(self.http.post(&url).bearer_auth(token).json(&request_body))
+            .await?;
         if !status.is_success() {
             if let Some(err) = pending_agreements_error(status.as_u16(), &response_body) {
                 return Err(err);
@@ -3614,20 +3628,9 @@ impl AppStoreClient {
             }
         });
 
-        let response = self
-            .http
-            .patch(&url)
-            .bearer_auth(token)
-            .json(&request_body)
-            .send()
-            .await
-            .map_err(|e| StackError::network(e.to_string()))?;
-
-        let status = response.status();
-        let response_body = response
-            .text()
-            .await
-            .map_err(|e| StackError::network(e.to_string()))?;
+        let (status, response_body) = self
+            .send_and_read(self.http.patch(&url).bearer_auth(token).json(&request_body))
+            .await?;
         if !status.is_success() {
             if let Some(err) = pending_agreements_error(status.as_u16(), &response_body) {
                 return Err(err);
@@ -3725,20 +3728,9 @@ impl AppStoreClient {
             }
         });
 
-        let response = self
-            .http
-            .post(&url)
-            .bearer_auth(token)
-            .json(&request_body)
-            .send()
-            .await
-            .map_err(|e| StackError::network(e.to_string()))?;
-
-        let status = response.status();
-        let response_body = response
-            .text()
-            .await
-            .map_err(|e| StackError::network(e.to_string()))?;
+        let (status, response_body) = self
+            .send_and_read(self.http.post(&url).bearer_auth(token).json(&request_body))
+            .await?;
         if !status.is_success() {
             if let Some(err) = pending_agreements_error(status.as_u16(), &response_body) {
                 return Err(err);
@@ -3791,20 +3783,9 @@ impl AppStoreClient {
             }
         });
 
-        let response = self
-            .http
-            .patch(&url)
-            .bearer_auth(token)
-            .json(&request_body)
-            .send()
-            .await
-            .map_err(|e| StackError::network(e.to_string()))?;
-
-        let status = response.status();
-        let response_body = response
-            .text()
-            .await
-            .map_err(|e| StackError::network(e.to_string()))?;
+        let (status, response_body) = self
+            .send_and_read(self.http.patch(&url).bearer_auth(token).json(&request_body))
+            .await?;
         if !status.is_success() {
             if let Some(err) = pending_agreements_error(status.as_u16(), &response_body) {
                 return Err(err);
@@ -3818,6 +3799,218 @@ impl AppStoreClient {
         let document: BetaAppLocalizationDocument = serde_json::from_str(&response_body)
             .map_err(|e| StackError::decode(format!("beta app localization response: {e}")))?;
         Ok(document.data.into_beta_app_localization_info())
+    }
+
+    /// Lists the accessibility declarations for `app_id`, mapping each into an
+    /// [`AccessibilityDeclarationInfo`].
+    ///
+    /// `GET /v1/apps/{app_id}/accessibilityDeclarations?limit={limit}` — the app's
+    /// relationship list endpoint (note this is under `/apps/{id}/`, not a
+    /// `filter[app]` query) — following `links.next` pagination until exhausted
+    /// (`limit` is the page size).
+    ///
+    /// # Errors
+    /// [`StackError::PendingAgreements`] on a pending-agreements 403,
+    /// [`StackError::Http`] on any other non-2xx page, [`StackError::Decode`] on
+    /// malformed JSON, or [`StackError::Network`] on transport failure.
+    pub(crate) async fn fetch_accessibility_declarations(
+        &self,
+        app_id: &str,
+        limit: i64,
+    ) -> Result<Vec<AccessibilityDeclarationInfo>, StackError> {
+        let mut declarations = Vec::new();
+        let mut next_url = Some(format!(
+            "{}/v1/apps/{app_id}/accessibilityDeclarations?limit={limit}",
+            self.base_url
+        ));
+
+        while let Some(url) = next_url {
+            let body = self.get_page(&url).await?;
+            let page: AccessibilityDeclarationsResponse =
+                serde_json::from_str(&body).map_err(|e| {
+                    StackError::decode(format!("accessibility declarations response: {e}"))
+                })?;
+            declarations.extend(
+                page.data
+                    .into_iter()
+                    .map(AccessibilityDeclarationResource::into_accessibility_declaration_info),
+            );
+
+            // `links.next` is an absolute URL; follow it verbatim until absent.
+            next_url = page.links.next.filter(|u| !u.is_empty());
+        }
+
+        Ok(declarations)
+    }
+
+    /// Creates an accessibility declaration for `app_id` targeting
+    /// `device_family`.
+    ///
+    /// `POST /v1/accessibilityDeclarations` with a JSON:API body carrying the
+    /// `deviceFamily` attribute plus the `app` relationship. Success is any 2xx
+    /// (`201 Created`); the returned single-resource document is mapped into an
+    /// [`AccessibilityDeclarationInfo`].
+    ///
+    /// # Errors
+    /// [`StackError::PendingAgreements`] on a pending-agreements 403,
+    /// [`StackError::Http`] on any other non-2xx response, [`StackError::Decode`]
+    /// on malformed JSON, or [`StackError::Network`] on transport failure.
+    pub(crate) async fn create_accessibility_declaration(
+        &self,
+        app_id: &str,
+        device_family: &str,
+    ) -> Result<AccessibilityDeclarationInfo, StackError> {
+        let url = format!("{}/v1/accessibilityDeclarations", self.base_url);
+        let token = self.auth.bearer_token().await?;
+
+        let request_body = json!({
+            "data": {
+                "type": "accessibilityDeclarations",
+                "attributes": { "deviceFamily": device_family },
+                "relationships": {
+                    "app": {
+                        "data": { "type": "apps", "id": app_id }
+                    }
+                }
+            }
+        });
+
+        let (status, response_body) = self
+            .send_and_read(self.http.post(&url).bearer_auth(token).json(&request_body))
+            .await?;
+        if !status.is_success() {
+            if let Some(err) = pending_agreements_error(status.as_u16(), &response_body) {
+                return Err(err);
+            }
+            return Err(StackError::Http {
+                status: status.as_u16(),
+                message: response_body,
+            });
+        }
+
+        let document: AccessibilityDeclarationDocument = serde_json::from_str(&response_body)
+            .map_err(|e| StackError::decode(format!("accessibility declaration response: {e}")))?;
+        Ok(document.data.into_accessibility_declaration_info())
+    }
+
+    /// Updates the accessibility declaration identified by `id`, sending all nine
+    /// `supports*` feature flags and, only when `publish` is `true`, a
+    /// `publish: true` attribute (the key is omitted entirely otherwise).
+    ///
+    /// `PATCH /v1/accessibilityDeclarations/{id}` with a JSON:API body. Note the
+    /// `supports_differentiate_without_color` flag is sent under the wire key
+    /// `supportsDifferentiateWithoutColorAlone`. Success is any 2xx (`200 OK`);
+    /// the returned single-resource document is mapped into an
+    /// [`AccessibilityDeclarationInfo`].
+    ///
+    /// # Errors
+    /// [`StackError::PendingAgreements`] on a pending-agreements 403,
+    /// [`StackError::Http`] on any other non-2xx response, [`StackError::Decode`]
+    /// on malformed JSON, or [`StackError::Network`] on transport failure.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn update_accessibility_declaration(
+        &self,
+        id: &str,
+        publish: bool,
+        supports_audio_descriptions: bool,
+        supports_captions: bool,
+        supports_dark_interface: bool,
+        supports_differentiate_without_color: bool,
+        supports_larger_text: bool,
+        supports_reduced_motion: bool,
+        supports_sufficient_contrast: bool,
+        supports_voice_control: bool,
+        supports_voiceover: bool,
+    ) -> Result<AccessibilityDeclarationInfo, StackError> {
+        let url = format!("{}/v1/accessibilityDeclarations/{id}", self.base_url);
+        let token = self.auth.bearer_token().await?;
+
+        let mut attributes = serde_json::Map::new();
+        // `publish` is only sent when requesting publication; omitting it leaves
+        // the declaration in draft.
+        if publish {
+            attributes.insert("publish".into(), json!(true));
+        }
+        attributes.insert(
+            "supportsAudioDescriptions".into(),
+            json!(supports_audio_descriptions),
+        );
+        attributes.insert("supportsCaptions".into(), json!(supports_captions));
+        attributes.insert(
+            "supportsDarkInterface".into(),
+            json!(supports_dark_interface),
+        );
+        attributes.insert(
+            "supportsDifferentiateWithoutColorAlone".into(),
+            json!(supports_differentiate_without_color),
+        );
+        attributes.insert("supportsLargerText".into(), json!(supports_larger_text));
+        attributes.insert(
+            "supportsReducedMotion".into(),
+            json!(supports_reduced_motion),
+        );
+        attributes.insert(
+            "supportsSufficientContrast".into(),
+            json!(supports_sufficient_contrast),
+        );
+        attributes.insert("supportsVoiceControl".into(), json!(supports_voice_control));
+        attributes.insert("supportsVoiceover".into(), json!(supports_voiceover));
+
+        let request_body = json!({
+            "data": {
+                "type": "accessibilityDeclarations",
+                "id": id,
+                "attributes": attributes
+            }
+        });
+
+        let (status, response_body) = self
+            .send_and_read(self.http.patch(&url).bearer_auth(token).json(&request_body))
+            .await?;
+        if !status.is_success() {
+            if let Some(err) = pending_agreements_error(status.as_u16(), &response_body) {
+                return Err(err);
+            }
+            return Err(StackError::Http {
+                status: status.as_u16(),
+                message: response_body,
+            });
+        }
+
+        let document: AccessibilityDeclarationDocument = serde_json::from_str(&response_body)
+            .map_err(|e| StackError::decode(format!("accessibility declaration response: {e}")))?;
+        Ok(document.data.into_accessibility_declaration_info())
+    }
+
+    /// Deletes the accessibility declaration identified by `id`.
+    ///
+    /// `DELETE /v1/accessibilityDeclarations/{id}` — any 2xx response is success.
+    ///
+    /// # Errors
+    /// [`StackError::PendingAgreements`] on a pending-agreements 403,
+    /// [`StackError::Http`] on any other non-2xx response, or
+    /// [`StackError::Network`] on transport failure.
+    pub(crate) async fn delete_accessibility_declaration(
+        &self,
+        id: &str,
+    ) -> Result<(), StackError> {
+        let url = format!("{}/v1/accessibilityDeclarations/{id}", self.base_url);
+        let token = self.auth.bearer_token().await?;
+
+        let (status, response_body) = self
+            .send_and_read(self.http.delete(&url).bearer_auth(token))
+            .await?;
+        if !status.is_success() {
+            if let Some(err) = pending_agreements_error(status.as_u16(), &response_body) {
+                return Err(err);
+            }
+            return Err(StackError::Http {
+                status: status.as_u16(),
+                message: response_body,
+            });
+        }
+
+        Ok(())
     }
 
     /// Lists the app-info localizations for `app_info_id`, mapping each into an
@@ -3894,20 +4087,9 @@ impl AppStoreClient {
             }
         });
 
-        let response = self
-            .http
-            .patch(&url)
-            .bearer_auth(token)
-            .json(&request_body)
-            .send()
-            .await
-            .map_err(|e| StackError::network(e.to_string()))?;
-
-        let status = response.status();
-        let response_body = response
-            .text()
-            .await
-            .map_err(|e| StackError::network(e.to_string()))?;
+        let (status, response_body) = self
+            .send_and_read(self.http.patch(&url).bearer_auth(token).json(&request_body))
+            .await?;
         if !status.is_success() {
             if let Some(err) = pending_agreements_error(status.as_u16(), &response_body) {
                 return Err(err);
@@ -3965,20 +4147,9 @@ impl AppStoreClient {
             }
         });
 
-        let response = self
-            .http
-            .patch(&url)
-            .bearer_auth(token)
-            .json(&request_body)
-            .send()
-            .await
-            .map_err(|e| StackError::network(e.to_string()))?;
-
-        let status = response.status();
-        let response_body = response
-            .text()
-            .await
-            .map_err(|e| StackError::network(e.to_string()))?;
+        let (status, response_body) = self
+            .send_and_read(self.http.patch(&url).bearer_auth(token).json(&request_body))
+            .await?;
         if !status.is_success() {
             if let Some(err) = pending_agreements_error(status.as_u16(), &response_body) {
                 return Err(err);
@@ -4035,20 +4206,9 @@ impl AppStoreClient {
             }
         });
 
-        let response = self
-            .http
-            .post(&url)
-            .bearer_auth(token)
-            .json(&request_body)
-            .send()
-            .await
-            .map_err(|e| StackError::network(e.to_string()))?;
-
-        let status = response.status();
-        let response_body = response
-            .text()
-            .await
-            .map_err(|e| StackError::network(e.to_string()))?;
+        let (status, response_body) = self
+            .send_and_read(self.http.post(&url).bearer_auth(token).json(&request_body))
+            .await?;
         if !status.is_success() {
             if let Some(err) = pending_agreements_error(status.as_u16(), &response_body) {
                 return Err(err);
@@ -4076,19 +4236,9 @@ impl AppStoreClient {
         let url = format!("{}/v1/appInfoLocalizations/{id}", self.base_url);
         let token = self.auth.bearer_token().await?;
 
-        let response = self
-            .http
-            .delete(&url)
-            .bearer_auth(token)
-            .send()
-            .await
-            .map_err(|e| StackError::network(e.to_string()))?;
-
-        let status = response.status();
-        let response_body = response
-            .text()
-            .await
-            .map_err(|e| StackError::network(e.to_string()))?;
+        let (status, response_body) = self
+            .send_and_read(self.http.delete(&url).bearer_auth(token))
+            .await?;
         if !status.is_success() {
             if let Some(err) = pending_agreements_error(status.as_u16(), &response_body) {
                 return Err(err);
@@ -4602,19 +4752,9 @@ impl AppStoreClient {
         let url = format!("{}/v1/apps/{app_id}/betaAppReviewDetail", self.base_url);
         let token = self.auth.bearer_token().await?;
 
-        let response = self
-            .http
-            .get(&url)
-            .bearer_auth(token)
-            .send()
-            .await
-            .map_err(|e| StackError::network(e.to_string()))?;
-
-        let status = response.status();
-        let response_body = response
-            .text()
-            .await
-            .map_err(|e| StackError::network(e.to_string()))?;
+        let (status, response_body) = self
+            .send_and_read(self.http.get(&url).bearer_auth(token))
+            .await?;
         if !status.is_success() {
             if let Some(err) = pending_agreements_error(status.as_u16(), &response_body) {
                 return Err(err);
@@ -4692,20 +4832,9 @@ impl AppStoreClient {
             }
         });
 
-        let response = self
-            .http
-            .patch(&url)
-            .bearer_auth(token)
-            .json(&request_body)
-            .send()
-            .await
-            .map_err(|e| StackError::network(e.to_string()))?;
-
-        let status = response.status();
-        let response_body = response
-            .text()
-            .await
-            .map_err(|e| StackError::network(e.to_string()))?;
+        let (status, response_body) = self
+            .send_and_read(self.http.patch(&url).bearer_auth(token).json(&request_body))
+            .await?;
         if !status.is_success() {
             if let Some(err) = pending_agreements_error(status.as_u16(), &response_body) {
                 return Err(err);
@@ -4744,23 +4873,13 @@ impl AppStoreClient {
         );
         let token = self.auth.bearer_token().await?;
 
-        let response = self
-            .http
-            .get(&url)
-            .bearer_auth(token)
-            .send()
-            .await
-            .map_err(|e| StackError::network(e.to_string()))?;
-
-        let status = response.status();
+        let (status, response_body) = self
+            .send_and_read(self.http.get(&url).bearer_auth(token))
+            .await?;
         // No app review detail on the version → ASC returns 404; treat as absent.
         if status.as_u16() == 404 {
             return Ok(None);
         }
-        let response_body = response
-            .text()
-            .await
-            .map_err(|e| StackError::network(e.to_string()))?;
         if !status.is_success() {
             if let Some(err) = pending_agreements_error(status.as_u16(), &response_body) {
                 return Err(err);
@@ -4841,20 +4960,9 @@ impl AppStoreClient {
             }
         });
 
-        let response = self
-            .http
-            .patch(&url)
-            .bearer_auth(token)
-            .json(&request_body)
-            .send()
-            .await
-            .map_err(|e| StackError::network(e.to_string()))?;
-
-        let status = response.status();
-        let response_body = response
-            .text()
-            .await
-            .map_err(|e| StackError::network(e.to_string()))?;
+        let (status, response_body) = self
+            .send_and_read(self.http.patch(&url).bearer_auth(token).json(&request_body))
+            .await?;
         if !status.is_success() {
             if let Some(err) = pending_agreements_error(status.as_u16(), &response_body) {
                 return Err(err);
@@ -4879,30 +4987,176 @@ impl AppStoreClient {
     /// (the response body is ignored). Mirrors the failure mapping of the other
     /// write paths: pending-agreements 403 → [`StackError::PendingAgreements`],
     /// any other non-2xx → [`StackError::Http`], transport → [`StackError::Network`].
+    /// Lists the team members of the connected account, mapping each active
+    /// `users` resource into a [`TeamMemberInfo`].
+    ///
+    /// `GET /v1/users?fields[users]=firstName,lastName,username,roles&limit=200`,
+    /// following `links.next` pagination until exhausted.
+    ///
+    /// # Errors
+    /// [`StackError::PendingAgreements`] on a pending-agreements 403,
+    /// [`StackError::Http`] on any other non-2xx page, [`StackError::Decode`] on
+    /// malformed JSON, or [`StackError::Network`] on transport failure.
+    pub(crate) async fn fetch_team_members(&self) -> Result<Vec<TeamMemberInfo>, StackError> {
+        let mut members = Vec::new();
+        let mut next_url = Some(format!(
+            "{}/v1/users?fields[users]=firstName,lastName,username,roles&limit=200",
+            self.base_url
+        ));
+
+        while let Some(url) = next_url {
+            let body = self.get_page(&url).await?;
+            let page: UsersResponse = serde_json::from_str(&body)
+                .map_err(|e| StackError::decode(format!("users response: {e}")))?;
+            members.extend(
+                page.data
+                    .into_iter()
+                    .map(UserResource::into_team_member_info),
+            );
+
+            // `links.next` is an absolute URL; follow it verbatim until absent.
+            next_url = page.links.next.filter(|u| !u.is_empty());
+        }
+
+        Ok(members)
+    }
+
+    /// Lists every user of the connected account: the active members (`users`)
+    /// followed by the outstanding invitations (`userInvitations`), unified into
+    /// one [`UserInfo`] list discriminated by `is_pending`.
+    ///
+    /// Two requests are issued (mirroring the host): `GET /v1/users` with the
+    /// extended `fields[users]` projection and `GET /v1/userInvitations` with the
+    /// `fields[userInvitations]` projection, both at `limit=200` and following
+    /// `links.next` pagination. Active members' `email` is read from the
+    /// `username` attribute; the two lists are concatenated (active first).
+    ///
+    /// # Errors
+    /// [`StackError::PendingAgreements`] on a pending-agreements 403,
+    /// [`StackError::Http`] on any other non-2xx page, [`StackError::Decode`] on
+    /// malformed JSON, or [`StackError::Network`] on transport failure.
+    pub(crate) async fn fetch_users(&self) -> Result<Vec<UserInfo>, StackError> {
+        // Request 1: active members.
+        let mut users = Vec::new();
+        let mut next_url = Some(format!(
+            "{}/v1/users?fields[users]=firstName,lastName,username,roles,allAppsVisible,\
+             provisioningAllowed&limit=200",
+            self.base_url
+        ));
+        while let Some(url) = next_url {
+            let body = self.get_page(&url).await?;
+            let page: UsersResponse = serde_json::from_str(&body)
+                .map_err(|e| StackError::decode(format!("users response: {e}")))?;
+            users.extend(
+                page.data
+                    .into_iter()
+                    .map(UserResource::into_active_user_info),
+            );
+            next_url = page.links.next.filter(|u| !u.is_empty());
+        }
+
+        // Request 2: pending invitations.
+        let mut next_url = Some(format!(
+            "{}/v1/userInvitations?fields[userInvitations]=firstName,lastName,email,roles,\
+             allAppsVisible,provisioningAllowed,expirationDate&limit=200",
+            self.base_url
+        ));
+        while let Some(url) = next_url {
+            let body = self.get_page(&url).await?;
+            let page: UserInvitationsResponse = serde_json::from_str(&body)
+                .map_err(|e| StackError::decode(format!("user invitations response: {e}")))?;
+            users.extend(
+                page.data
+                    .into_iter()
+                    .map(UserInvitationResource::into_pending_user_info),
+            );
+            next_url = page.links.next.filter(|u| !u.is_empty());
+        }
+
+        Ok(users)
+    }
+
+    /// Invites a new user to the connected account.
+    ///
+    /// `POST /v1/userInvitations` with a JSON:API body whose `attributes` carry
+    /// `email`/`firstName`/`lastName`, the raw ASC `roles` strings verbatim, and
+    /// the `allAppsVisible`/`provisioningAllowed` flags. The response is
+    /// discarded (any 2xx is success).
+    ///
+    /// # Errors
+    /// [`StackError::PendingAgreements`] on a pending-agreements 403,
+    /// [`StackError::Http`] on any other non-2xx response, or
+    /// [`StackError::Network`] on transport failure.
+    pub(crate) async fn invite_user(
+        &self,
+        email: &str,
+        first_name: &str,
+        last_name: &str,
+        roles: &[String],
+        all_apps_visible: bool,
+        provisioning_allowed: bool,
+    ) -> Result<(), StackError> {
+        let url = format!("{}/v1/userInvitations", self.base_url);
+        let request_body = json!({
+            "data": {
+                "type": "userInvitations",
+                "attributes": {
+                    "email": email,
+                    "firstName": first_name,
+                    "lastName": last_name,
+                    "roles": roles,
+                    "allAppsVisible": all_apps_visible,
+                    "provisioningAllowed": provisioning_allowed,
+                }
+            }
+        });
+
+        self.post_json_2xx(&url, &request_body).await.map(|_| ())
+    }
+
+    /// Deletes the user `id`: cancels the invitation
+    /// (`DELETE /v1/userInvitations/{id}`) when `is_pending`, otherwise removes
+    /// the active member (`DELETE /v1/users/{id}`).
+    ///
+    /// # Errors
+    /// [`StackError::PendingAgreements`] on a pending-agreements 403,
+    /// [`StackError::Http`] on any other non-2xx response, or
+    /// [`StackError::Network`] on transport failure.
+    pub(crate) async fn delete_user(&self, id: &str, is_pending: bool) -> Result<(), StackError> {
+        let url = if is_pending {
+            format!("{}/v1/userInvitations/{id}", self.base_url)
+        } else {
+            format!("{}/v1/users/{id}", self.base_url)
+        };
+        let token = self.auth.bearer_token().await?;
+        let (status, body) = self
+            .send_and_read(self.http.delete(&url).bearer_auth(token))
+            .await?;
+        if status.is_success() {
+            return Ok(());
+        }
+        if let Some(err) = pending_agreements_error(status.as_u16(), &body) {
+            return Err(err);
+        }
+        Err(StackError::Http {
+            status: status.as_u16(),
+            message: body,
+        })
+    }
+
     async fn patch_no_content(
         &self,
         url: &str,
         token: &str,
         request_body: &serde_json::Value,
     ) -> Result<(), StackError> {
-        let response = self
-            .http
-            .patch(url)
-            .bearer_auth(token)
-            .json(request_body)
-            .send()
-            .await
-            .map_err(|e| StackError::network(e.to_string()))?;
-
-        let status = response.status();
+        let (status, body) = self
+            .send_and_read(self.http.patch(url).bearer_auth(token).json(request_body))
+            .await?;
         if status.is_success() {
             return Ok(());
         }
 
-        let body = response
-            .text()
-            .await
-            .map_err(|e| StackError::network(e.to_string()))?;
         if let Some(err) = pending_agreements_error(status.as_u16(), &body) {
             return Err(err);
         }
@@ -4916,19 +5170,9 @@ impl AppStoreClient {
     /// the failure: non-2xx → [`StackError::Http`], transport → [`StackError::Network`].
     async fn get_page(&self, url: &str) -> Result<String, StackError> {
         let token = self.auth.bearer_token().await?;
-        let response = self
-            .http
-            .get(url)
-            .bearer_auth(token)
-            .send()
-            .await
-            .map_err(|e| StackError::network(e.to_string()))?;
-
-        let status = response.status();
-        let body = response
-            .text()
-            .await
-            .map_err(|e| StackError::network(e.to_string()))?;
+        let (status, body) = self
+            .send_and_read(self.http.get(url).bearer_auth(token))
+            .await?;
         if !status.is_success() {
             if let Some(err) = pending_agreements_error(status.as_u16(), &body) {
                 return Err(err);
@@ -4940,6 +5184,46 @@ impl AppStoreClient {
         }
         Ok(body)
     }
+}
+
+/// Renders a `reqwest::Request` as a runnable, multi-line cURL command for the
+/// debug logger: the method/URL, one `-H` line per header (in reqwest's stored
+/// order, Authorization included verbatim — this is an opt-in, debug-only sink),
+/// and a `-d` line carrying the pretty-printed JSON body when one is present.
+fn render_curl(req: &reqwest::Request) -> String {
+    let mut out = format!(
+        "[RustCore] → request\n→ curl -X {} '{}'",
+        req.method(),
+        req.url()
+    );
+
+    for (name, value) in req.headers() {
+        let value = value.to_str().unwrap_or("<non-utf8>");
+        out.push_str(&format!(" \\\n  -H '{name}: {value}'"));
+    }
+
+    if let Some(bytes) = req.body().and_then(reqwest::Body::as_bytes) {
+        if !bytes.is_empty() {
+            out.push_str(&format!(" \\\n  -d '{}'", pretty_json(bytes)));
+        }
+    }
+
+    out
+}
+
+/// Renders a response status line plus its body (pretty-printed when the body is
+/// JSON, raw otherwise) for the debug logger.
+fn render_response(status: reqwest::StatusCode, body: &str) -> String {
+    format!("[RustCore] ← {status}\n{}", pretty_json(body.as_bytes()))
+}
+
+/// Pretty-prints `bytes` as JSON; on any parse/serialize failure falls back to
+/// the lossy UTF-8 of the raw bytes. Never panics.
+fn pretty_json(bytes: &[u8]) -> String {
+    serde_json::from_slice::<serde_json::Value>(bytes)
+        .ok()
+        .and_then(|v| serde_json::to_string_pretty(&v).ok())
+        .unwrap_or_else(|| String::from_utf8_lossy(bytes).into_owned())
 }
 
 /// Detects an App Store Connect "pending agreements" 403 from a non-2xx
@@ -4972,6 +5256,7 @@ fn map_error_response(status: u16, body: &str) -> StackError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
     use wiremock::matchers::{method, path, query_param};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -4980,6 +5265,31 @@ mod tests {
     fn client(base_url: String) -> AppStoreClient {
         let auth = AppStoreAuthenticator::new("issuer".into(), "kid".into(), PRIVATE_P8.to_vec());
         AppStoreClient::with_base_url(auth, base_url)
+    }
+
+    /// A [`DebugLogger`] that captures every emitted message so a test can assert
+    /// on what the client logged.
+    #[derive(Default)]
+    struct CapturingLogger {
+        messages: Mutex<Vec<String>>,
+    }
+
+    impl CapturingLogger {
+        fn messages(&self) -> Vec<String> {
+            self.messages.lock().unwrap().clone()
+        }
+    }
+
+    impl DebugLogger for CapturingLogger {
+        fn log(&self, message: String) {
+            self.messages.lock().unwrap().push(message);
+        }
+    }
+
+    /// Builds a client pointed at `base_url` with `logger` attached as its debug
+    /// sink.
+    fn client_with_logger(base_url: String, logger: Arc<dyn DebugLogger>) -> AppStoreClient {
+        client(base_url).with_debug_logger(Some(logger))
     }
 
     #[tokio::test]
@@ -8030,6 +8340,276 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn fetch_accessibility_declarations_maps_and_paginates() {
+        let server = MockServer::start().await;
+        let next = format!(
+            "{}/v1/apps/app-1/accessibilityDeclarations?cursor=PAGE2",
+            server.uri()
+        );
+
+        // Page 1: a fully-populated declaration with all nine flags true (note the
+        // `supportsDifferentiateWithoutColorAlone` wire key), plus a `state` and
+        // the `links.next` cursor. The first request hits the app-relationship
+        // endpoint and carries the limit.
+        Mock::given(method("GET"))
+            .and(path("/v1/apps/app-1/accessibilityDeclarations"))
+            .and(query_param("limit", "20"))
+            .and(wiremock::matchers::query_param_is_missing("cursor"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": [{
+                    "type": "accessibilityDeclarations",
+                    "id": "decl-1",
+                    "attributes": {
+                        "deviceFamily": "IPHONE",
+                        "state": "PUBLISHED",
+                        "supportsAudioDescriptions": true,
+                        "supportsCaptions": true,
+                        "supportsDarkInterface": true,
+                        "supportsDifferentiateWithoutColorAlone": true,
+                        "supportsLargerText": true,
+                        "supportsReducedMotion": true,
+                        "supportsSufficientContrast": true,
+                        "supportsVoiceControl": true,
+                        "supportsVoiceover": true
+                    }
+                }],
+                "links": { "next": next }
+            })))
+            .mount(&server)
+            .await;
+
+        // Page 2: a sparse declaration (only the device family present) and no
+        // further page, exercising the all-flags-absent default path.
+        Mock::given(method("GET"))
+            .and(path("/v1/apps/app-1/accessibilityDeclarations"))
+            .and(query_param("cursor", "PAGE2"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": [{
+                    "type": "accessibilityDeclarations",
+                    "id": "decl-2",
+                    "attributes": {
+                        "deviceFamily": "IPAD"
+                    }
+                }],
+                "links": {}
+            })))
+            .mount(&server)
+            .await;
+
+        let declarations = client(server.uri())
+            .fetch_accessibility_declarations("app-1", 20)
+            .await
+            .unwrap();
+        assert_eq!(declarations.len(), 2);
+
+        let first = &declarations[0];
+        assert_eq!(first.id, "decl-1");
+        assert_eq!(first.device_family, "IPHONE");
+        assert_eq!(first.state.as_deref(), Some("PUBLISHED"));
+        assert!(first.supports_audio_descriptions);
+        assert!(first.supports_captions);
+        assert!(first.supports_dark_interface);
+        // The `...Alone` wire key maps onto the suffix-less host field.
+        assert!(first.supports_differentiate_without_color);
+        assert!(first.supports_larger_text);
+        assert!(first.supports_reduced_motion);
+        assert!(first.supports_sufficient_contrast);
+        assert!(first.supports_voice_control);
+        assert!(first.supports_voiceover);
+
+        let second = &declarations[1];
+        assert_eq!(second.id, "decl-2");
+        assert_eq!(second.device_family, "IPAD");
+        assert!(second.state.is_none());
+        // Every missing bool defaults to false.
+        assert!(!second.supports_audio_descriptions);
+        assert!(!second.supports_captions);
+        assert!(!second.supports_dark_interface);
+        assert!(!second.supports_differentiate_without_color);
+        assert!(!second.supports_larger_text);
+        assert!(!second.supports_reduced_motion);
+        assert!(!second.supports_sufficient_contrast);
+        assert!(!second.supports_voice_control);
+        assert!(!second.supports_voiceover);
+    }
+
+    #[tokio::test]
+    async fn create_accessibility_declaration_posts_and_maps() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/v1/accessibilityDeclarations"))
+            // Assert the request carries the `deviceFamily` attribute and wires the
+            // app relationship, without over-constraining the rest of the envelope.
+            .and(wiremock::matchers::body_partial_json(serde_json::json!({
+                "data": {
+                    "type": "accessibilityDeclarations",
+                    "attributes": { "deviceFamily": "IPHONE" },
+                    "relationships": {
+                        "app": { "data": { "type": "apps", "id": "app-1" } }
+                    }
+                }
+            })))
+            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
+                "data": {
+                    "type": "accessibilityDeclarations",
+                    "id": "decl-1",
+                    "attributes": {
+                        "deviceFamily": "IPHONE",
+                        "state": "DRAFT"
+                    }
+                }
+            })))
+            .mount(&server)
+            .await;
+
+        let declaration = client(server.uri())
+            .create_accessibility_declaration("app-1", "IPHONE")
+            .await
+            .unwrap();
+
+        assert_eq!(declaration.id, "decl-1");
+        assert_eq!(declaration.device_family, "IPHONE");
+        assert_eq!(declaration.state.as_deref(), Some("DRAFT"));
+        assert!(!declaration.supports_voiceover);
+    }
+
+    #[tokio::test]
+    async fn update_accessibility_declaration_with_publish_patches_and_maps() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("PATCH"))
+            .and(path("/v1/accessibilityDeclarations/decl-1"))
+            // With publish=true the body must carry `publish: true` plus all nine
+            // supports flags, including the `...Alone` wire key.
+            .and(wiremock::matchers::body_partial_json(serde_json::json!({
+                "data": {
+                    "type": "accessibilityDeclarations",
+                    "id": "decl-1",
+                    "attributes": {
+                        "publish": true,
+                        "supportsAudioDescriptions": true,
+                        "supportsCaptions": true,
+                        "supportsDarkInterface": true,
+                        "supportsDifferentiateWithoutColorAlone": true,
+                        "supportsLargerText": true,
+                        "supportsReducedMotion": true,
+                        "supportsSufficientContrast": true,
+                        "supportsVoiceControl": true,
+                        "supportsVoiceover": true
+                    }
+                }
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": {
+                    "type": "accessibilityDeclarations",
+                    "id": "decl-1",
+                    "attributes": {
+                        "deviceFamily": "IPHONE",
+                        "state": "PUBLISHED",
+                        "supportsVoiceover": true
+                    }
+                }
+            })))
+            .mount(&server)
+            .await;
+
+        let declaration = client(server.uri())
+            .update_accessibility_declaration(
+                "decl-1", true, true, true, true, true, true, true, true, true, true,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(declaration.id, "decl-1");
+        assert_eq!(declaration.state.as_deref(), Some("PUBLISHED"));
+        assert!(declaration.supports_voiceover);
+    }
+
+    #[tokio::test]
+    async fn update_accessibility_declaration_without_publish_omits_publish_key() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("PATCH"))
+            .and(path("/v1/accessibilityDeclarations/decl-1"))
+            // The supports flags are still all present even when not publishing.
+            .and(wiremock::matchers::body_partial_json(serde_json::json!({
+                "data": {
+                    "attributes": {
+                        "supportsAudioDescriptions": false,
+                        "supportsVoiceover": false
+                    }
+                }
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": {
+                    "type": "accessibilityDeclarations",
+                    "id": "decl-1",
+                    "attributes": { "deviceFamily": "IPHONE", "state": "DRAFT" }
+                }
+            })))
+            .mount(&server)
+            .await;
+
+        let declaration = client(server.uri())
+            .update_accessibility_declaration(
+                "decl-1", false, false, false, false, false, false, false, false, false, false,
+            )
+            .await
+            .unwrap();
+        assert_eq!(declaration.state.as_deref(), Some("DRAFT"));
+
+        // Inspect the recorded request body to assert the `publish` key is absent
+        // entirely (a partial-json matcher cannot assert absence).
+        let requests = server.received_requests().await.unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&requests[0].body).unwrap();
+        let attributes = &body["data"]["attributes"];
+        assert!(
+            attributes.get("publish").is_none(),
+            "publish key must be omitted when publish is false, got: {attributes}"
+        );
+    }
+
+    #[tokio::test]
+    async fn delete_accessibility_declaration_succeeds_on_204() {
+        let server = MockServer::start().await;
+        Mock::given(method("DELETE"))
+            .and(path("/v1/accessibilityDeclarations/decl-1"))
+            .respond_with(ResponseTemplate::new(204))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        client(server.uri())
+            .delete_accessibility_declaration("decl-1")
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn create_accessibility_declaration_surfaces_pending_agreements() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/accessibilityDeclarations"))
+            .respond_with(ResponseTemplate::new(403).set_body_json(serde_json::json!({
+                "errors": [{ "detail": "The agreement is pending." }]
+            })))
+            .mount(&server)
+            .await;
+
+        let err = client(server.uri())
+            .create_accessibility_declaration("app-1", "IPHONE")
+            .await
+            .unwrap_err();
+        match err {
+            StackError::PendingAgreements { message } => {
+                assert!(message.contains("pending agreements"))
+            }
+            other => panic!("expected PendingAgreements, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
     async fn fetch_app_info_localizations_maps_and_paginates() {
         let server = MockServer::start().await;
         let next = format!(
@@ -9521,5 +10101,340 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(err, StackError::Http { status: 404, .. }));
+    }
+
+    // -----------------------------------------------------------------------
+    // Users & user invitations
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn fetch_team_members_maps_basic_fields() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v1/users"))
+            .and(query_param(
+                "fields[users]",
+                "firstName,lastName,username,roles",
+            ))
+            .and(query_param("limit", "200"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": [{
+                    "type": "users",
+                    "id": "user-1",
+                    "attributes": {
+                        "firstName": "Ada",
+                        "lastName": "Lovelace",
+                        "username": "ada@example.com",
+                        "roles": ["ADMIN", "DEVELOPER"]
+                    }
+                }],
+                "links": {}
+            })))
+            .mount(&server)
+            .await;
+
+        let members = client(server.uri()).fetch_team_members().await.unwrap();
+        assert_eq!(
+            members,
+            vec![TeamMemberInfo {
+                id: "user-1".into(),
+                first_name: Some("Ada".into()),
+                last_name: Some("Lovelace".into()),
+                username: Some("ada@example.com".into()),
+                roles: vec!["ADMIN".into(), "DEVELOPER".into()],
+            }]
+        );
+    }
+
+    #[tokio::test]
+    async fn fetch_team_members_surfaces_pending_agreements() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v1/users"))
+            .respond_with(ResponseTemplate::new(403).set_body_string("You have pending agreements"))
+            .mount(&server)
+            .await;
+
+        let err = client(server.uri()).fetch_team_members().await.unwrap_err();
+        assert!(matches!(err, StackError::PendingAgreements { .. }));
+    }
+
+    #[tokio::test]
+    async fn fetch_users_merges_active_and_pending() {
+        let server = MockServer::start().await;
+
+        // Active members: email comes from `username`, is_pending = false.
+        Mock::given(method("GET"))
+            .and(path("/v1/users"))
+            .and(query_param(
+                "fields[users]",
+                "firstName,lastName,username,roles,allAppsVisible,provisioningAllowed",
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": [{
+                    "type": "users",
+                    "id": "user-1",
+                    "attributes": {
+                        "firstName": "Ada",
+                        "lastName": "Lovelace",
+                        "username": "ada@example.com",
+                        "roles": ["ADMIN"],
+                        "allAppsVisible": true,
+                        "provisioningAllowed": false
+                    }
+                }],
+                "links": {}
+            })))
+            .mount(&server)
+            .await;
+
+        // Pending invitations: email + expirationDate from the invitation,
+        // is_pending = true.
+        Mock::given(method("GET"))
+            .and(path("/v1/userInvitations"))
+            .and(query_param(
+                "fields[userInvitations]",
+                "firstName,lastName,email,roles,allAppsVisible,provisioningAllowed,expirationDate",
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": [{
+                    "type": "userInvitations",
+                    "id": "invite-1",
+                    "attributes": {
+                        "firstName": "Grace",
+                        "lastName": "Hopper",
+                        "email": "grace@example.com",
+                        "roles": ["DEVELOPER"],
+                        "allAppsVisible": false,
+                        "provisioningAllowed": true,
+                        "expirationDate": "2026-07-01T00:00:00Z"
+                    }
+                }],
+                "links": {}
+            })))
+            .mount(&server)
+            .await;
+
+        let users = client(server.uri()).fetch_users().await.unwrap();
+        assert_eq!(users.len(), 2);
+        // Active first, then pending.
+        assert_eq!(
+            users[0],
+            UserInfo {
+                id: "user-1".into(),
+                first_name: Some("Ada".into()),
+                last_name: Some("Lovelace".into()),
+                email: Some("ada@example.com".into()),
+                roles: vec!["ADMIN".into()],
+                all_apps_visible: true,
+                provisioning_allowed: false,
+                is_pending: false,
+                expiration_date: None,
+            }
+        );
+        assert_eq!(
+            users[1],
+            UserInfo {
+                id: "invite-1".into(),
+                first_name: Some("Grace".into()),
+                last_name: Some("Hopper".into()),
+                email: Some("grace@example.com".into()),
+                roles: vec!["DEVELOPER".into()],
+                all_apps_visible: false,
+                provisioning_allowed: true,
+                is_pending: true,
+                expiration_date: Some("2026-07-01T00:00:00Z".into()),
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn invite_user_posts_expected_body() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/userInvitations"))
+            .and(wiremock::matchers::body_partial_json(serde_json::json!({
+                "data": {
+                    "type": "userInvitations",
+                    "attributes": {
+                        "email": "new@example.com",
+                        "firstName": "New",
+                        "lastName": "User",
+                        "roles": ["APP_MANAGER", "DEVELOPER"],
+                        "allAppsVisible": true,
+                        "provisioningAllowed": false
+                    }
+                }
+            })))
+            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
+                "data": { "type": "userInvitations", "id": "invite-9", "attributes": {} }
+            })))
+            .mount(&server)
+            .await;
+
+        let roles = vec!["APP_MANAGER".to_string(), "DEVELOPER".to_string()];
+        assert!(client(server.uri())
+            .invite_user("new@example.com", "New", "User", &roles, true, false)
+            .await
+            .is_ok());
+    }
+
+    #[tokio::test]
+    async fn delete_user_active_hits_users_endpoint() {
+        let server = MockServer::start().await;
+        Mock::given(method("DELETE"))
+            .and(path("/v1/users/user-1"))
+            .respond_with(ResponseTemplate::new(204))
+            .mount(&server)
+            .await;
+
+        assert!(client(server.uri())
+            .delete_user("user-1", false)
+            .await
+            .is_ok());
+    }
+
+    #[tokio::test]
+    async fn delete_user_pending_hits_user_invitations_endpoint() {
+        let server = MockServer::start().await;
+        Mock::given(method("DELETE"))
+            .and(path("/v1/userInvitations/invite-1"))
+            .respond_with(ResponseTemplate::new(204))
+            .mount(&server)
+            .await;
+
+        assert!(client(server.uri())
+            .delete_user("invite-1", true)
+            .await
+            .is_ok());
+    }
+
+    #[tokio::test]
+    async fn delete_user_surfaces_http_error() {
+        let server = MockServer::start().await;
+        Mock::given(method("DELETE"))
+            .and(path("/v1/users/user-1"))
+            .respond_with(ResponseTemplate::new(404).set_body_string("not found"))
+            .mount(&server)
+            .await;
+
+        let err = client(server.uri())
+            .delete_user("user-1", false)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, StackError::Http { status: 404, .. }));
+    }
+
+    // -----------------------------------------------------------------------
+    // Debug logger (HTTP tracing)
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn debug_logger_traces_get_request_and_response() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v1/apps"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": [], "links": {}
+            })))
+            .mount(&server)
+            .await;
+
+        let logger = Arc::new(CapturingLogger::default());
+        let client = client_with_logger(server.uri(), logger.clone());
+        client.fetch_apps().await.unwrap();
+
+        let messages = logger.messages();
+        // One request line and one response line per HTTP call.
+        let request = messages
+            .iter()
+            .find(|m| m.starts_with("[RustCore] → request"))
+            .expect("a request trace line");
+        // Runnable cURL: method + full request URL.
+        assert!(request.contains("curl -X GET"));
+        assert!(request.contains(&format!("{}/v1/apps", server.uri())));
+        // The Authorization bearer header is included verbatim (opt-in debug sink).
+        assert!(request.contains("authorization: Bearer "));
+        // A GET has no body → no `-d` line.
+        assert!(!request.contains("-d '"));
+
+        let response = messages
+            .iter()
+            .find(|m| m.starts_with("[RustCore] ← "))
+            .expect("a response trace line");
+        assert!(response.contains("200"));
+    }
+
+    #[tokio::test]
+    async fn debug_logger_traces_post_body_as_pretty_json() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/customerReviewResponses"))
+            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
+                "data": {
+                    "type": "customerReviewResponses",
+                    "id": "resp-1",
+                    "attributes": { "responseBody": "Thanks!", "state": "PUBLISHED" }
+                }
+            })))
+            .mount(&server)
+            .await;
+
+        let logger = Arc::new(CapturingLogger::default());
+        let client = client_with_logger(server.uri(), logger.clone());
+        client.reply_to_review("rev-1", "Thanks!").await.unwrap();
+
+        let messages = logger.messages();
+        let request = messages
+            .iter()
+            .find(|m| m.starts_with("[RustCore] → request"))
+            .expect("a request trace line");
+        assert!(request.contains("curl -X POST"));
+        assert!(request.contains(&format!("{}/v1/customerReviewResponses", server.uri())));
+        // The JSON body is rendered with a `-d` line and pretty-printed (the
+        // pretty form spans multiple indented lines and quotes the attribute).
+        assert!(request.contains("-d '"));
+        assert!(request.contains("\"responseBody\": \"Thanks!\""));
+
+        let response = messages
+            .iter()
+            .find(|m| m.starts_with("[RustCore] ← "))
+            .expect("a response trace line");
+        assert!(response.contains("201"));
+        // The response body is pretty-printed JSON as well.
+        assert!(response.contains("\"id\": \"resp-1\""));
+    }
+
+    #[tokio::test]
+    async fn no_logger_by_default_works_without_tracing() {
+        // The default `new(auth)` path (no logger) must behave exactly as before:
+        // the call succeeds and nothing is logged (there is nowhere to log to).
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v1/apps"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": [{
+                    "type": "apps",
+                    "id": "111",
+                    "attributes": { "name": "Foo", "bundleId": "com.foo" }
+                }],
+                "links": {}
+            })))
+            .mount(&server)
+            .await;
+
+        // `client(..)` uses `with_base_url`, whose `debug_logger` defaults to None.
+        let apps = client(server.uri()).fetch_apps().await.unwrap();
+        assert_eq!(apps.len(), 1);
+    }
+
+    #[test]
+    fn pretty_json_falls_back_to_raw_for_non_json() {
+        // Non-JSON bytes must not panic and must round-trip as lossy UTF-8.
+        assert_eq!(pretty_json(b"not json"), "not json");
+        // Valid JSON is re-rendered in pretty (multi-line) form.
+        let pretty = pretty_json(br#"{"a":1}"#);
+        assert!(pretty.contains("\"a\": 1"));
+        assert!(pretty.contains('\n'));
     }
 }

@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use crate::error::StackError;
-use crate::ports::CredentialStore;
+use crate::ports::{CredentialStore, DebugLogger};
 use crate::providers::appstore;
 use crate::service::kind::{CredentialField, ServiceKind};
 use crate::service::provider::ProviderImpl;
@@ -25,6 +25,7 @@ pub(crate) fn build(
     kind: ServiceKind,
     account_id: &str,
     store: &Arc<dyn CredentialStore>,
+    debug_logger: Option<Arc<dyn DebugLogger>>,
 ) -> Result<Box<dyn ProviderImpl>, StackError> {
     match kind {
         ServiceKind::AppStoreConnect => {
@@ -35,6 +36,7 @@ pub(crate) fn build(
                 issuer_id,
                 key_id,
                 private_key_p8.into_bytes(),
+                debug_logger,
             )))
         }
     }
@@ -101,7 +103,7 @@ mod tests {
         let store: Arc<dyn CredentialStore> = recording.clone();
 
         // Avoid `unwrap_err`: the Ok type `Box<dyn ProviderImpl>` is not `Debug`.
-        let result = build(ServiceKind::AppStoreConnect, "acct-1", &store);
+        let result = build(ServiceKind::AppStoreConnect, "acct-1", &store, None);
         assert!(matches!(result, Err(StackError::InvalidCredentials { .. })));
 
         let calls = recording.calls.lock().unwrap();

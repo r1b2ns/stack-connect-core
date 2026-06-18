@@ -50,7 +50,7 @@ fn connect_errors_and_queries_store_in_order() {
     let recording = Arc::new(EmptyStore::new());
     let store: Arc<dyn CredentialStore> = recording.clone();
 
-    let result = connect(ServiceKind::AppStoreConnect, "acct-1".into(), store);
+    let result = connect(ServiceKind::AppStoreConnect, "acct-1".into(), store, None);
     assert!(matches!(result, Err(StackError::InvalidCredentials { .. })));
 
     let calls = recording.calls.lock().unwrap();

@@ -201,6 +201,33 @@ pub struct BetaAppLocalizationInfo {
     pub description: Option<String>,
 }
 
+/// An App Store Connect accessibility declaration for a single device family of
+/// an app. `device_family` is the ASC device-family value (e.g. `IPHONE`,
+/// `IPAD`, `MAC`); `state` is the publication state (`DRAFT`, `PUBLISHED`,
+/// `REPLACED`) when present. The nine `supports_*` flags declare which
+/// accessibility features the app supports for that device family.
+///
+/// Note: the App Store Connect wire attribute for
+/// [`Self::supports_differentiate_without_color`] is
+/// `supportsDifferentiateWithoutColorAlone` (with an `Alone` suffix); the field
+/// is named without the suffix here for the host's benefit.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, uniffi::Record)]
+#[serde(rename_all = "camelCase")]
+pub struct AccessibilityDeclarationInfo {
+    pub id: String,
+    pub device_family: String,
+    pub state: Option<String>,
+    pub supports_audio_descriptions: bool,
+    pub supports_captions: bool,
+    pub supports_dark_interface: bool,
+    pub supports_differentiate_without_color: bool,
+    pub supports_larger_text: bool,
+    pub supports_reduced_motion: bool,
+    pub supports_sufficient_contrast: bool,
+    pub supports_voice_control: bool,
+    pub supports_voiceover: bool,
+}
+
 /// The TestFlight "Test Information" beta review detail for an app: the beta
 /// review contact (name, email, phone), optional demo account credentials, and
 /// reviewer notes. App Store Connect exposes exactly one per app (the singular
@@ -384,4 +411,44 @@ pub struct BetaTesterInfo {
     pub email: Option<String>,
     pub invite_type: Option<String>,
     pub state: Option<String>,
+}
+
+/// A team member of the connected App Store Connect account: the lightweight
+/// projection of a `users` resource carrying only `first_name`/`last_name`, the
+/// `username` (App Store Connect stores the member's login email here), and the
+/// raw ASC `roles` strings (e.g. `"ADMIN"`, `"DEVELOPER"`, `"APP_MANAGER"`),
+/// passed through verbatim without remapping. `first_name`/`last_name`/
+/// `username` are optional; `roles` is empty when absent.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, uniffi::Record)]
+#[serde(rename_all = "camelCase")]
+pub struct TeamMemberInfo {
+    pub id: String,
+    pub first_name: Option<String>,
+    pub last_name: Option<String>,
+    pub username: Option<String>,
+    pub roles: Vec<String>,
+}
+
+/// A user of the connected App Store Connect account, unifying two ASC
+/// resources: active members (`users`) and outstanding invitations
+/// (`userInvitations`). `is_pending` discriminates the source — `false` for an
+/// active member, `true` for a pending invitation. For active members `email`
+/// is taken from the `username` attribute (App Store Connect stores the login
+/// email there) and `expiration_date` is always `None`; for pending invitations
+/// `email` is the invitation's own `email` and `expiration_date` is the raw
+/// ISO8601 expiry (host owns parsing). `roles` carries the raw ASC role strings
+/// verbatim; `all_apps_visible` and `provisioning_allowed` default to `false`
+/// when the attribute is absent.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, uniffi::Record)]
+#[serde(rename_all = "camelCase")]
+pub struct UserInfo {
+    pub id: String,
+    pub first_name: Option<String>,
+    pub last_name: Option<String>,
+    pub email: Option<String>,
+    pub roles: Vec<String>,
+    pub all_apps_visible: bool,
+    pub provisioning_allowed: bool,
+    pub is_pending: bool,
+    pub expiration_date: Option<String>,
 }

@@ -29,3 +29,15 @@ pub trait BlobStore: Send + Sync {
     /// Removes the blob for `(type_name, id)`.
     fn delete(&self, type_name: String, id: String);
 }
+
+/// Optional debug sink for HTTP tracing. When the host injects one (via
+/// `connect`), the App Store Connect client logs every request as a runnable
+/// cURL (headers + pretty-printed JSON body) and the response (status line +
+/// pretty-printed JSON). Off by default — the host only passes a logger when its
+/// debug launch flag is set. Implemented natively (the iOS app prints to the
+/// Xcode console) and injected across the FFI as a foreign trait.
+#[uniffi::export(with_foreign)]
+pub trait DebugLogger: Send + Sync {
+    /// Emits one already-formatted, possibly multi-line debug message.
+    fn log(&self, message: String);
+}

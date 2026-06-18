@@ -5,13 +5,18 @@ use async_trait::async_trait;
 use super::client::AppStoreClient;
 use crate::auth::es256::AppStoreAuthenticator;
 use crate::domain::{
-    AppCategoryInfo, AppInfo, AppInfoDetails, AppInfoLocalizationInfo, AppReviewDetailInfo,
-    AppStoreLocalizationInfo, AppStoreVersionInfo, BetaAppLocalizationInfo,
-    BetaAppReviewDetailInfo, BetaBuildLocalizationInfo, BetaGroupInfo, BetaTesterInfo,
-    BuildDetailInfo, BuildInfo, BuildsPage, CustomerReview, CustomerReviewsPage, PhasedReleaseInfo,
-    ReviewResponse, ReviewSubmission, ScreenshotSetInfo,
+    AccessibilityDeclarationInfo, AppCategoryInfo, AppInfo, AppInfoDetails,
+    AppInfoLocalizationInfo, AppReviewDetailInfo, AppStoreLocalizationInfo, AppStoreVersionInfo,
+    BetaAppLocalizationInfo, BetaAppReviewDetailInfo, BetaBuildLocalizationInfo, BetaGroupInfo,
+    BetaTesterInfo, BuildDetailInfo, BuildInfo, BuildsPage, CustomerReview, CustomerReviewsPage,
+    PhasedReleaseInfo, ReviewResponse, ReviewSubmission, ScreenshotSetInfo, TeamMemberInfo,
+    UserInfo,
 };
 use crate::error::StackError;
+use crate::ports::DebugLogger;
+use crate::service::capabilities::accessibility_declarations::{
+    AccessibilityDeclarations, AccessibilityDeclarationsImpl,
+};
 use crate::service::capabilities::app_metadata::{AppMetadata, AppMetadataImpl};
 use crate::service::capabilities::app_store_versions::{AppStoreVersions, AppStoreVersionsImpl};
 use crate::service::capabilities::beta_app_localizations::{
@@ -26,6 +31,7 @@ use crate::service::capabilities::beta_build_localizations::{
 use crate::service::capabilities::beta_groups::{BetaGroups, BetaGroupsImpl};
 use crate::service::capabilities::builds::{Builds, BuildsImpl};
 use crate::service::capabilities::reviews::{Reviews, ReviewsImpl};
+use crate::service::capabilities::users::{Users, UsersImpl};
 use crate::service::kind::ServiceKind;
 use crate::service::provider::{Capability, ProviderImpl};
 
@@ -39,11 +45,18 @@ pub(crate) struct AppStoreProvider {
 }
 
 impl AppStoreProvider {
-    /// Builds the provider from the three required credentials.
-    pub(crate) fn new(issuer_id: String, key_id: String, private_key_p8: Vec<u8>) -> Self {
+    /// Builds the provider from the three required credentials. When
+    /// `debug_logger` is `Some`, the underlying [`AppStoreClient`] logs every
+    /// HTTP request/response through it (see [`crate::ports::DebugLogger`]).
+    pub(crate) fn new(
+        issuer_id: String,
+        key_id: String,
+        private_key_p8: Vec<u8>,
+        debug_logger: Option<Arc<dyn DebugLogger>>,
+    ) -> Self {
         let auth = AppStoreAuthenticator::new(issuer_id, key_id, private_key_p8);
         Self {
-            client: Arc::new(AppStoreClient::new(auth)),
+            client: Arc::new(AppStoreClient::new(auth).with_debug_logger(debug_logger)),
         }
     }
 }
@@ -65,6 +78,8 @@ impl ProviderImpl for AppStoreProvider {
             Capability::BetaAppLocalizations,
             Capability::BetaAppReviewDetail,
             Capability::AppMetadata,
+            Capability::AccessibilityDeclarations,
+            Capability::Users,
         ]
     }
 
@@ -126,6 +141,20 @@ impl ProviderImpl for AppStoreProvider {
 
     fn app_metadata(&self) -> Option<Arc<AppMetadata>> {
         Some(AppMetadata::new(Box::new(AppStoreAppMetadata {
+            client: Arc::clone(&self.client),
+        })))
+    }
+
+    fn accessibility_declarations(&self) -> Option<Arc<AccessibilityDeclarations>> {
+        Some(AccessibilityDeclarations::new(Box::new(
+            AppStoreAccessibilityDeclarations {
+                client: Arc::clone(&self.client),
+            },
+        )))
+    }
+
+    fn users(&self) -> Option<Arc<Users>> {
+        Some(Users::new(Box::new(AppStoreUsers {
             client: Arc::clone(&self.client),
         })))
     }
@@ -830,6 +859,114 @@ impl AppMetadataImpl for AppStoreAppMetadata {
     }
 }
 
+/// App Store Connect implementation of the [`AccessibilityDeclarationsImpl`]
+/// capability contract. Holds a shared [`AppStoreClient`] so it reuses the
+/// provider's token cache.
+struct AppStoreAccessibilityDeclarations {
+    client: Arc<AppStoreClient>,
+}
+
+#[async_trait]
+impl AccessibilityDeclarationsImpl for AppStoreAccessibilityDeclarations {
+    async fn fetch_accessibility_declarations(
+        &self,
+        app_id: String,
+        limit: i64,
+    ) -> Result<Vec<AccessibilityDeclarationInfo>, StackError> {
+        self.client
+            .fetch_accessibility_declarations(&app_id, limit)
+            .await
+    }
+
+    async fn create_accessibility_declaration(
+        &self,
+        app_id: String,
+        device_family: String,
+    ) -> Result<AccessibilityDeclarationInfo, StackError> {
+        self.client
+            .create_accessibility_declaration(&app_id, &device_family)
+            .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn update_accessibility_declaration(
+        &self,
+        id: String,
+        publish: bool,
+        supports_audio_descriptions: bool,
+        supports_captions: bool,
+        supports_dark_interface: bool,
+        supports_differentiate_without_color: bool,
+        supports_larger_text: bool,
+        supports_reduced_motion: bool,
+        supports_sufficient_contrast: bool,
+        supports_voice_control: bool,
+        supports_voiceover: bool,
+    ) -> Result<AccessibilityDeclarationInfo, StackError> {
+        self.client
+            .update_accessibility_declaration(
+                &id,
+                publish,
+                supports_audio_descriptions,
+                supports_captions,
+                supports_dark_interface,
+                supports_differentiate_without_color,
+                supports_larger_text,
+                supports_reduced_motion,
+                supports_sufficient_contrast,
+                supports_voice_control,
+                supports_voiceover,
+            )
+            .await
+    }
+
+    async fn delete_accessibility_declaration(&self, id: String) -> Result<(), StackError> {
+        self.client.delete_accessibility_declaration(&id).await
+    }
+}
+
+/// App Store Connect implementation of the [`UsersImpl`] capability contract.
+/// Holds a shared [`AppStoreClient`] so it reuses the provider's token cache.
+struct AppStoreUsers {
+    client: Arc<AppStoreClient>,
+}
+
+#[async_trait]
+impl UsersImpl for AppStoreUsers {
+    async fn fetch_team_members(&self) -> Result<Vec<TeamMemberInfo>, StackError> {
+        self.client.fetch_team_members().await
+    }
+
+    async fn fetch_users(&self) -> Result<Vec<UserInfo>, StackError> {
+        self.client.fetch_users().await
+    }
+
+    async fn invite_user(
+        &self,
+        email: String,
+        first_name: String,
+        last_name: String,
+        roles: Vec<String>,
+        all_apps_visible: bool,
+        provisioning_allowed: bool,
+    ) -> Result<(), StackError> {
+        self.client
+            .invite_user(
+                &email,
+                &first_name,
+                &last_name,
+                &roles,
+                all_apps_visible,
+                provisioning_allowed,
+            )
+            .await
+    }
+
+    async fn delete_user(&self, id: String, is_pending: bool) -> Result<(), StackError> {
+        self.client.delete_user(&id, is_pending).await
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -839,6 +976,7 @@ mod tests {
             "issuer".into(),
             "kid".into(),
             include_bytes!("../../../tests/fixtures/test_ec_private.p8").to_vec(),
+            None,
         )
     }
 
@@ -857,7 +995,9 @@ mod tests {
                 Capability::BetaBuildLocalizations,
                 Capability::BetaAppLocalizations,
                 Capability::BetaAppReviewDetail,
-                Capability::AppMetadata
+                Capability::AppMetadata,
+                Capability::AccessibilityDeclarations,
+                Capability::Users
             ]
         );
     }
@@ -932,5 +1072,22 @@ mod tests {
         // `Some`.
         assert!(provider().app_metadata().is_some());
         assert!(provider().capabilities().contains(&Capability::AppMetadata));
+    }
+
+    #[test]
+    fn exposes_accessibility_declarations_capability_handle() {
+        // App Store Connect supports Accessibility Declarations, so the accessor
+        // must return `Some`.
+        assert!(provider().accessibility_declarations().is_some());
+        assert!(provider()
+            .capabilities()
+            .contains(&Capability::AccessibilityDeclarations));
+    }
+
+    #[test]
+    fn exposes_users_capability_handle() {
+        // App Store Connect supports Users, so the accessor must return `Some`.
+        assert!(provider().users().is_some());
+        assert!(provider().capabilities().contains(&Capability::Users));
     }
 }
