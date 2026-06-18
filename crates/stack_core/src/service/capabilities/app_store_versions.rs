@@ -2,7 +2,9 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 
-use crate::domain::{AppStoreVersionInfo, PhasedReleaseInfo};
+use crate::domain::{
+    AppStoreLocalizationInfo, AppStoreVersionInfo, PhasedReleaseInfo, ScreenshotSetInfo,
+};
 use crate::error::StackError;
 
 /// Internal, non-exported contract for the App Store Versions capability. Kept off
@@ -94,6 +96,36 @@ pub(crate) trait AppStoreVersionsImpl: Send + Sync {
         id: String,
         state: String,
     ) -> Result<PhasedReleaseInfo, StackError>;
+
+    /// Lists the version localizations for `version_id`.
+    async fn fetch_localizations(
+        &self,
+        version_id: String,
+    ) -> Result<Vec<AppStoreLocalizationInfo>, StackError>;
+
+    /// Updates the version localization identified by `id`, sending only the
+    /// provided attributes.
+    // The six independent, optional attributes plus `id` are mirrored verbatim
+    // from the App Store Connect API; grouping them into a struct would add a
+    // UniFFI-exported type for no semantic gain.
+    #[allow(clippy::too_many_arguments)]
+    async fn update_localization(
+        &self,
+        id: String,
+        description: Option<String>,
+        keywords: Option<String>,
+        promotional_text: Option<String>,
+        support_url: Option<String>,
+        marketing_url: Option<String>,
+        whats_new: Option<String>,
+    ) -> Result<(), StackError>;
+
+    /// Lists the screenshot sets (with their screenshots) for the version
+    /// localization identified by `localization_id`.
+    async fn fetch_screenshot_sets(
+        &self,
+        localization_id: String,
+    ) -> Result<Vec<ScreenshotSetInfo>, StackError>;
 }
 
 /// UniFFI-exported App Store Versions capability handle. A thin, binding-friendly
@@ -301,5 +333,79 @@ impl AppStoreVersions {
         state: String,
     ) -> Result<PhasedReleaseInfo, StackError> {
         self.inner.update_phased_release_state(id, state).await
+    }
+
+    /// Lists the version localizations for `version_id`.
+    ///
+    /// Resolves the version's `appStoreVersionLocalizations` relationship,
+    /// following `links.next` pagination until exhausted. Each localization
+    /// carries the per-locale product-page metadata (`description`, `keywords`,
+    /// `promotional_text`, `support_url`, `marketing_url`, `whats_new`).
+    ///
+    /// # Errors
+    /// [`StackError::PendingAgreements`] on a pending-agreements 403,
+    /// [`StackError::Http`] on any other non-2xx page, [`StackError::Decode`] on
+    /// malformed JSON, or [`StackError::Network`] on transport failure.
+    pub async fn fetch_localizations(
+        &self,
+        version_id: String,
+    ) -> Result<Vec<AppStoreLocalizationInfo>, StackError> {
+        self.inner.fetch_localizations(version_id).await
+    }
+
+    /// Updates the version localization identified by `id`, sending only the
+    /// provided attributes.
+    ///
+    /// Only the `Some` attributes are sent in the PATCH body; `None` attributes
+    /// are omitted entirely (and so left untouched on App Store Connect). Any
+    /// 2xx is treated as success.
+    ///
+    /// # Errors
+    /// [`StackError::PendingAgreements`] on a pending-agreements 403,
+    /// [`StackError::Http`] on any other non-2xx response, or
+    /// [`StackError::Network`] on transport failure.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn update_localization(
+        &self,
+        id: String,
+        description: Option<String>,
+        keywords: Option<String>,
+        promotional_text: Option<String>,
+        support_url: Option<String>,
+        marketing_url: Option<String>,
+        whats_new: Option<String>,
+    ) -> Result<(), StackError> {
+        self.inner
+            .update_localization(
+                id,
+                description,
+                keywords,
+                promotional_text,
+                support_url,
+                marketing_url,
+                whats_new,
+            )
+            .await
+    }
+
+    /// Lists the screenshot sets (with their screenshots) for the version
+    /// localization identified by `localization_id`.
+    ///
+    /// Resolves the localization's `appScreenshotSets` relationship with the
+    /// `appScreenshots` resources included, following `links.next` pagination
+    /// until exhausted. Each set carries its `display_type` and its screenshots
+    /// (resolved from the JSON:API `included` section, preserving relationship
+    /// order). Each screenshot's `image_url` is computed from its `imageAsset`
+    /// template exactly as the build icon URL is.
+    ///
+    /// # Errors
+    /// [`StackError::PendingAgreements`] on a pending-agreements 403,
+    /// [`StackError::Http`] on any other non-2xx page, [`StackError::Decode`] on
+    /// malformed JSON, or [`StackError::Network`] on transport failure.
+    pub async fn fetch_screenshot_sets(
+        &self,
+        localization_id: String,
+    ) -> Result<Vec<ScreenshotSetInfo>, StackError> {
+        self.inner.fetch_screenshot_sets(localization_id).await
     }
 }

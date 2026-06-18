@@ -303,6 +303,56 @@ pub struct AppCategoryInfo {
     pub subcategory_ids: Vec<String>,
 }
 
+/// An App Store version localization, keyed by `locale`. Carries the per-locale
+/// version listing metadata shown on the product page: `description`, `keywords`,
+/// `promotional_text`, the `support_url`/`marketing_url` links, and the
+/// `whats_new` release notes. App Store Connect serializes the URL/notes
+/// attributes camelCase (`promotionalText`, `supportUrl`, `marketingUrl`,
+/// `whatsNew`), which `rename_all = "camelCase"` maps without any per-field
+/// rename. All attributes are optional and are `None` when absent.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, uniffi::Record)]
+#[serde(rename_all = "camelCase")]
+pub struct AppStoreLocalizationInfo {
+    pub id: String,
+    pub locale: Option<String>,
+    pub description: Option<String>,
+    pub keywords: Option<String>,
+    pub promotional_text: Option<String>,
+    pub support_url: Option<String>,
+    pub marketing_url: Option<String>,
+    pub whats_new: Option<String>,
+}
+
+/// A set of App Store screenshots for a single device display type within a
+/// version localization. `display_type` carries the raw ASC
+/// `screenshotDisplayType` value (e.g. `APP_IPHONE_67`) passed through verbatim,
+/// and `screenshots` lists the set's screenshots in the relationship order
+/// reported by App Store Connect.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, uniffi::Record)]
+#[serde(rename_all = "camelCase")]
+pub struct ScreenshotSetInfo {
+    pub id: String,
+    pub display_type: Option<String>,
+    pub screenshots: Vec<ScreenshotInfo>,
+}
+
+/// A single App Store screenshot. `image_url` is computed from the screenshot's
+/// `imageAsset` template (`{w}`/`{h}`/`{f}` substituted, defaulting to 512/512/png),
+/// exactly as the build icon URL is; it is `None` when no template URL is present.
+/// `width`/`height` come from the `imageAsset` dimensions, and `file_name` /
+/// `file_size` from the screenshot's own attributes. All optional fields are
+/// `None` when the corresponding attribute is absent.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, uniffi::Record)]
+#[serde(rename_all = "camelCase")]
+pub struct ScreenshotInfo {
+    pub id: String,
+    pub image_url: Option<String>,
+    pub file_name: Option<String>,
+    pub file_size: Option<i32>,
+    pub width: Option<i32>,
+    pub height: Option<i32>,
+}
+
 /// A TestFlight beta tester. `invite_type` and `state` are the raw ASC values
 /// passed through verbatim; the core does no remapping.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, uniffi::Record)]

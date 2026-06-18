@@ -6,10 +6,10 @@ use serde_json::json;
 use crate::auth::es256::AppStoreAuthenticator;
 use crate::domain::{
     AgeRatingDeclarationInfo, AppCategoryInfo, AppInfo, AppInfoDetails, AppInfoLocalizationInfo,
-    AppStoreVersionInfo, BetaAppLocalizationInfo, BetaAppReviewDetailInfo,
-    BetaBuildLocalizationInfo, BetaGroupInfo, BetaTesterInfo, BuildDetailInfo, BuildInfo,
-    BuildsPage, CustomerReview, CustomerReviewsPage, PhasedReleaseInfo, ReviewResponse,
-    ReviewSubmission,
+    AppStoreLocalizationInfo, AppStoreVersionInfo, BetaAppLocalizationInfo,
+    BetaAppReviewDetailInfo, BetaBuildLocalizationInfo, BetaGroupInfo, BetaTesterInfo,
+    BuildDetailInfo, BuildInfo, BuildsPage, CustomerReview, CustomerReviewsPage, PhasedReleaseInfo,
+    ReviewResponse, ReviewSubmission, ScreenshotInfo, ScreenshotSetInfo,
 };
 use crate::error::StackError;
 
@@ -1074,6 +1074,177 @@ impl AppInfoLocalizationResource {
             privacy_policy_url: self.attributes.privacy_policy_url.clone(),
             privacy_choices_url: self.attributes.privacy_choices_url.clone(),
             privacy_policy_text: self.attributes.privacy_policy_text.clone(),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// App Store version localizations (JSON:API)
+// ---------------------------------------------------------------------------
+
+/// A JSON:API document page of `appStoreVersionLocalizations` resources.
+#[derive(Deserialize)]
+struct AppStoreLocalizationsResponse {
+    #[serde(default)]
+    data: Vec<AppStoreLocalizationResource>,
+    #[serde(default)]
+    links: Links,
+}
+
+#[derive(Deserialize)]
+struct AppStoreLocalizationResource {
+    id: String,
+    #[serde(default)]
+    attributes: AppStoreLocalizationAttributes,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct AppStoreLocalizationAttributes {
+    #[serde(default)]
+    locale: Option<String>,
+    #[serde(default)]
+    description: Option<String>,
+    #[serde(default)]
+    keywords: Option<String>,
+    #[serde(default)]
+    promotional_text: Option<String>,
+    #[serde(default)]
+    support_url: Option<String>,
+    #[serde(default)]
+    marketing_url: Option<String>,
+    #[serde(default)]
+    whats_new: Option<String>,
+}
+
+impl AppStoreLocalizationResource {
+    fn into_app_store_localization_info(self) -> AppStoreLocalizationInfo {
+        AppStoreLocalizationInfo {
+            id: self.id,
+            locale: self.attributes.locale,
+            description: self.attributes.description,
+            keywords: self.attributes.keywords,
+            promotional_text: self.attributes.promotional_text,
+            support_url: self.attributes.support_url,
+            marketing_url: self.attributes.marketing_url,
+            whats_new: self.attributes.whats_new,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// App Store screenshots (JSON:API)
+// ---------------------------------------------------------------------------
+
+/// A JSON:API document page of `appScreenshotSets` resources, with the related
+/// `appScreenshots` carried in `included[]`.
+#[derive(Deserialize)]
+struct AppScreenshotSetsResponse {
+    #[serde(default)]
+    data: Vec<AppScreenshotSetResource>,
+    #[serde(default)]
+    included: Vec<AppScreenshotIncluded>,
+    #[serde(default)]
+    links: Links,
+}
+
+#[derive(Deserialize)]
+struct AppScreenshotSetResource {
+    id: String,
+    #[serde(default)]
+    attributes: AppScreenshotSetAttributes,
+    #[serde(default)]
+    relationships: AppScreenshotSetRelationships,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct AppScreenshotSetAttributes {
+    #[serde(default)]
+    screenshot_display_type: Option<String>,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct AppScreenshotSetRelationships {
+    #[serde(default)]
+    app_screenshots: ToManyRelationship,
+}
+
+#[derive(Deserialize)]
+struct AppScreenshotResource {
+    id: String,
+    #[serde(default)]
+    attributes: AppScreenshotAttributes,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct AppScreenshotAttributes {
+    #[serde(default)]
+    file_name: Option<String>,
+    #[serde(default)]
+    file_size: Option<i32>,
+    #[serde(default)]
+    image_asset: Option<ImageAsset>,
+}
+
+/// A screenshot's `imageAsset` template object. The image URL is computed by
+/// substituting `{w}`/`{h}`/`{f}` placeholders in `template_url`, reusing the
+/// same substitution rules as the build [`IconAssetToken`].
+#[derive(Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct ImageAsset {
+    #[serde(default)]
+    template_url: Option<String>,
+    #[serde(default)]
+    width: Option<i32>,
+    #[serde(default)]
+    height: Option<i32>,
+}
+
+impl ImageAsset {
+    /// Computes the concrete image URL by substituting the `{w}`, `{h}`, and
+    /// `{f}` placeholders in `template_url` (defaults: width/height `512`, format
+    /// `png`). Returns `None` when no template URL is present. Mirrors
+    /// [`IconAssetToken::to_icon_url`].
+    fn to_image_url(&self) -> Option<String> {
+        let template = self.template_url.as_deref()?;
+        let width = self.width.unwrap_or(512);
+        let height = self.height.unwrap_or(512);
+        Some(
+            template
+                .replace("{w}", &width.to_string())
+                .replace("{h}", &height.to_string())
+                .replace("{f}", "png"),
+        )
+    }
+}
+
+/// The heterogeneous `included[]` entries of an `appScreenshotSets` document.
+/// Only `appScreenshots` carry data we resolve; unknown types deserialize to
+/// [`AppScreenshotIncluded::Other`] and are ignored.
+#[derive(Deserialize)]
+#[serde(tag = "type")]
+enum AppScreenshotIncluded {
+    #[serde(rename = "appScreenshots")]
+    AppScreenshots(AppScreenshotResource),
+    #[serde(other)]
+    Other,
+}
+
+impl AppScreenshotResource {
+    /// Maps a screenshot resource into a [`ScreenshotInfo`], computing `image_url`
+    /// from its `imageAsset` template and pulling `width`/`height` from the same.
+    fn to_screenshot_info(&self) -> ScreenshotInfo {
+        let image_asset = self.attributes.image_asset.as_ref();
+        ScreenshotInfo {
+            id: self.id.clone(),
+            image_url: image_asset.and_then(ImageAsset::to_image_url),
+            file_name: self.attributes.file_name.clone(),
+            file_size: self.attributes.file_size,
+            width: image_asset.and_then(|asset| asset.width),
+            height: image_asset.and_then(|asset| asset.height),
         }
     }
 }
@@ -3870,6 +4041,168 @@ impl AppStoreClient {
         }
 
         Ok(())
+    }
+
+    /// Lists the App Store version localizations for `version_id`, mapping each
+    /// into an [`AppStoreLocalizationInfo`].
+    ///
+    /// `GET /v1/appStoreVersions/{version_id}/appStoreVersionLocalizations` — the
+    /// version's relationship list endpoint — following `links.next` pagination
+    /// until exhausted.
+    ///
+    /// # Errors
+    /// [`StackError::PendingAgreements`] on a pending-agreements 403,
+    /// [`StackError::Http`] on any other non-2xx page, [`StackError::Decode`] on
+    /// malformed JSON, or [`StackError::Network`] on transport failure.
+    pub(crate) async fn fetch_localizations(
+        &self,
+        version_id: &str,
+    ) -> Result<Vec<AppStoreLocalizationInfo>, StackError> {
+        let mut localizations = Vec::new();
+        let mut next_url = Some(format!(
+            "{}/v1/appStoreVersions/{version_id}/appStoreVersionLocalizations",
+            self.base_url
+        ));
+
+        while let Some(url) = next_url {
+            let body = self.get_page(&url).await?;
+            let page: AppStoreLocalizationsResponse = serde_json::from_str(&body).map_err(|e| {
+                StackError::decode(format!("app store version localizations response: {e}"))
+            })?;
+            localizations.extend(
+                page.data
+                    .into_iter()
+                    .map(AppStoreLocalizationResource::into_app_store_localization_info),
+            );
+
+            // `links.next` is an absolute URL; follow it verbatim until absent.
+            next_url = page.links.next.filter(|u| !u.is_empty());
+        }
+
+        Ok(localizations)
+    }
+
+    /// Updates the App Store version localization identified by `id`, sending
+    /// only the provided attributes.
+    ///
+    /// `PATCH /v1/appStoreVersionLocalizations/{id}` with a JSON:API body that
+    /// includes only the `Some` attributes
+    /// (`description`/`keywords`/`promotionalText`/`supportUrl`/`marketingUrl`/`whatsNew`)
+    /// and no relationships. Any 2xx is treated as success.
+    ///
+    /// # Errors
+    /// [`StackError::PendingAgreements`] on a pending-agreements 403,
+    /// [`StackError::Http`] on any other non-2xx response, or
+    /// [`StackError::Network`] on transport failure.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn update_localization(
+        &self,
+        id: &str,
+        description: Option<&str>,
+        keywords: Option<&str>,
+        promotional_text: Option<&str>,
+        support_url: Option<&str>,
+        marketing_url: Option<&str>,
+        whats_new: Option<&str>,
+    ) -> Result<(), StackError> {
+        let url = format!("{}/v1/appStoreVersionLocalizations/{id}", self.base_url);
+        let token = self.auth.bearer_token().await?;
+
+        let mut attributes = serde_json::Map::new();
+        if let Some(value) = description {
+            attributes.insert("description".into(), json!(value));
+        }
+        if let Some(value) = keywords {
+            attributes.insert("keywords".into(), json!(value));
+        }
+        if let Some(value) = promotional_text {
+            attributes.insert("promotionalText".into(), json!(value));
+        }
+        if let Some(value) = support_url {
+            attributes.insert("supportUrl".into(), json!(value));
+        }
+        if let Some(value) = marketing_url {
+            attributes.insert("marketingUrl".into(), json!(value));
+        }
+        if let Some(value) = whats_new {
+            attributes.insert("whatsNew".into(), json!(value));
+        }
+
+        let request_body = json!({
+            "data": {
+                "type": "appStoreVersionLocalizations",
+                "id": id,
+                "attributes": attributes
+            }
+        });
+
+        self.patch_no_content(&url, &token, &request_body).await
+    }
+
+    /// Lists the screenshot sets (with their screenshots) for the version
+    /// localization identified by `localization_id`, mapping each into a
+    /// [`ScreenshotSetInfo`].
+    ///
+    /// `GET /v1/appStoreVersionLocalizations/{localization_id}/appScreenshotSets?include=appScreenshots`
+    /// — the localization's relationship list endpoint — following `links.next`
+    /// pagination until exhausted. Each set's screenshots are resolved from the
+    /// document's `included[]` (`appScreenshots`), preserving the relationship
+    /// order, and each screenshot's `image_url` is computed from its `imageAsset`
+    /// template exactly as the build icon URL is.
+    ///
+    /// # Errors
+    /// [`StackError::PendingAgreements`] on a pending-agreements 403,
+    /// [`StackError::Http`] on any other non-2xx page, [`StackError::Decode`] on
+    /// malformed JSON, or [`StackError::Network`] on transport failure.
+    pub(crate) async fn fetch_screenshot_sets(
+        &self,
+        localization_id: &str,
+    ) -> Result<Vec<ScreenshotSetInfo>, StackError> {
+        let mut sets = Vec::new();
+        let mut next_url = Some(format!(
+            "{}/v1/appStoreVersionLocalizations/{localization_id}/appScreenshotSets?include=appScreenshots",
+            self.base_url
+        ));
+
+        while let Some(url) = next_url {
+            let body = self.get_page(&url).await?;
+            let page: AppScreenshotSetsResponse = serde_json::from_str(&body)
+                .map_err(|e| StackError::decode(format!("app screenshot sets response: {e}")))?;
+
+            // Index the included `appScreenshots` by id so each set can resolve
+            // its relationship ids in order.
+            let screenshots: HashMap<String, AppScreenshotResource> = page
+                .included
+                .into_iter()
+                .filter_map(|included| match included {
+                    AppScreenshotIncluded::AppScreenshots(resource) => {
+                        Some((resource.id.clone(), resource))
+                    }
+                    AppScreenshotIncluded::Other => None,
+                })
+                .collect();
+
+            for set in page.data {
+                let resolved = set
+                    .relationships
+                    .app_screenshots
+                    .data
+                    .iter()
+                    .filter_map(|rel| screenshots.get(&rel.id))
+                    .map(AppScreenshotResource::to_screenshot_info)
+                    .collect();
+                sets.push(ScreenshotSetInfo {
+                    id: set.id,
+                    display_type: set.attributes.screenshot_display_type,
+                    screenshots: resolved,
+                });
+            }
+
+            // `links.next` is an absolute URL; follow it verbatim until absent.
+            next_url = page.links.next.filter(|u| !u.is_empty());
+        }
+
+        Ok(sets)
     }
 
     /// Fetches the full App Info detail for `app_id` via two requests, merged
@@ -7796,6 +8129,373 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(err, StackError::Http { status: 404, .. }));
+    }
+
+    #[tokio::test]
+    async fn fetch_localizations_maps_and_paginates() {
+        let server = MockServer::start().await;
+        let next = format!(
+            "{}/v1/appStoreVersions/ver-1/appStoreVersionLocalizations?cursor=PAGE2",
+            server.uri()
+        );
+
+        // Page 1: a fully-populated localization, plus the `links.next` cursor.
+        // The first request hits the version-relationship endpoint.
+        Mock::given(method("GET"))
+            .and(path(
+                "/v1/appStoreVersions/ver-1/appStoreVersionLocalizations",
+            ))
+            .and(wiremock::matchers::query_param_is_missing("cursor"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": [{
+                    "type": "appStoreVersionLocalizations",
+                    "id": "vloc-1",
+                    "attributes": {
+                        "locale": "en-US",
+                        "description": "An amazing app.",
+                        "keywords": "amazing,app",
+                        "promotionalText": "Now even better!",
+                        "supportUrl": "https://example.com/support",
+                        "marketingUrl": "https://example.com/marketing",
+                        "whatsNew": "Bug fixes."
+                    }
+                }],
+                "links": { "next": next }
+            })))
+            .mount(&server)
+            .await;
+
+        // Page 2: a sparse localization (only the locale present) and no further
+        // page, exercising the all-attributes-absent path.
+        Mock::given(method("GET"))
+            .and(path(
+                "/v1/appStoreVersions/ver-1/appStoreVersionLocalizations",
+            ))
+            .and(query_param("cursor", "PAGE2"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": [{
+                    "type": "appStoreVersionLocalizations",
+                    "id": "vloc-2",
+                    "attributes": {
+                        "locale": "pt-BR"
+                    }
+                }],
+                "links": {}
+            })))
+            .mount(&server)
+            .await;
+
+        let localizations = client(server.uri())
+            .fetch_localizations("ver-1")
+            .await
+            .unwrap();
+        assert_eq!(localizations.len(), 2);
+
+        let first = &localizations[0];
+        assert_eq!(first.id, "vloc-1");
+        assert_eq!(first.locale.as_deref(), Some("en-US"));
+        assert_eq!(first.description.as_deref(), Some("An amazing app."));
+        assert_eq!(first.keywords.as_deref(), Some("amazing,app"));
+        assert_eq!(first.promotional_text.as_deref(), Some("Now even better!"));
+        assert_eq!(
+            first.support_url.as_deref(),
+            Some("https://example.com/support")
+        );
+        assert_eq!(
+            first.marketing_url.as_deref(),
+            Some("https://example.com/marketing")
+        );
+        assert_eq!(first.whats_new.as_deref(), Some("Bug fixes."));
+
+        let second = &localizations[1];
+        assert_eq!(second.id, "vloc-2");
+        assert_eq!(second.locale.as_deref(), Some("pt-BR"));
+        assert!(second.description.is_none());
+        assert!(second.keywords.is_none());
+        assert!(second.promotional_text.is_none());
+        assert!(second.support_url.is_none());
+        assert!(second.marketing_url.is_none());
+        assert!(second.whats_new.is_none());
+    }
+
+    #[tokio::test]
+    async fn fetch_localizations_surfaces_http_error() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path(
+                "/v1/appStoreVersions/ver-1/appStoreVersionLocalizations",
+            ))
+            .respond_with(ResponseTemplate::new(500).set_body_string("boom"))
+            .mount(&server)
+            .await;
+
+        let err = client(server.uri())
+            .fetch_localizations("ver-1")
+            .await
+            .unwrap_err();
+        assert!(matches!(err, StackError::Http { status: 500, .. }));
+    }
+
+    #[tokio::test]
+    async fn fetch_localizations_surfaces_pending_agreements() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path(
+                "/v1/appStoreVersions/ver-1/appStoreVersionLocalizations",
+            ))
+            .respond_with(ResponseTemplate::new(403).set_body_json(serde_json::json!({
+                "errors": [{ "detail": "The agreement is pending." }]
+            })))
+            .mount(&server)
+            .await;
+
+        let err = client(server.uri())
+            .fetch_localizations("ver-1")
+            .await
+            .unwrap_err();
+        match err {
+            StackError::PendingAgreements { message } => {
+                assert!(message.contains("pending agreements"))
+            }
+            other => panic!("expected PendingAgreements, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn update_localization_sends_only_provided_attributes() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("PATCH"))
+            .and(path("/v1/appStoreVersionLocalizations/vloc-1"))
+            // Only the provided attributes should be present; no relationships.
+            .and(wiremock::matchers::body_partial_json(serde_json::json!({
+                "data": {
+                    "type": "appStoreVersionLocalizations",
+                    "id": "vloc-1",
+                    "attributes": {
+                        "description": "Updated description.",
+                        "whatsNew": "New stuff."
+                    }
+                }
+            })))
+            // Reject any body that leaks an unset attribute: this asserts the
+            // update sends only the `Some` attributes.
+            .and(|req: &wiremock::Request| {
+                let value: serde_json::Value = match serde_json::from_slice(&req.body) {
+                    Ok(value) => value,
+                    Err(_) => return false,
+                };
+                value
+                    .get("data")
+                    .and_then(|d| d.get("attributes"))
+                    .and_then(|a| a.as_object())
+                    .map(|attrs| {
+                        !attrs.contains_key("keywords")
+                            && !attrs.contains_key("promotionalText")
+                            && !attrs.contains_key("supportUrl")
+                            && !attrs.contains_key("marketingUrl")
+                    })
+                    .unwrap_or(false)
+            })
+            .respond_with(ResponseTemplate::new(204))
+            .mount(&server)
+            .await;
+
+        client(server.uri())
+            .update_localization(
+                "vloc-1",
+                Some("Updated description."),
+                None,
+                None,
+                None,
+                None,
+                Some("New stuff."),
+            )
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn update_localization_surfaces_http_error() {
+        let server = MockServer::start().await;
+        Mock::given(method("PATCH"))
+            .and(path("/v1/appStoreVersionLocalizations/vloc-1"))
+            .respond_with(ResponseTemplate::new(409).set_body_string("conflict"))
+            .mount(&server)
+            .await;
+
+        let err = client(server.uri())
+            .update_localization("vloc-1", Some("x"), None, None, None, None, None)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, StackError::Http { status: 409, .. }));
+    }
+
+    #[tokio::test]
+    async fn fetch_screenshot_sets_maps_sets_and_screenshots_from_included() {
+        let server = MockServer::start().await;
+
+        // A single page: one set with two screenshots resolved from `included[]`.
+        // The first request must carry the `appScreenshots` include.
+        Mock::given(method("GET"))
+            .and(path(
+                "/v1/appStoreVersionLocalizations/vloc-1/appScreenshotSets",
+            ))
+            .and(query_param("include", "appScreenshots"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": [{
+                    "type": "appScreenshotSets",
+                    "id": "set-1",
+                    "attributes": {
+                        "screenshotDisplayType": "APP_IPHONE_67"
+                    },
+                    "relationships": {
+                        "appScreenshots": {
+                            "data": [
+                                { "type": "appScreenshots", "id": "shot-1" },
+                                { "type": "appScreenshots", "id": "shot-2" }
+                            ]
+                        }
+                    }
+                }],
+                "included": [
+                    {
+                        "type": "appScreenshots",
+                        "id": "shot-1",
+                        "attributes": {
+                            "fileName": "screen1.png",
+                            "fileSize": 204800,
+                            "imageAsset": {
+                                "templateUrl": "https://cdn.example.com/shot/{w}x{h}.{f}",
+                                "width": 1290,
+                                "height": 2796
+                            }
+                        }
+                    },
+                    {
+                        "type": "appScreenshots",
+                        "id": "shot-2",
+                        "attributes": {
+                            "fileName": "screen2.png"
+                        }
+                    }
+                ],
+                "links": {}
+            })))
+            .mount(&server)
+            .await;
+
+        let sets = client(server.uri())
+            .fetch_screenshot_sets("vloc-1")
+            .await
+            .unwrap();
+        assert_eq!(sets.len(), 1);
+
+        let set = &sets[0];
+        assert_eq!(set.id, "set-1");
+        assert_eq!(set.display_type.as_deref(), Some("APP_IPHONE_67"));
+        // Screenshots resolved in relationship order.
+        assert_eq!(set.screenshots.len(), 2);
+
+        let first = &set.screenshots[0];
+        assert_eq!(first.id, "shot-1");
+        assert_eq!(first.file_name.as_deref(), Some("screen1.png"));
+        assert_eq!(first.file_size, Some(204800));
+        assert_eq!(first.width, Some(1290));
+        assert_eq!(first.height, Some(2796));
+        assert_eq!(
+            first.image_url.as_deref(),
+            Some("https://cdn.example.com/shot/1290x2796.png")
+        );
+
+        // A sparse screenshot (no image asset) → computed url absent.
+        let second = &set.screenshots[1];
+        assert_eq!(second.id, "shot-2");
+        assert_eq!(second.file_name.as_deref(), Some("screen2.png"));
+        assert!(second.file_size.is_none());
+        assert!(second.width.is_none());
+        assert!(second.height.is_none());
+        assert!(second.image_url.is_none());
+    }
+
+    #[tokio::test]
+    async fn fetch_screenshot_sets_paginates() {
+        let server = MockServer::start().await;
+        let next = format!(
+            "{}/v1/appStoreVersionLocalizations/vloc-1/appScreenshotSets?cursor=PAGE2",
+            server.uri()
+        );
+
+        Mock::given(method("GET"))
+            .and(path(
+                "/v1/appStoreVersionLocalizations/vloc-1/appScreenshotSets",
+            ))
+            .and(wiremock::matchers::query_param_is_missing("cursor"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": [{
+                    "type": "appScreenshotSets",
+                    "id": "set-1",
+                    "attributes": { "screenshotDisplayType": "APP_IPHONE_67" },
+                    "relationships": { "appScreenshots": { "data": [] } }
+                }],
+                "links": { "next": next }
+            })))
+            .mount(&server)
+            .await;
+
+        // Page 2: a set with no display type and no screenshots; no further page.
+        Mock::given(method("GET"))
+            .and(path(
+                "/v1/appStoreVersionLocalizations/vloc-1/appScreenshotSets",
+            ))
+            .and(query_param("cursor", "PAGE2"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": [{
+                    "type": "appScreenshotSets",
+                    "id": "set-2",
+                    "attributes": {},
+                    "relationships": {}
+                }],
+                "links": {}
+            })))
+            .mount(&server)
+            .await;
+
+        let sets = client(server.uri())
+            .fetch_screenshot_sets("vloc-1")
+            .await
+            .unwrap();
+        assert_eq!(sets.len(), 2);
+        assert_eq!(sets[0].id, "set-1");
+        assert!(sets[0].screenshots.is_empty());
+        assert_eq!(sets[1].id, "set-2");
+        assert!(sets[1].display_type.is_none());
+        assert!(sets[1].screenshots.is_empty());
+    }
+
+    #[tokio::test]
+    async fn fetch_screenshot_sets_surfaces_pending_agreements() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path(
+                "/v1/appStoreVersionLocalizations/vloc-1/appScreenshotSets",
+            ))
+            .respond_with(ResponseTemplate::new(403).set_body_json(serde_json::json!({
+                "errors": [{ "detail": "The agreement is pending." }]
+            })))
+            .mount(&server)
+            .await;
+
+        let err = client(server.uri())
+            .fetch_screenshot_sets("vloc-1")
+            .await
+            .unwrap_err();
+        match err {
+            StackError::PendingAgreements { message } => {
+                assert!(message.contains("pending agreements"))
+            }
+            other => panic!("expected PendingAgreements, got {other:?}"),
+        }
     }
 
     #[tokio::test]

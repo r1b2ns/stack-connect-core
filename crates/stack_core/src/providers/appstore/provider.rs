@@ -5,10 +5,11 @@ use async_trait::async_trait;
 use super::client::AppStoreClient;
 use crate::auth::es256::AppStoreAuthenticator;
 use crate::domain::{
-    AppCategoryInfo, AppInfo, AppInfoDetails, AppInfoLocalizationInfo, AppStoreVersionInfo,
-    BetaAppLocalizationInfo, BetaAppReviewDetailInfo, BetaBuildLocalizationInfo, BetaGroupInfo,
-    BetaTesterInfo, BuildDetailInfo, BuildInfo, BuildsPage, CustomerReview, CustomerReviewsPage,
-    PhasedReleaseInfo, ReviewResponse, ReviewSubmission,
+    AppCategoryInfo, AppInfo, AppInfoDetails, AppInfoLocalizationInfo, AppStoreLocalizationInfo,
+    AppStoreVersionInfo, BetaAppLocalizationInfo, BetaAppReviewDetailInfo,
+    BetaBuildLocalizationInfo, BetaGroupInfo, BetaTesterInfo, BuildDetailInfo, BuildInfo,
+    BuildsPage, CustomerReview, CustomerReviewsPage, PhasedReleaseInfo, ReviewResponse,
+    ReviewSubmission, ScreenshotSetInfo,
 };
 use crate::error::StackError;
 use crate::service::capabilities::app_metadata::{AppMetadata, AppMetadataImpl};
@@ -283,6 +284,44 @@ impl AppStoreVersionsImpl for AppStoreAppStoreVersions {
         state: String,
     ) -> Result<PhasedReleaseInfo, StackError> {
         self.client.update_phased_release_state(&id, &state).await
+    }
+
+    async fn fetch_localizations(
+        &self,
+        version_id: String,
+    ) -> Result<Vec<AppStoreLocalizationInfo>, StackError> {
+        self.client.fetch_localizations(&version_id).await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn update_localization(
+        &self,
+        id: String,
+        description: Option<String>,
+        keywords: Option<String>,
+        promotional_text: Option<String>,
+        support_url: Option<String>,
+        marketing_url: Option<String>,
+        whats_new: Option<String>,
+    ) -> Result<(), StackError> {
+        self.client
+            .update_localization(
+                &id,
+                description.as_deref(),
+                keywords.as_deref(),
+                promotional_text.as_deref(),
+                support_url.as_deref(),
+                marketing_url.as_deref(),
+                whats_new.as_deref(),
+            )
+            .await
+    }
+
+    async fn fetch_screenshot_sets(
+        &self,
+        localization_id: String,
+    ) -> Result<Vec<ScreenshotSetInfo>, StackError> {
+        self.client.fetch_screenshot_sets(&localization_id).await
     }
 }
 

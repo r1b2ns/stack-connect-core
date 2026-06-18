@@ -17,9 +17,9 @@ mod providers;
 mod service;
 
 pub use domain::{
-    AppInfo, AppStoreVersionInfo, BetaGroupInfo, BetaTesterInfo, BuildDetailInfo, BuildInfo,
-    BuildsPage, CustomerReview, CustomerReviewsPage, PhasedReleaseInfo, ReviewResponse,
-    ReviewSubmission,
+    AppInfo, AppStoreLocalizationInfo, AppStoreVersionInfo, BetaGroupInfo, BetaTesterInfo,
+    BuildDetailInfo, BuildInfo, BuildsPage, CustomerReview, CustomerReviewsPage, PhasedReleaseInfo,
+    ReviewResponse, ReviewSubmission, ScreenshotInfo, ScreenshotSetInfo,
 };
 pub use error::StackError;
 pub use facade::{available_services, connect, credential_schema, make_sync_service};
