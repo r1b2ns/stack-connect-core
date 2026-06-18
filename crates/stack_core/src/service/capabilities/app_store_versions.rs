@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 
-use crate::domain::AppStoreVersionInfo;
+use crate::domain::{AppStoreVersionInfo, PhasedReleaseInfo};
 use crate::error::StackError;
 
 /// Internal, non-exported contract for the App Store Versions capability. Kept off
@@ -16,7 +16,8 @@ use crate::error::StackError;
 /// Covers both reads (list versions) and writes (create, update, delete a
 /// version), plus the version lifecycle writes (submit for review, cancel an
 /// in-flight review, manually release an approved version, and reject a
-/// submission) — see RUST_CORE_PLAN.md Phase 2.
+/// submission) and the phased-release writes (fetch, create, delete, and update
+/// the staged rollout state of a version) — see RUST_CORE_PLAN.md Phase 2.
 #[async_trait]
 pub(crate) trait AppStoreVersionsImpl: Send + Sync {
     /// Lists the App Store versions for `app_id`, up to `limit`.
@@ -67,6 +68,32 @@ pub(crate) trait AppStoreVersionsImpl: Send + Sync {
 
     /// Rejects the most recent submission for `app_id`, if any.
     async fn reject_version(&self, app_id: String) -> Result<(), StackError>;
+
+    /// Fetches the phased release for `version_id`, or `None` when there is no
+    /// phased release.
+    async fn fetch_phased_release(
+        &self,
+        version_id: String,
+    ) -> Result<Option<PhasedReleaseInfo>, StackError>;
+
+    /// Creates a phased release for `version_id` with the initial `state`,
+    /// returning the created phased release.
+    async fn create_phased_release(
+        &self,
+        version_id: String,
+        state: String,
+    ) -> Result<PhasedReleaseInfo, StackError>;
+
+    /// Deletes the phased release identified by `id`.
+    async fn delete_phased_release(&self, id: String) -> Result<(), StackError>;
+
+    /// Updates the `state` of the phased release identified by `id`, returning
+    /// the updated phased release.
+    async fn update_phased_release_state(
+        &self,
+        id: String,
+        state: String,
+    ) -> Result<PhasedReleaseInfo, StackError>;
 }
 
 /// UniFFI-exported App Store Versions capability handle. A thin, binding-friendly
@@ -214,5 +241,65 @@ impl AppStoreVersions {
     /// on malformed JSON, or [`StackError::Network`] on transport failure.
     pub async fn reject_version(&self, app_id: String) -> Result<(), StackError> {
         self.inner.reject_version(app_id).await
+    }
+
+    /// Fetches the phased (staged) release for `version_id`.
+    ///
+    /// Resolves the singular `appStoreVersionPhasedRelease` relationship of the
+    /// version. Returns `Ok(None)` when no phased release exists (the document's
+    /// `data` is null/absent, or the relationship endpoint answers 404).
+    ///
+    /// # Errors
+    /// [`StackError::PendingAgreements`] on a pending-agreements 403,
+    /// [`StackError::Http`] on any other non-2xx response, [`StackError::Decode`]
+    /// on malformed JSON, or [`StackError::Network`] on transport failure.
+    pub async fn fetch_phased_release(
+        &self,
+        version_id: String,
+    ) -> Result<Option<PhasedReleaseInfo>, StackError> {
+        self.inner.fetch_phased_release(version_id).await
+    }
+
+    /// Creates a phased (staged) release for `version_id` with the initial
+    /// `state`, returning the created phased release. `state` is the raw ASC
+    /// `phasedReleaseState` value (`INACTIVE` / `ACTIVE` / `PAUSED` /
+    /// `COMPLETE`).
+    ///
+    /// # Errors
+    /// [`StackError::PendingAgreements`] on a pending-agreements 403,
+    /// [`StackError::Http`] on any other non-2xx response, [`StackError::Decode`]
+    /// on malformed JSON, or [`StackError::Network`] on transport failure.
+    pub async fn create_phased_release(
+        &self,
+        version_id: String,
+        state: String,
+    ) -> Result<PhasedReleaseInfo, StackError> {
+        self.inner.create_phased_release(version_id, state).await
+    }
+
+    /// Deletes the phased release identified by `id`.
+    ///
+    /// # Errors
+    /// [`StackError::PendingAgreements`] on a pending-agreements 403,
+    /// [`StackError::Http`] on any other non-2xx response, or
+    /// [`StackError::Network`] on transport failure.
+    pub async fn delete_phased_release(&self, id: String) -> Result<(), StackError> {
+        self.inner.delete_phased_release(id).await
+    }
+
+    /// Updates the `state` of the phased release identified by `id`, returning
+    /// the updated phased release. `state` is the raw ASC `phasedReleaseState`
+    /// value (`INACTIVE` / `ACTIVE` / `PAUSED` / `COMPLETE`).
+    ///
+    /// # Errors
+    /// [`StackError::PendingAgreements`] on a pending-agreements 403,
+    /// [`StackError::Http`] on any other non-2xx response, [`StackError::Decode`]
+    /// on malformed JSON, or [`StackError::Network`] on transport failure.
+    pub async fn update_phased_release_state(
+        &self,
+        id: String,
+        state: String,
+    ) -> Result<PhasedReleaseInfo, StackError> {
+        self.inner.update_phased_release_state(id, state).await
     }
 }

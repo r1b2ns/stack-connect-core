@@ -8,7 +8,8 @@ use crate::domain::{
     AgeRatingDeclarationInfo, AppCategoryInfo, AppInfo, AppInfoDetails, AppInfoLocalizationInfo,
     AppStoreVersionInfo, BetaAppLocalizationInfo, BetaAppReviewDetailInfo,
     BetaBuildLocalizationInfo, BetaGroupInfo, BetaTesterInfo, BuildDetailInfo, BuildInfo,
-    BuildsPage, CustomerReview, CustomerReviewsPage, ReviewResponse, ReviewSubmission,
+    BuildsPage, CustomerReview, CustomerReviewsPage, PhasedReleaseInfo, ReviewResponse,
+    ReviewSubmission,
 };
 use crate::error::StackError;
 
@@ -386,6 +387,50 @@ impl AppStoreVersionResource {
             copyright: self.attributes.copyright,
             release_type: self.attributes.release_type,
             created_date: self.attributes.created_date,
+        }
+    }
+}
+
+/// A JSON:API single-resource document wrapping one
+/// `appStoreVersionPhasedReleases`. `data` may be `null`/absent when the version
+/// has no phased release (the singular relationship endpoint), so it is
+/// optional. The create/update endpoints always populate it.
+#[derive(Deserialize)]
+struct PhasedReleaseDocument {
+    #[serde(default)]
+    data: Option<PhasedReleaseResource>,
+}
+
+#[derive(Deserialize)]
+struct PhasedReleaseResource {
+    id: String,
+    #[serde(default)]
+    attributes: PhasedReleaseResourceAttributes,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct PhasedReleaseResourceAttributes {
+    // The ASC attribute is `phasedReleaseState`; it maps onto
+    // `PhasedReleaseInfo.state`.
+    #[serde(default)]
+    phased_release_state: Option<String>,
+    #[serde(default)]
+    start_date: Option<String>,
+    #[serde(default)]
+    total_pause_duration: Option<i32>,
+    #[serde(default)]
+    current_day_number: Option<i32>,
+}
+
+impl PhasedReleaseResource {
+    fn into_phased_release_info(self) -> PhasedReleaseInfo {
+        PhasedReleaseInfo {
+            id: self.id,
+            state: self.attributes.phased_release_state,
+            start_date: self.attributes.start_date,
+            total_pause_duration: self.attributes.total_pause_duration,
+            current_day_number: self.attributes.current_day_number,
         }
     }
 }
@@ -1981,6 +2026,198 @@ impl AppStoreClient {
             self.base_url
         );
         self.cancel_first_submission(&url).await
+    }
+
+    /// Fetches the phased (staged) release for `version_id`.
+    ///
+    /// `GET /v1/appStoreVersions/{version_id}/appStoreVersionPhasedRelease`
+    /// resolves the singular to-one relationship into a single-resource
+    /// document. The document's `data` may be `null`/absent when no phased
+    /// release exists → `Ok(None)`. A `404` likewise resolves to `Ok(None)`.
+    ///
+    /// # Errors
+    /// [`StackError::PendingAgreements`] on a pending-agreements 403,
+    /// [`StackError::Http`] on any other non-2xx response (other than 404),
+    /// [`StackError::Decode`] on malformed JSON, or [`StackError::Network`] on
+    /// transport failure.
+    pub(crate) async fn fetch_phased_release(
+        &self,
+        version_id: &str,
+    ) -> Result<Option<PhasedReleaseInfo>, StackError> {
+        let url = format!(
+            "{}/v1/appStoreVersions/{version_id}/appStoreVersionPhasedRelease",
+            self.base_url
+        );
+        let token = self.auth.bearer_token().await?;
+        let response = self
+            .http
+            .get(&url)
+            .bearer_auth(token)
+            .send()
+            .await
+            .map_err(|e| StackError::network(e.to_string()))?;
+
+        let status = response.status();
+        // No phased release on the version → ASC returns 404; treat as absent.
+        if status.as_u16() == 404 {
+            return Ok(None);
+        }
+        let body = response
+            .text()
+            .await
+            .map_err(|e| StackError::network(e.to_string()))?;
+        if !status.is_success() {
+            if let Some(err) = pending_agreements_error(status.as_u16(), &body) {
+                return Err(err);
+            }
+            return Err(StackError::Http {
+                status: status.as_u16(),
+                message: body,
+            });
+        }
+
+        let document: PhasedReleaseDocument = serde_json::from_str(&body)
+            .map_err(|e| StackError::decode(format!("phased release response: {e}")))?;
+        Ok(document
+            .data
+            .map(PhasedReleaseResource::into_phased_release_info))
+    }
+
+    /// Creates a phased (staged) release for `version_id` with the initial
+    /// `state`.
+    ///
+    /// `POST /v1/appStoreVersionPhasedReleases` with a JSON:API body carrying
+    /// the `phasedReleaseState` attribute and the `appStoreVersion` to-one
+    /// relationship. `state` is the raw ASC `phasedReleaseState` value
+    /// (`INACTIVE` / `ACTIVE` / `PAUSED` / `COMPLETE`). The created resource
+    /// (201) is mapped into a [`PhasedReleaseInfo`]. The call routes through the
+    /// shared pending-agreements 403 guard.
+    ///
+    /// # Errors
+    /// [`StackError::PendingAgreements`] on a pending-agreements 403,
+    /// [`StackError::Http`] on any other non-2xx response, [`StackError::Decode`]
+    /// on malformed JSON, or [`StackError::Network`] on transport failure.
+    pub(crate) async fn create_phased_release(
+        &self,
+        version_id: &str,
+        state: &str,
+    ) -> Result<PhasedReleaseInfo, StackError> {
+        let url = format!("{}/v1/appStoreVersionPhasedReleases", self.base_url);
+        let request_body = json!({
+            "data": {
+                "type": "appStoreVersionPhasedReleases",
+                "attributes": { "phasedReleaseState": state },
+                "relationships": {
+                    "appStoreVersion": {
+                        "data": { "type": "appStoreVersions", "id": version_id }
+                    }
+                }
+            }
+        });
+        let body = self.post_json_2xx(&url, &request_body).await?;
+        let document: PhasedReleaseDocument = serde_json::from_str(&body)
+            .map_err(|e| StackError::decode(format!("phased release response: {e}")))?;
+        document
+            .data
+            .map(PhasedReleaseResource::into_phased_release_info)
+            .ok_or_else(|| StackError::decode("phased release response: missing data"))
+    }
+
+    /// Deletes the phased release identified by `id`.
+    ///
+    /// `DELETE /v1/appStoreVersionPhasedReleases/{id}`. Any 2xx → `Ok(())`. The
+    /// call routes through the shared pending-agreements 403 guard.
+    ///
+    /// # Errors
+    /// [`StackError::PendingAgreements`] on a pending-agreements 403,
+    /// [`StackError::Http`] on any other non-2xx response, or
+    /// [`StackError::Network`] on transport failure.
+    pub(crate) async fn delete_phased_release(&self, id: &str) -> Result<(), StackError> {
+        let url = format!("{}/v1/appStoreVersionPhasedReleases/{id}", self.base_url);
+        let token = self.auth.bearer_token().await?;
+        let response = self
+            .http
+            .delete(&url)
+            .bearer_auth(token)
+            .send()
+            .await
+            .map_err(|e| StackError::network(e.to_string()))?;
+
+        let status = response.status();
+        if status.is_success() {
+            return Ok(());
+        }
+
+        let body = response
+            .text()
+            .await
+            .map_err(|e| StackError::network(e.to_string()))?;
+        if let Some(err) = pending_agreements_error(status.as_u16(), &body) {
+            return Err(err);
+        }
+        Err(StackError::Http {
+            status: status.as_u16(),
+            message: body,
+        })
+    }
+
+    /// Updates the `state` of the phased release identified by `id`.
+    ///
+    /// `PATCH /v1/appStoreVersionPhasedReleases/{id}` with a JSON:API body
+    /// setting the `phasedReleaseState` attribute. `state` is the raw ASC value
+    /// (`INACTIVE` / `ACTIVE` / `PAUSED` / `COMPLETE`). The updated resource
+    /// (200) is mapped into a [`PhasedReleaseInfo`]. Failures route through the
+    /// shared pending-agreements 403 guard.
+    ///
+    /// # Errors
+    /// [`StackError::PendingAgreements`] on a pending-agreements 403,
+    /// [`StackError::Http`] on any other non-2xx response, [`StackError::Decode`]
+    /// on malformed JSON, or [`StackError::Network`] on transport failure.
+    pub(crate) async fn update_phased_release_state(
+        &self,
+        id: &str,
+        state: &str,
+    ) -> Result<PhasedReleaseInfo, StackError> {
+        let url = format!("{}/v1/appStoreVersionPhasedReleases/{id}", self.base_url);
+        let token = self.auth.bearer_token().await?;
+        let request_body = json!({
+            "data": {
+                "type": "appStoreVersionPhasedReleases",
+                "id": id,
+                "attributes": { "phasedReleaseState": state }
+            }
+        });
+
+        let response = self
+            .http
+            .patch(&url)
+            .bearer_auth(token)
+            .json(&request_body)
+            .send()
+            .await
+            .map_err(|e| StackError::network(e.to_string()))?;
+
+        let status = response.status();
+        let body = response
+            .text()
+            .await
+            .map_err(|e| StackError::network(e.to_string()))?;
+        if !status.is_success() {
+            if let Some(err) = pending_agreements_error(status.as_u16(), &body) {
+                return Err(err);
+            }
+            return Err(StackError::Http {
+                status: status.as_u16(),
+                message: body,
+            });
+        }
+
+        let document: PhasedReleaseDocument = serde_json::from_str(&body)
+            .map_err(|e| StackError::decode(format!("phased release response: {e}")))?;
+        document
+            .data
+            .map(PhasedReleaseResource::into_phased_release_info)
+            .ok_or_else(|| StackError::decode("phased release response: missing data"))
     }
 
     /// Shared GET-then-conditional-PATCH used by both [`Self::cancel_review`] and
@@ -4973,6 +5210,197 @@ mod tests {
 
         let err = client(server.uri()).delete_version("V1").await.unwrap_err();
         assert!(matches!(err, StackError::Http { status: 403, .. }));
+    }
+
+    #[tokio::test]
+    async fn fetch_phased_release_maps_all_fields() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path(
+                "/v1/appStoreVersions/ver-1/appStoreVersionPhasedRelease",
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": {
+                    "type": "appStoreVersionPhasedReleases",
+                    "id": "phr-1",
+                    "attributes": {
+                        "phasedReleaseState": "ACTIVE",
+                        "startDate": "2026-03-01T12:00:00Z",
+                        "totalPauseDuration": 2,
+                        "currentDayNumber": 3
+                    }
+                }
+            })))
+            .mount(&server)
+            .await;
+
+        let release = client(server.uri())
+            .fetch_phased_release("ver-1")
+            .await
+            .unwrap()
+            .expect("expected a phased release");
+
+        assert_eq!(release.id, "phr-1");
+        // The ASC `phasedReleaseState` attribute maps onto the record's `state`.
+        assert_eq!(release.state.as_deref(), Some("ACTIVE"));
+        assert_eq!(release.start_date.as_deref(), Some("2026-03-01T12:00:00Z"));
+        assert_eq!(release.total_pause_duration, Some(2));
+        assert_eq!(release.current_day_number, Some(3));
+    }
+
+    #[tokio::test]
+    async fn fetch_phased_release_returns_none_when_data_null() {
+        let server = MockServer::start().await;
+
+        // ASC may return a document with a null `data` when no phased release
+        // is attached to the version.
+        Mock::given(method("GET"))
+            .and(path(
+                "/v1/appStoreVersions/ver-1/appStoreVersionPhasedRelease",
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": null
+            })))
+            .mount(&server)
+            .await;
+
+        let release = client(server.uri())
+            .fetch_phased_release("ver-1")
+            .await
+            .unwrap();
+        assert!(release.is_none());
+    }
+
+    #[tokio::test]
+    async fn fetch_phased_release_returns_none_on_404() {
+        let server = MockServer::start().await;
+
+        // A 404 (no phased-release relationship) resolves to `Ok(None)`.
+        Mock::given(method("GET"))
+            .and(path(
+                "/v1/appStoreVersions/ver-1/appStoreVersionPhasedRelease",
+            ))
+            .respond_with(ResponseTemplate::new(404).set_body_string("not found"))
+            .mount(&server)
+            .await;
+
+        let release = client(server.uri())
+            .fetch_phased_release("ver-1")
+            .await
+            .unwrap();
+        assert!(release.is_none());
+    }
+
+    #[tokio::test]
+    async fn create_phased_release_posts_and_maps() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/v1/appStoreVersionPhasedReleases"))
+            // Assert the request carries the phasedReleaseState attribute and the
+            // appStoreVersion relationship id.
+            .and(wiremock::matchers::body_partial_json(serde_json::json!({
+                "data": {
+                    "type": "appStoreVersionPhasedReleases",
+                    "attributes": { "phasedReleaseState": "ACTIVE" },
+                    "relationships": {
+                        "appStoreVersion": {
+                            "data": { "type": "appStoreVersions", "id": "ver-1" }
+                        }
+                    }
+                }
+            })))
+            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
+                "data": {
+                    "type": "appStoreVersionPhasedReleases",
+                    "id": "phr-new",
+                    "attributes": {
+                        "phasedReleaseState": "ACTIVE",
+                        "currentDayNumber": 1
+                    }
+                }
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let release = client(server.uri())
+            .create_phased_release("ver-1", "ACTIVE")
+            .await
+            .unwrap();
+
+        assert_eq!(release.id, "phr-new");
+        assert_eq!(release.state.as_deref(), Some("ACTIVE"));
+        assert_eq!(release.current_day_number, Some(1));
+    }
+
+    #[tokio::test]
+    async fn delete_phased_release_succeeds_on_204() {
+        let server = MockServer::start().await;
+        Mock::given(method("DELETE"))
+            .and(path("/v1/appStoreVersionPhasedReleases/phr-1"))
+            .respond_with(ResponseTemplate::new(204))
+            .mount(&server)
+            .await;
+
+        assert!(client(server.uri())
+            .delete_phased_release("phr-1")
+            .await
+            .is_ok());
+    }
+
+    #[tokio::test]
+    async fn update_phased_release_state_patches_state() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("PATCH"))
+            .and(path("/v1/appStoreVersionPhasedReleases/phr-1"))
+            // The phasedReleaseState attribute must be patched.
+            .and(wiremock::matchers::body_partial_json(serde_json::json!({
+                "data": {
+                    "type": "appStoreVersionPhasedReleases",
+                    "id": "phr-1",
+                    "attributes": { "phasedReleaseState": "PAUSED" }
+                }
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": {
+                    "type": "appStoreVersionPhasedReleases",
+                    "id": "phr-1",
+                    "attributes": { "phasedReleaseState": "PAUSED" }
+                }
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let release = client(server.uri())
+            .update_phased_release_state("phr-1", "PAUSED")
+            .await
+            .unwrap();
+
+        assert_eq!(release.id, "phr-1");
+        assert_eq!(release.state.as_deref(), Some("PAUSED"));
+    }
+
+    #[tokio::test]
+    async fn create_phased_release_surfaces_pending_agreements() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/appStoreVersionPhasedReleases"))
+            .respond_with(
+                ResponseTemplate::new(403)
+                    .set_body_string("There are pending agreements that must be accepted"),
+            )
+            .mount(&server)
+            .await;
+
+        let err = client(server.uri())
+            .create_phased_release("ver-1", "ACTIVE")
+            .await
+            .unwrap_err();
+        assert!(matches!(err, StackError::PendingAgreements { .. }));
     }
 
     #[tokio::test]

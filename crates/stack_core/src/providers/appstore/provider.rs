@@ -8,7 +8,7 @@ use crate::domain::{
     AppCategoryInfo, AppInfo, AppInfoDetails, AppInfoLocalizationInfo, AppStoreVersionInfo,
     BetaAppLocalizationInfo, BetaAppReviewDetailInfo, BetaBuildLocalizationInfo, BetaGroupInfo,
     BetaTesterInfo, BuildDetailInfo, BuildInfo, BuildsPage, CustomerReview, CustomerReviewsPage,
-    ReviewResponse, ReviewSubmission,
+    PhasedReleaseInfo, ReviewResponse, ReviewSubmission,
 };
 use crate::error::StackError;
 use crate::service::capabilities::app_metadata::{AppMetadata, AppMetadataImpl};
@@ -256,6 +256,33 @@ impl AppStoreVersionsImpl for AppStoreAppStoreVersions {
 
     async fn reject_version(&self, app_id: String) -> Result<(), StackError> {
         self.client.reject_version(&app_id).await
+    }
+
+    async fn fetch_phased_release(
+        &self,
+        version_id: String,
+    ) -> Result<Option<PhasedReleaseInfo>, StackError> {
+        self.client.fetch_phased_release(&version_id).await
+    }
+
+    async fn create_phased_release(
+        &self,
+        version_id: String,
+        state: String,
+    ) -> Result<PhasedReleaseInfo, StackError> {
+        self.client.create_phased_release(&version_id, &state).await
+    }
+
+    async fn delete_phased_release(&self, id: String) -> Result<(), StackError> {
+        self.client.delete_phased_release(&id).await
+    }
+
+    async fn update_phased_release_state(
+        &self,
+        id: String,
+        state: String,
+    ) -> Result<PhasedReleaseInfo, StackError> {
+        self.client.update_phased_release_state(&id, &state).await
     }
 }
 

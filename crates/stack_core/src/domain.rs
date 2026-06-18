@@ -76,6 +76,23 @@ pub struct AppStoreVersionInfo {
     pub created_date: Option<String>,
 }
 
+/// An App Store version's phased (staged) release. App Store Connect exposes
+/// exactly one per version via the singular `appStoreVersionPhasedRelease`
+/// relationship. `state` carries the raw ASC `phasedReleaseState` value
+/// (`INACTIVE` / `ACTIVE` / `PAUSED` / `COMPLETE`) — the record field is named
+/// `state` even though the attribute is `phasedReleaseState`. `start_date` is a
+/// raw ISO8601 string; the core does no date parsing (the host owns that). All
+/// optional fields are `None` when the corresponding attribute is absent.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, uniffi::Record)]
+#[serde(rename_all = "camelCase")]
+pub struct PhasedReleaseInfo {
+    pub id: String,
+    pub state: Option<String>,
+    pub start_date: Option<String>,
+    pub total_pause_duration: Option<i32>,
+    pub current_day_number: Option<i32>,
+}
+
 /// A build (TestFlight / App Store Connect) of an app. `version` is the build
 /// number (the ASC `version` attribute, distinct from a version string). Dates
 /// are raw ISO8601 strings; the core does no date parsing (the host owns that).
