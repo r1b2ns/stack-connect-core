@@ -15,6 +15,7 @@ use crate::service::capabilities::builds::Builds;
 use crate::service::capabilities::bundle_ids::BundleIds;
 use crate::service::capabilities::certificates::Certificates;
 use crate::service::capabilities::devices::Devices;
+use crate::service::capabilities::profiles::Profiles;
 use crate::service::capabilities::reviews::Reviews;
 use crate::service::capabilities::users::Users;
 use crate::service::kind::ServiceKind;
@@ -39,6 +40,7 @@ pub enum Capability {
     Devices,
     BundleIds,
     Certificates,
+    Profiles,
 }
 
 /// Internal, non-exported contract every concrete plugin implements. Kept off the
@@ -143,6 +145,12 @@ pub(crate) trait ProviderImpl: Send + Sync {
     /// [`Capability::Certificates`]. Default `None` so providers opt in
     /// explicitly.
     fn certificates(&self) -> Option<Arc<Certificates>> {
+        None
+    }
+
+    /// The Profiles capability handle, or `None` if this provider lacks
+    /// [`Capability::Profiles`]. Default `None` so providers opt in explicitly.
+    fn profiles(&self) -> Option<Arc<Profiles>> {
         None
     }
 }
@@ -276,6 +284,14 @@ impl Provider {
     /// management is unsupported.
     pub fn certificates(&self) -> Option<Arc<Certificates>> {
         self.inner.certificates()
+    }
+
+    /// The Profiles capability handle, or `None` when this provider does not
+    /// expose [`Capability::Profiles`]. This is the discovery mechanism: the host
+    /// calls `provider.profiles()` and gets `None` when provisioning profile
+    /// management is unsupported.
+    pub fn profiles(&self) -> Option<Arc<Profiles>> {
+        self.inner.profiles()
     }
 }
 

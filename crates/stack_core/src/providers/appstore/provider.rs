@@ -10,7 +10,8 @@ use crate::domain::{
     BetaAppLocalizationInfo, BetaAppReviewDetailInfo, BetaBuildLocalizationInfo, BetaGroupInfo,
     BetaTesterInfo, BuildDetailInfo, BuildInfo, BuildsPage, BundleIdCapabilityInfo, BundleIdInfo,
     CertificateInfo, CustomerReview, CustomerReviewsPage, DeviceInfo, PhasedReleaseInfo,
-    ReviewResponse, ReviewSubmission, ScreenshotSetInfo, TeamMemberInfo, UserInfo,
+    ProvisioningProfileInfo, ReviewResponse, ReviewSubmission, ScreenshotSetInfo, TeamMemberInfo,
+    UserInfo,
 };
 use crate::error::StackError;
 use crate::ports::DebugLogger;
@@ -33,6 +34,7 @@ use crate::service::capabilities::builds::{Builds, BuildsImpl};
 use crate::service::capabilities::bundle_ids::{BundleIds, BundleIdsImpl};
 use crate::service::capabilities::certificates::{Certificates, CertificatesImpl};
 use crate::service::capabilities::devices::{Devices, DevicesImpl};
+use crate::service::capabilities::profiles::{Profiles, ProfilesImpl};
 use crate::service::capabilities::reviews::{Reviews, ReviewsImpl};
 use crate::service::capabilities::users::{Users, UsersImpl};
 use crate::service::kind::ServiceKind;
@@ -86,6 +88,7 @@ impl ProviderImpl for AppStoreProvider {
             Capability::Devices,
             Capability::BundleIds,
             Capability::Certificates,
+            Capability::Profiles,
         ]
     }
 
@@ -179,6 +182,12 @@ impl ProviderImpl for AppStoreProvider {
 
     fn certificates(&self) -> Option<Arc<Certificates>> {
         Some(Certificates::new(Box::new(AppStoreCertificates {
+            client: Arc::clone(&self.client),
+        })))
+    }
+
+    fn profiles(&self) -> Option<Arc<Profiles>> {
+        Some(Profiles::new(Box::new(AppStoreProfiles {
             client: Arc::clone(&self.client),
         })))
     }
@@ -1116,6 +1125,46 @@ impl CertificatesImpl for AppStoreCertificates {
     }
 }
 
+/// App Store Connect implementation of the [`ProfilesImpl`] capability contract.
+/// Holds a shared [`AppStoreClient`] so it reuses the provider's token cache.
+struct AppStoreProfiles {
+    client: Arc<AppStoreClient>,
+}
+
+#[async_trait]
+impl ProfilesImpl for AppStoreProfiles {
+    async fn fetch_profiles(&self) -> Result<Vec<ProvisioningProfileInfo>, StackError> {
+        self.client.fetch_profiles().await
+    }
+
+    async fn create_profile(
+        &self,
+        name: String,
+        profile_type: String,
+        bundle_id_id: String,
+        certificate_ids: Vec<String>,
+        device_ids: Vec<String>,
+    ) -> Result<ProvisioningProfileInfo, StackError> {
+        self.client
+            .create_profile(
+                &name,
+                &profile_type,
+                &bundle_id_id,
+                &certificate_ids,
+                &device_ids,
+            )
+            .await
+    }
+
+    async fn delete_profile(&self, id: String) -> Result<(), StackError> {
+        self.client.delete_profile(&id).await
+    }
+
+    async fn fetch_profile_content(&self, id: String) -> Result<Option<String>, StackError> {
+        self.client.fetch_profile_content(&id).await
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1149,7 +1198,8 @@ mod tests {
                 Capability::Users,
                 Capability::Devices,
                 Capability::BundleIds,
-                Capability::Certificates
+                Capability::Certificates,
+                Capability::Profiles
             ]
         );
     }
@@ -1265,5 +1315,12 @@ mod tests {
         assert!(provider()
             .capabilities()
             .contains(&Capability::Certificates));
+    }
+
+    #[test]
+    fn exposes_profiles_capability_handle() {
+        // App Store Connect supports Profiles, so the accessor must return `Some`.
+        assert!(provider().profiles().is_some());
+        assert!(provider().capabilities().contains(&Capability::Profiles));
     }
 }

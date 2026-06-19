@@ -318,6 +318,47 @@ pub struct CertificateInfo {
     pub certificate_content: Option<String>,
 }
 
+/// A provisioning profile registered for the connected App Store Connect
+/// account, pairing a bundle ID with the certificates (and, for development
+/// profiles, the devices) it authorizes.
+///
+/// `name`, `profile_type`, and `profile_state` are non-optional with an
+/// empty-string fallback applied at the wire-mapping boundary when the attribute
+/// is absent; `platform`, `uuid`, `bundle_id`, `created_date`, and
+/// `expiration_date` are optional. `profile_type` is the raw ASC `profileType`
+/// value (e.g. `IOS_APP_DEVELOPMENT`, `IOS_APP_STORE`, `MAC_APP_STORE`),
+/// forwarded without remapping; `profile_state` is the raw `profileState` value
+/// (e.g. `ACTIVE`, `INVALID`).
+///
+/// `bundle_id` is the RESOLVED bundle identifier string (e.g. `com.acme.app`),
+/// looked up from the JSON:API `included[]` bundleIds by the profile's
+/// `bundleId` relationship id — not the relationship id itself. It is `None` when
+/// the profile carries no `bundleId` relationship, when the referenced bundle ID
+/// is absent from `included[]`, or on the create path (the host does not resolve
+/// it there).
+///
+/// `created_date` and `expiration_date` are raw ISO8601 strings passed through
+/// verbatim — the core does no date parsing. `profile_content` is the base64-
+/// encoded `.mobileprovision` payload: it is `None` for list results (the list
+/// omits it) and `Some` after a create or single-resource content fetch.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, uniffi::Record)]
+#[serde(rename_all = "camelCase")]
+pub struct ProvisioningProfileInfo {
+    pub id: String,
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub profile_type: String,
+    #[serde(default)]
+    pub profile_state: String,
+    pub platform: Option<String>,
+    pub uuid: Option<String>,
+    pub bundle_id: Option<String>,
+    pub created_date: Option<String>,
+    pub expiration_date: Option<String>,
+    pub profile_content: Option<String>,
+}
+
 /// The TestFlight "Test Information" beta review detail for an app: the beta
 /// review contact (name, email, phone), optional demo account credentials, and
 /// reviewer notes. App Store Connect exposes exactly one per app (the singular

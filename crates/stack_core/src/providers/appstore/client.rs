@@ -11,8 +11,8 @@ use crate::domain::{
     AppStoreVersionInfo, BetaAppLocalizationInfo, BetaAppReviewDetailInfo,
     BetaBuildLocalizationInfo, BetaGroupInfo, BetaTesterInfo, BuildDetailInfo, BuildInfo,
     BuildsPage, BundleIdCapabilityInfo, BundleIdInfo, CertificateInfo, CustomerReview,
-    CustomerReviewsPage, DeviceInfo, PhasedReleaseInfo, ReviewResponse, ReviewSubmission,
-    ScreenshotInfo, ScreenshotSetInfo, TeamMemberInfo, UserInfo,
+    CustomerReviewsPage, DeviceInfo, PhasedReleaseInfo, ProvisioningProfileInfo, ReviewResponse,
+    ReviewSubmission, ScreenshotInfo, ScreenshotSetInfo, TeamMemberInfo, UserInfo,
 };
 use crate::error::StackError;
 use crate::ports::DebugLogger;
@@ -2037,6 +2037,133 @@ impl CertificateResource {
             expiration_date: self.attributes.expiration_date,
             is_activated: self.attributes.activated,
             certificate_content: self.attributes.certificate_content,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Provisioning profiles (JSON:API)
+// ---------------------------------------------------------------------------
+
+/// A JSON:API document page of `profiles` resources, with the referenced
+/// `bundleIds` carried in `included[]` so each profile's bundle identifier can
+/// be resolved.
+#[derive(Deserialize)]
+struct ProfilesResponse {
+    #[serde(default)]
+    data: Vec<ProfileResource>,
+    #[serde(default)]
+    included: Vec<ProfileIncluded>,
+    #[serde(default)]
+    links: Links,
+}
+
+/// A JSON:API single-resource document of a `profiles` resource (create and
+/// single-content-fetch responses).
+#[derive(Deserialize)]
+struct ProfileDocument {
+    data: ProfileResource,
+}
+
+#[derive(Deserialize)]
+struct ProfileResource {
+    id: String,
+    #[serde(default)]
+    attributes: ProfileAttributes,
+    #[serde(default)]
+    relationships: ProfileRelationships,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct ProfileAttributes {
+    #[serde(default)]
+    name: Option<String>,
+    /// Read as a plain string: App Store Connect keeps adding `ProfileType`
+    /// values, so this is never an enum.
+    #[serde(default)]
+    profile_type: Option<String>,
+    #[serde(default)]
+    profile_state: Option<String>,
+    #[serde(default)]
+    platform: Option<String>,
+    #[serde(default)]
+    uuid: Option<String>,
+    /// Raw ISO8601 string passed through verbatim — the core does no date parsing.
+    #[serde(default)]
+    created_date: Option<String>,
+    /// Raw ISO8601 string passed through verbatim — the core does no date parsing.
+    #[serde(default)]
+    expiration_date: Option<String>,
+    /// Base64-encoded `.mobileprovision` payload. Absent on list pages, present
+    /// after a create or single-resource content fetch.
+    #[serde(default)]
+    profile_content: Option<String>,
+}
+
+/// The `profiles` relationships we resolve: only the to-one `bundleId`, used to
+/// look up the profile's bundle identifier in `included[]`.
+#[derive(Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct ProfileRelationships {
+    #[serde(default)]
+    bundle_id: ToOneRelationship,
+}
+
+/// The heterogeneous `included[]` entries of a profiles document, dispatched by
+/// their JSON:API `type`. Only `bundleIds` are resolved; unknown types
+/// deserialize to [`ProfileIncluded::Other`] and are ignored.
+#[derive(Deserialize)]
+#[serde(tag = "type")]
+enum ProfileIncluded {
+    #[serde(rename = "bundleIds")]
+    BundleIds {
+        id: String,
+        #[serde(default)]
+        attributes: ProfileBundleIdAttributes,
+    },
+    #[serde(other)]
+    Other,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct ProfileBundleIdAttributes {
+    #[serde(default)]
+    identifier: Option<String>,
+}
+
+impl ProfileResource {
+    /// Maps a `profiles` resource into [`ProvisioningProfileInfo`], applying the
+    /// empty-string fallbacks for the non-optional `name`/`profile_type`/
+    /// `profile_state` attributes. `bundle_id` is resolved from `included_bundle_ids`
+    /// (a map of `bundleIds` id → `identifier`) via the profile's `bundleId`
+    /// relationship; it is `None` when the relationship or the referenced bundle
+    /// ID is absent.
+    fn into_profile_info(
+        self,
+        included_bundle_ids: &HashMap<String, Option<String>>,
+    ) -> ProvisioningProfileInfo {
+        let bundle_id = self
+            .relationships
+            .bundle_id
+            .data
+            .as_ref()
+            .and_then(|rel| included_bundle_ids.get(&rel.id))
+            .cloned()
+            .flatten();
+
+        ProvisioningProfileInfo {
+            id: self.id,
+            name: self.attributes.name.unwrap_or_default(),
+            profile_type: self.attributes.profile_type.unwrap_or_default(),
+            profile_state: self.attributes.profile_state.unwrap_or_default(),
+            platform: self.attributes.platform,
+            uuid: self.attributes.uuid,
+            bundle_id,
+            created_date: self.attributes.created_date,
+            expiration_date: self.attributes.expiration_date,
+            profile_content: self.attributes.profile_content,
         }
     }
 }
@@ -5983,6 +6110,177 @@ impl AppStoreClient {
             status: status.as_u16(),
             message: body,
         })
+    }
+
+    /// Lists every provisioning profile of the connected account, sorted by
+    /// name.
+    ///
+    /// `GET /v1/profiles?sort=name&limit=200&include=bundleId`, following
+    /// `links.next` pagination until exhausted (`limit` is the page size, not a
+    /// cap on the total). Each page's `included[]` carries the referenced
+    /// `bundleIds`; a profile's `bundle_id` is resolved to the referenced bundle
+    /// ID's `identifier` (per-page — each page's `included[]` covers that page's
+    /// profiles). The list omits profile content, so every entry's
+    /// `profile_content` is `None`.
+    ///
+    /// # Errors
+    /// [`StackError::PendingAgreements`] on a pending-agreements 403,
+    /// [`StackError::Http`] on any other non-2xx page, [`StackError::Decode`] on
+    /// malformed JSON, or [`StackError::Network`] on transport failure.
+    pub(crate) async fn fetch_profiles(&self) -> Result<Vec<ProvisioningProfileInfo>, StackError> {
+        let mut profiles = Vec::new();
+        let mut next_url = Some(format!(
+            "{}/v1/profiles?sort=name&limit=200&include=bundleId",
+            self.base_url
+        ));
+
+        while let Some(url) = next_url {
+            let body = self.get_page(&url).await?;
+            let page: ProfilesResponse = serde_json::from_str(&body)
+                .map_err(|e| StackError::decode(format!("profiles response: {e}")))?;
+
+            // Index this page's included bundleIds by id → identifier, then map
+            // each profile resolving its bundle identifier via the relationship.
+            let bundle_ids: HashMap<String, Option<String>> = page
+                .included
+                .into_iter()
+                .filter_map(|inc| match inc {
+                    ProfileIncluded::BundleIds { id, attributes } => {
+                        Some((id, attributes.identifier))
+                    }
+                    ProfileIncluded::Other => None,
+                })
+                .collect();
+
+            profiles.extend(
+                page.data
+                    .into_iter()
+                    .map(|p| p.into_profile_info(&bundle_ids)),
+            );
+
+            // `links.next` is an absolute URL; follow it verbatim until absent.
+            next_url = page.links.next.filter(|u| !u.is_empty());
+        }
+
+        Ok(profiles)
+    }
+
+    /// Creates a provisioning profile from `name`, `profile_type`, the bundle ID
+    /// `bundle_id_id`, the signing `certificate_ids`, and the `device_ids`.
+    ///
+    /// `POST /v1/profiles` with a JSON:API body whose `attributes` carry
+    /// `name`/`profileType` (the raw `profileType` is forwarded verbatim) and
+    /// whose `relationships` always carry `bundleId` (to-one) and `certificates`
+    /// (to-many, even when empty). The `devices` relationship is attached only
+    /// when `device_ids` is non-empty; it is omitted entirely otherwise (App
+    /// Store Connect rejects an empty `devices` array for non-development
+    /// profiles). The response carries the created profile including its
+    /// `profileContent`. The created profile's `bundle_id` is left `None` (the
+    /// host does not resolve it on create).
+    ///
+    /// # Errors
+    /// [`StackError::PendingAgreements`] on a pending-agreements 403,
+    /// [`StackError::Http`] on any other non-2xx response, [`StackError::Decode`]
+    /// on malformed JSON, or [`StackError::Network`] on transport failure.
+    pub(crate) async fn create_profile(
+        &self,
+        name: &str,
+        profile_type: &str,
+        bundle_id_id: &str,
+        certificate_ids: &[String],
+        device_ids: &[String],
+    ) -> Result<ProvisioningProfileInfo, StackError> {
+        let url = format!("{}/v1/profiles", self.base_url);
+
+        let certificates: Vec<serde_json::Value> = certificate_ids
+            .iter()
+            .map(|id| json!({ "type": "certificates", "id": id }))
+            .collect();
+
+        let mut relationships = json!({
+            "bundleId": {
+                "data": { "type": "bundleIds", "id": bundle_id_id }
+            },
+            // certificates is ALWAYS sent, even when the list is empty.
+            "certificates": { "data": certificates }
+        });
+
+        // devices is OMITTED entirely when there are no device ids.
+        if !device_ids.is_empty() {
+            let devices: Vec<serde_json::Value> = device_ids
+                .iter()
+                .map(|id| json!({ "type": "devices", "id": id }))
+                .collect();
+            relationships["devices"] = json!({ "data": devices });
+        }
+
+        let request_body = json!({
+            "data": {
+                "type": "profiles",
+                "attributes": {
+                    "name": name,
+                    "profileType": profile_type,
+                },
+                "relationships": relationships
+            }
+        });
+
+        let response_body = self.post_json_2xx(&url, &request_body).await?;
+        let document: ProfileDocument = serde_json::from_str(&response_body)
+            .map_err(|e| StackError::decode(format!("profile response: {e}")))?;
+        // The create path does not resolve the bundle identifier; pass an empty
+        // index so `bundle_id` is `None`.
+        Ok(document.data.into_profile_info(&HashMap::new()))
+    }
+
+    /// Deletes the profile `id`.
+    ///
+    /// `DELETE /v1/profiles/{id}`. Any 2xx → `Ok(())`.
+    ///
+    /// # Errors
+    /// [`StackError::PendingAgreements`] on a pending-agreements 403,
+    /// [`StackError::Http`] on any other non-2xx response, or
+    /// [`StackError::Network`] on transport failure.
+    pub(crate) async fn delete_profile(&self, id: &str) -> Result<(), StackError> {
+        let url = format!("{}/v1/profiles/{id}", self.base_url);
+        let token = self.auth.bearer_token().await?;
+        let (status, body) = self
+            .send_and_read(self.http.delete(&url).bearer_auth(token))
+            .await?;
+        if status.is_success() {
+            return Ok(());
+        }
+        if let Some(err) = pending_agreements_error(status.as_u16(), &body) {
+            return Err(err);
+        }
+        Err(StackError::Http {
+            status: status.as_u16(),
+            message: body,
+        })
+    }
+
+    /// Fetches the base64 `profileContent` of the profile `id`.
+    ///
+    /// `GET /v1/profiles/{id}?fields[profiles]=profileContent,...`, requesting the
+    /// content field explicitly (the list omits it). Returns `None` when the
+    /// attribute is absent.
+    ///
+    /// # Errors
+    /// [`StackError::PendingAgreements`] on a pending-agreements 403,
+    /// [`StackError::Http`] on any other non-2xx response, [`StackError::Decode`]
+    /// on malformed JSON, or [`StackError::Network`] on transport failure.
+    pub(crate) async fn fetch_profile_content(
+        &self,
+        id: &str,
+    ) -> Result<Option<String>, StackError> {
+        let url = format!(
+            "{}/v1/profiles/{id}?fields[profiles]=profileContent,name,profileType,platform,profileState,uuid,createdDate,expirationDate",
+            self.base_url
+        );
+        let body = self.get_page(&url).await?;
+        let document: ProfileDocument = serde_json::from_str(&body)
+            .map_err(|e| StackError::decode(format!("profile response: {e}")))?;
+        Ok(document.data.attributes.profile_content)
     }
 
     async fn patch_no_content(
@@ -12482,5 +12780,389 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(err, StackError::Http { status: 404, .. }));
+    }
+
+    // -----------------------------------------------------------------------
+    // Provisioning profiles
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn fetch_profiles_maps_all_fields_resolves_bundle_id_and_paginates() {
+        let server = MockServer::start().await;
+        let next = format!("{}/v1/profiles?cursor=PAGE2", server.uri());
+
+        // Page 1: a fully-populated profile whose bundleId relationship resolves
+        // to the included bundleIds resource's identifier. Assert the
+        // sort/limit/include query is sent and that the list omits content.
+        Mock::given(method("GET"))
+            .and(path("/v1/profiles"))
+            .and(query_param("sort", "name"))
+            .and(query_param("limit", "200"))
+            .and(query_param("include", "bundleId"))
+            .and(wiremock::matchers::query_param_is_missing("cursor"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": [{
+                    "type": "profiles",
+                    "id": "prof-1",
+                    "attributes": {
+                        "name": "Acme App Store",
+                        "profileType": "IOS_APP_STORE",
+                        "profileState": "ACTIVE",
+                        "platform": "IOS",
+                        "uuid": "UUID-1",
+                        "createdDate": "2026-01-01T00:00:00Z",
+                        "expirationDate": "2027-01-01T00:00:00Z"
+                    },
+                    "relationships": {
+                        "bundleId": {
+                            "data": { "type": "bundleIds", "id": "bid-1" }
+                        }
+                    }
+                }],
+                "included": [{
+                    "type": "bundleIds",
+                    "id": "bid-1",
+                    "attributes": { "identifier": "com.acme.app" }
+                }],
+                "links": { "next": next }
+            })))
+            .mount(&server)
+            .await;
+
+        // Page 2: a profile with missing string attributes — the empty-string
+        // fallbacks apply, optionals stay None, content stays None. Its bundleId
+        // is present in this page's included.
+        Mock::given(method("GET"))
+            .and(path("/v1/profiles"))
+            .and(query_param("cursor", "PAGE2"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": [{
+                    "type": "profiles",
+                    "id": "prof-2",
+                    "attributes": {},
+                    "relationships": {
+                        "bundleId": {
+                            "data": { "type": "bundleIds", "id": "bid-2" }
+                        }
+                    }
+                }],
+                "included": [{
+                    "type": "bundleIds",
+                    "id": "bid-2",
+                    "attributes": { "identifier": "com.acme.two" }
+                }],
+                "links": {}
+            })))
+            .mount(&server)
+            .await;
+
+        let profiles = client(server.uri()).fetch_profiles().await.unwrap();
+        assert_eq!(profiles.len(), 2);
+        assert_eq!(
+            profiles[0],
+            ProvisioningProfileInfo {
+                id: "prof-1".into(),
+                name: "Acme App Store".into(),
+                profile_type: "IOS_APP_STORE".into(),
+                profile_state: "ACTIVE".into(),
+                platform: Some("IOS".into()),
+                uuid: Some("UUID-1".into()),
+                // Resolved from the included bundleIds, NOT the relationship id.
+                bundle_id: Some("com.acme.app".into()),
+                created_date: Some("2026-01-01T00:00:00Z".into()),
+                expiration_date: Some("2027-01-01T00:00:00Z".into()),
+                // The list never includes profile content.
+                profile_content: None,
+            }
+        );
+        // The second profile exercises the empty-string fallbacks + per-page
+        // included resolution.
+        assert_eq!(profiles[1].id, "prof-2");
+        assert_eq!(profiles[1].name, "");
+        assert_eq!(profiles[1].profile_type, "");
+        assert_eq!(profiles[1].profile_state, "");
+        assert!(profiles[1].platform.is_none());
+        assert!(profiles[1].uuid.is_none());
+        assert_eq!(profiles[1].bundle_id.as_deref(), Some("com.acme.two"));
+        assert!(profiles[1].created_date.is_none());
+        assert!(profiles[1].expiration_date.is_none());
+        assert!(profiles[1].profile_content.is_none());
+    }
+
+    #[tokio::test]
+    async fn fetch_profiles_leaves_bundle_id_none_when_missing_from_included() {
+        let server = MockServer::start().await;
+        // The profile references bid-missing, but it is not present in included[].
+        Mock::given(method("GET"))
+            .and(path("/v1/profiles"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": [{
+                    "type": "profiles",
+                    "id": "prof-1",
+                    "attributes": { "name": "Orphan" },
+                    "relationships": {
+                        "bundleId": {
+                            "data": { "type": "bundleIds", "id": "bid-missing" }
+                        }
+                    }
+                }],
+                "included": [],
+                "links": {}
+            })))
+            .mount(&server)
+            .await;
+
+        let profiles = client(server.uri()).fetch_profiles().await.unwrap();
+        assert_eq!(profiles.len(), 1);
+        assert_eq!(profiles[0].name, "Orphan");
+        // Referenced bundle ID absent from included → bundle_id stays None.
+        assert!(profiles[0].bundle_id.is_none());
+    }
+
+    #[tokio::test]
+    async fn fetch_profiles_surfaces_pending_agreements() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v1/profiles"))
+            .respond_with(ResponseTemplate::new(403).set_body_json(serde_json::json!({
+                "errors": [{ "detail": "The agreement is pending acceptance." }]
+            })))
+            .mount(&server)
+            .await;
+
+        let err = client(server.uri()).fetch_profiles().await.unwrap_err();
+        match err {
+            StackError::PendingAgreements { message } => {
+                assert!(message.contains("pending agreements"))
+            }
+            other => panic!("expected PendingAgreements, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn fetch_profiles_surfaces_http_error() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v1/profiles"))
+            .respond_with(ResponseTemplate::new(500).set_body_string("boom"))
+            .mount(&server)
+            .await;
+
+        let err = client(server.uri()).fetch_profiles().await.unwrap_err();
+        assert!(matches!(err, StackError::Http { status: 500, .. }));
+    }
+
+    #[tokio::test]
+    async fn create_profile_with_devices_posts_expected_relationships() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/profiles"))
+            // attributes carry name/profileType; bundleId to-one, certificates
+            // to-many, and devices to-many (present because device_ids non-empty).
+            .and(wiremock::matchers::body_partial_json(serde_json::json!({
+                "data": {
+                    "type": "profiles",
+                    "attributes": {
+                        "name": "Dev Profile",
+                        "profileType": "IOS_APP_DEVELOPMENT"
+                    },
+                    "relationships": {
+                        "bundleId": {
+                            "data": { "type": "bundleIds", "id": "bid-1" }
+                        },
+                        "certificates": {
+                            "data": [{ "type": "certificates", "id": "cert-1" }]
+                        },
+                        "devices": {
+                            "data": [{ "type": "devices", "id": "dev-1" }]
+                        }
+                    }
+                }
+            })))
+            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
+                "data": {
+                    "type": "profiles",
+                    "id": "prof-new",
+                    "attributes": {
+                        "name": "Dev Profile",
+                        "profileType": "IOS_APP_DEVELOPMENT",
+                        "profileContent": "NEWPROFILE=="
+                    }
+                }
+            })))
+            .mount(&server)
+            .await;
+
+        let profile = client(server.uri())
+            .create_profile(
+                "Dev Profile",
+                "IOS_APP_DEVELOPMENT",
+                "bid-1",
+                &["cert-1".to_string()],
+                &["dev-1".to_string()],
+            )
+            .await
+            .unwrap();
+        assert_eq!(profile.id, "prof-new");
+        // Content is populated on create; bundle_id is not resolved → None.
+        assert_eq!(profile.profile_content.as_deref(), Some("NEWPROFILE=="));
+        assert!(profile.bundle_id.is_none());
+
+        // Assert the devices relationship was actually present in the body.
+        let requests = server.received_requests().await.unwrap();
+        assert_eq!(requests.len(), 1);
+        let body: serde_json::Value = serde_json::from_slice(&requests[0].body).unwrap();
+        assert!(
+            body["data"]["relationships"].get("devices").is_some(),
+            "expected devices relationship, got: {body}"
+        );
+    }
+
+    #[tokio::test]
+    async fn create_profile_with_empty_devices_omits_devices_but_keeps_certificates() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/profiles"))
+            .and(wiremock::matchers::body_partial_json(serde_json::json!({
+                "data": {
+                    "type": "profiles",
+                    "attributes": {
+                        "name": "Store Profile",
+                        "profileType": "IOS_APP_STORE"
+                    },
+                    "relationships": {
+                        "bundleId": {
+                            "data": { "type": "bundleIds", "id": "bid-1" }
+                        },
+                        // certificates is ALWAYS sent, even with an empty array.
+                        "certificates": { "data": [] }
+                    }
+                }
+            })))
+            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
+                "data": {
+                    "type": "profiles",
+                    "id": "prof-store",
+                    "attributes": { "profileContent": "STOREPROFILE==" }
+                }
+            })))
+            .mount(&server)
+            .await;
+
+        let profile = client(server.uri())
+            .create_profile("Store Profile", "IOS_APP_STORE", "bid-1", &[], &[])
+            .await
+            .unwrap();
+        assert_eq!(profile.id, "prof-store");
+        assert_eq!(profile.profile_content.as_deref(), Some("STOREPROFILE=="));
+
+        // Assert devices was OMITTED entirely while certificates is present
+        // (body_partial_json cannot assert absence, so inspect the request).
+        let requests = server.received_requests().await.unwrap();
+        assert_eq!(requests.len(), 1);
+        let body: serde_json::Value = serde_json::from_slice(&requests[0].body).unwrap();
+        let relationships = &body["data"]["relationships"];
+        assert!(
+            relationships.get("devices").is_none(),
+            "expected no devices relationship, got: {body}"
+        );
+        assert!(
+            relationships.get("certificates").is_some(),
+            "expected certificates relationship, got: {body}"
+        );
+    }
+
+    #[tokio::test]
+    async fn create_profile_surfaces_http_error() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/profiles"))
+            .respond_with(ResponseTemplate::new(409).set_body_string("conflict"))
+            .mount(&server)
+            .await;
+
+        let err = client(server.uri())
+            .create_profile("P", "IOS_APP_STORE", "bid-1", &[], &[])
+            .await
+            .unwrap_err();
+        assert!(matches!(err, StackError::Http { status: 409, .. }));
+    }
+
+    #[tokio::test]
+    async fn delete_profile_hits_profiles_endpoint() {
+        let server = MockServer::start().await;
+        Mock::given(method("DELETE"))
+            .and(path("/v1/profiles/prof-1"))
+            .respond_with(ResponseTemplate::new(204))
+            .mount(&server)
+            .await;
+
+        assert!(client(server.uri()).delete_profile("prof-1").await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn delete_profile_surfaces_http_error() {
+        let server = MockServer::start().await;
+        Mock::given(method("DELETE"))
+            .and(path("/v1/profiles/prof-1"))
+            .respond_with(ResponseTemplate::new(404).set_body_string("not found"))
+            .mount(&server)
+            .await;
+
+        let err = client(server.uri())
+            .delete_profile("prof-1")
+            .await
+            .unwrap_err();
+        assert!(matches!(err, StackError::Http { status: 404, .. }));
+    }
+
+    #[tokio::test]
+    async fn fetch_profile_content_returns_content_and_sends_fields_query() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v1/profiles/prof-1"))
+            // The explicit fields[profiles] selector must be sent so the
+            // single-resource doc includes profileContent.
+            .and(query_param(
+                "fields[profiles]",
+                "profileContent,name,profileType,platform,profileState,uuid,createdDate,expirationDate",
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": {
+                    "type": "profiles",
+                    "id": "prof-1",
+                    "attributes": { "profileContent": "BASE64PROFILE==" }
+                }
+            })))
+            .mount(&server)
+            .await;
+
+        let content = client(server.uri())
+            .fetch_profile_content("prof-1")
+            .await
+            .unwrap();
+        assert_eq!(content.as_deref(), Some("BASE64PROFILE=="));
+    }
+
+    #[tokio::test]
+    async fn fetch_profile_content_returns_none_when_absent() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v1/profiles/prof-1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": {
+                    "type": "profiles",
+                    "id": "prof-1",
+                    "attributes": {}
+                }
+            })))
+            .mount(&server)
+            .await;
+
+        let content = client(server.uri())
+            .fetch_profile_content("prof-1")
+            .await
+            .unwrap();
+        assert!(content.is_none());
     }
 }
