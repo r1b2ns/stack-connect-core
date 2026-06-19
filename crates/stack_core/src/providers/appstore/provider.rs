@@ -317,8 +317,12 @@ impl AppStoreVersionsImpl for AppStoreAppStoreVersions {
         self.client.release_version(&version_id).await
     }
 
-    async fn reject_version(&self, app_id: String) -> Result<(), StackError> {
-        self.client.reject_version(&app_id).await
+    async fn cancel_submission(&self, app_id: String) -> Result<(), StackError> {
+        self.client.cancel_submission(&app_id).await
+    }
+
+    async fn reject_version(&self, version_id: String) -> Result<(), StackError> {
+        self.client.reject_version(&version_id).await
     }
 
     async fn fetch_phased_release(

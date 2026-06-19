@@ -352,6 +352,22 @@ struct ReviewSubmissionCreateResource {
     id: String,
 }
 
+/// A JSON:API single-resource document resolving the singular
+/// `appStoreVersionSubmission` relationship of an `appStoreVersion`:
+/// `{ "data": { "type": "appStoreVersionSubmissions", "id": "..." } }`. The
+/// `data` member may be `null`/absent when the version has no submission, so it
+/// is modeled as optional. Only the resource `id` is needed.
+#[derive(Deserialize)]
+struct AppStoreVersionSubmissionDocument {
+    #[serde(default)]
+    data: Option<AppStoreVersionSubmissionResource>,
+}
+
+#[derive(Deserialize)]
+struct AppStoreVersionSubmissionResource {
+    id: String,
+}
+
 // ---------------------------------------------------------------------------
 // App Store versions (JSON:API)
 // ---------------------------------------------------------------------------
@@ -2820,8 +2836,9 @@ impl AppStoreClient {
         self.post_json_2xx(&url, &request_body).await.map(|_| ())
     }
 
-    /// Discards the active submissions for `app_id`, returning the version out of
-    /// review.
+    /// Cancels the active submissions for `app_id`, removing a not-yet-approved
+    /// submission from review and returning the version to
+    /// `PREPARE_FOR_SUBMISSION`.
     ///
     /// 1. `GET /v1/reviewSubmissions?filter[app]={app_id}\
     ///    &filter[state]=READY_FOR_REVIEW,WAITING_FOR_REVIEW,IN_REVIEW,\
@@ -2855,7 +2872,7 @@ impl AppStoreClient {
     /// [`StackError::PendingAgreements`] on a pending-agreements 403,
     /// [`StackError::Http`] on any other non-2xx response, [`StackError::Decode`]
     /// on malformed JSON, or [`StackError::Network`] on transport failure.
-    pub(crate) async fn reject_version(&self, app_id: &str) -> Result<(), StackError> {
+    pub(crate) async fn cancel_submission(&self, app_id: &str) -> Result<(), StackError> {
         let url = format!(
             "{}/v1/reviewSubmissions?filter[app]={app_id}\
              &filter[state]=READY_FOR_REVIEW,WAITING_FOR_REVIEW,IN_REVIEW,UNRESOLVED_ISSUES",
@@ -2898,6 +2915,80 @@ impl AppStoreClient {
             }
         }
         Ok(())
+    }
+
+    /// Rejects an already-approved version that is awaiting developer release.
+    ///
+    /// Unlike [`Self::cancel_submission`] (which removes a *not-yet-approved*
+    /// submission from review), this handles a version in
+    /// `PENDING_DEVELOPER_RELEASE`: the developer rejecting an approved build.
+    /// It uses the legacy version-scoped submission mechanism, which avoids the
+    /// ambiguity of historical `COMPLETE` `reviewSubmissions`.
+    ///
+    /// 1. `GET /v1/appStoreVersions/{version_id}/appStoreVersionSubmission`
+    ///    resolves the singular `appStoreVersionSubmission` relationship into a
+    ///    single-resource document. When the document's `data` is `null`/absent,
+    ///    or the relationship endpoint answers `404`, there is nothing to reject
+    ///    and this is a no-op that returns `Ok(())` (mirroring the absent pattern
+    ///    used by [`Self::fetch_phased_release`]).
+    /// 2. `DELETE /v1/appStoreVersionSubmissions/{submission_id}` rejects the
+    ///    version. Any 2xx (Apple returns `204 No Content`) → `Ok(())`.
+    ///
+    /// Both requests route through the shared pending-agreements 403 guard.
+    ///
+    /// # Errors
+    /// [`StackError::PendingAgreements`] on a pending-agreements 403,
+    /// [`StackError::Http`] on any other non-2xx response (other than the GET's
+    /// 404, which is absent), [`StackError::Decode`] on malformed JSON, or
+    /// [`StackError::Network`] on transport failure.
+    pub(crate) async fn reject_version(&self, version_id: &str) -> Result<(), StackError> {
+        let get_url = format!(
+            "{}/v1/appStoreVersions/{version_id}/appStoreVersionSubmission",
+            self.base_url
+        );
+        let token = self.auth.bearer_token().await?;
+        let (status, body) = self
+            .send_and_read(self.http.get(&get_url).bearer_auth(token))
+            .await?;
+        // No version submission on the version → ASC returns 404; treat as absent.
+        if status.as_u16() == 404 {
+            return Ok(());
+        }
+        if !status.is_success() {
+            if let Some(err) = pending_agreements_error(status.as_u16(), &body) {
+                return Err(err);
+            }
+            return Err(StackError::Http {
+                status: status.as_u16(),
+                message: body,
+            });
+        }
+
+        let document: AppStoreVersionSubmissionDocument = serde_json::from_str(&body)
+            .map_err(|e| StackError::decode(format!("version submission response: {e}")))?;
+        // A null/absent `data` means there is no submission to reject → no-op.
+        let Some(submission) = document.data else {
+            return Ok(());
+        };
+
+        let delete_url = format!(
+            "{}/v1/appStoreVersionSubmissions/{}",
+            self.base_url, submission.id
+        );
+        let token = self.auth.bearer_token().await?;
+        let (status, body) = self
+            .send_and_read(self.http.delete(&delete_url).bearer_auth(token))
+            .await?;
+        if status.is_success() {
+            return Ok(());
+        }
+        if let Some(err) = pending_agreements_error(status.as_u16(), &body) {
+            return Err(err);
+        }
+        Err(StackError::Http {
+            status: status.as_u16(),
+            message: body,
+        })
     }
 
     /// Removes every `reviewSubmissionItem` belonging to the submission `id`,
@@ -3131,7 +3222,7 @@ impl AppStoreClient {
     }
 
     /// Shared GET-then-conditional-PATCH used by both [`Self::cancel_review`] and
-    /// [`Self::reject_version`]: fetches the submissions page at `get_url`, and
+    /// [`Self::cancel_submission`]: fetches the submissions page at `get_url`, and
     /// if a first item exists, PATCHes it with `canceled: true`. An empty page is
     /// a no-op (`Ok(())`).
     async fn cancel_first_submission(&self, get_url: &str) -> Result<(), StackError> {
@@ -7620,7 +7711,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn reject_version_patches_in_review_submission() {
+    async fn cancel_submission_patches_in_review_submission() {
         let server = MockServer::start().await;
 
         // GET is filtered to active/cancellable states.
@@ -7658,11 +7749,11 @@ mod tests {
             .mount(&server)
             .await;
 
-        assert!(client(server.uri()).reject_version("APP1").await.is_ok());
+        assert!(client(server.uri()).cancel_submission("APP1").await.is_ok());
     }
 
     #[tokio::test]
-    async fn reject_version_deletes_items_of_ready_for_review_submission() {
+    async fn cancel_submission_deletes_items_of_ready_for_review_submission() {
         let server = MockServer::start().await;
 
         // One READY_FOR_REVIEW submission.
@@ -7713,13 +7804,13 @@ mod tests {
 
         // A DELETE on /v1/reviewSubmissions/* (forbidden by Apple) or a PATCH
         // would hit no mock, 404, and fail the `is_ok()` assertion below.
-        assert!(client(server.uri()).reject_version("APP1").await.is_ok());
+        assert!(client(server.uri()).cancel_submission("APP1").await.is_ok());
         // `.expect(1)` on each mock is verified on server drop: two item DELETEs,
         // one items GET, and no other mutating request occurred.
     }
 
     #[tokio::test]
-    async fn reject_version_deletes_items_of_all_ready_for_review_submissions() {
+    async fn cancel_submission_deletes_items_of_all_ready_for_review_submissions() {
         let server = MockServer::start().await;
 
         // The page contains TWO stale READY_FOR_REVIEW submissions; both must be
@@ -7779,11 +7870,11 @@ mod tests {
             .mount(&server)
             .await;
 
-        assert!(client(server.uri()).reject_version("APP1").await.is_ok());
+        assert!(client(server.uri()).cancel_submission("APP1").await.is_ok());
     }
 
     #[tokio::test]
-    async fn reject_version_surfaces_pending_agreements_on_item_delete() {
+    async fn cancel_submission_surfaces_pending_agreements_on_item_delete() {
         let server = MockServer::start().await;
 
         Mock::given(method("GET"))
@@ -7817,14 +7908,14 @@ mod tests {
             .await;
 
         let err = client(server.uri())
-            .reject_version("APP1")
+            .cancel_submission("APP1")
             .await
             .unwrap_err();
         assert!(matches!(err, StackError::PendingAgreements { .. }));
     }
 
     #[tokio::test]
-    async fn reject_version_is_noop_when_no_submission() {
+    async fn cancel_submission_is_noop_when_no_submission() {
         let server = MockServer::start().await;
         // GET returns an empty page; no PATCH/DELETE mock is mounted, so any
         // mutating request would fail the test.
@@ -7842,11 +7933,11 @@ mod tests {
             .mount(&server)
             .await;
 
-        assert!(client(server.uri()).reject_version("APP1").await.is_ok());
+        assert!(client(server.uri()).cancel_submission("APP1").await.is_ok());
     }
 
     #[tokio::test]
-    async fn reject_version_is_noop_for_non_cancellable_state() {
+    async fn cancel_submission_is_noop_for_non_cancellable_state() {
         let server = MockServer::start().await;
         // A submission in a state we don't act on (e.g. COMPLETING) must not be
         // PATCHed or DELETEd — that is what previously caused a 409. No mutating
@@ -7865,11 +7956,11 @@ mod tests {
             .mount(&server)
             .await;
 
-        assert!(client(server.uri()).reject_version("APP1").await.is_ok());
+        assert!(client(server.uri()).cancel_submission("APP1").await.is_ok());
     }
 
     #[tokio::test]
-    async fn reject_version_is_noop_when_state_missing() {
+    async fn cancel_submission_is_noop_when_state_missing() {
         let server = MockServer::start().await;
         // A submission with no `state` attribute is treated as non-cancellable.
         Mock::given(method("GET"))
@@ -7882,7 +7973,113 @@ mod tests {
             .mount(&server)
             .await;
 
-        assert!(client(server.uri()).reject_version("APP1").await.is_ok());
+        assert!(client(server.uri()).cancel_submission("APP1").await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn reject_version_deletes_resolved_submission() {
+        let server = MockServer::start().await;
+
+        // The version's singular appStoreVersionSubmission relationship resolves
+        // to a single resource.
+        Mock::given(method("GET"))
+            .and(path("/v1/appStoreVersions/VER1/appStoreVersionSubmission"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": { "type": "appStoreVersionSubmissions", "id": "sub-1" }
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        // The resolved submission is rejected via DELETE (Apple returns 204).
+        Mock::given(method("DELETE"))
+            .and(path("/v1/appStoreVersionSubmissions/sub-1"))
+            .respond_with(ResponseTemplate::new(204))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        assert!(client(server.uri()).reject_version("VER1").await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn reject_version_is_noop_when_no_submission() {
+        let server = MockServer::start().await;
+        // A null `data` means there is no submission to reject; no DELETE mock is
+        // mounted, so any DELETE request would 404 and fail the assertion.
+        Mock::given(method("GET"))
+            .and(path("/v1/appStoreVersions/VER1/appStoreVersionSubmission"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": null
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        assert!(client(server.uri()).reject_version("VER1").await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn reject_version_is_noop_when_relationship_is_404() {
+        let server = MockServer::start().await;
+        // A 404 on the relationship endpoint is treated as absent → no-op.
+        Mock::given(method("GET"))
+            .and(path("/v1/appStoreVersions/VER1/appStoreVersionSubmission"))
+            .respond_with(ResponseTemplate::new(404).set_body_json(serde_json::json!({
+                "errors": [{ "status": "404", "code": "NOT_FOUND" }]
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        assert!(client(server.uri()).reject_version("VER1").await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn reject_version_surfaces_http_error() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/v1/appStoreVersions/VER1/appStoreVersionSubmission"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": { "type": "appStoreVersionSubmissions", "id": "sub-1" }
+            })))
+            .mount(&server)
+            .await;
+
+        // The DELETE comes back as a non-2xx (e.g. 409 STATE_ERROR).
+        Mock::given(method("DELETE"))
+            .and(path("/v1/appStoreVersionSubmissions/sub-1"))
+            .respond_with(ResponseTemplate::new(409).set_body_json(serde_json::json!({
+                "errors": [{ "status": "409", "code": "STATE_ERROR" }]
+            })))
+            .mount(&server)
+            .await;
+
+        let err = client(server.uri())
+            .reject_version("VER1")
+            .await
+            .unwrap_err();
+        assert!(matches!(err, StackError::Http { status: 409, .. }));
+    }
+
+    #[tokio::test]
+    async fn reject_version_surfaces_pending_agreements_on_get() {
+        let server = MockServer::start().await;
+        // The relationship GET comes back as a pending-agreements 403.
+        Mock::given(method("GET"))
+            .and(path("/v1/appStoreVersions/VER1/appStoreVersionSubmission"))
+            .respond_with(ResponseTemplate::new(403).set_body_json(serde_json::json!({
+                "errors": [{ "detail": "The agreement is pending acceptance." }]
+            })))
+            .mount(&server)
+            .await;
+
+        let err = client(server.uri())
+            .reject_version("VER1")
+            .await
+            .unwrap_err();
+        assert!(matches!(err, StackError::PendingAgreements { .. }));
     }
 
     #[tokio::test]

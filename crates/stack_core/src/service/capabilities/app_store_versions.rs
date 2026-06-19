@@ -69,8 +69,13 @@ pub(crate) trait AppStoreVersionsImpl: Send + Sync {
     /// Manually releases the approved version identified by `version_id`.
     async fn release_version(&self, version_id: String) -> Result<(), StackError>;
 
-    /// Rejects the most recent submission for `app_id`, if any.
-    async fn reject_version(&self, app_id: String) -> Result<(), StackError>;
+    /// Cancels the active submission for `app_id`, removing a not-yet-approved
+    /// submission from review, if any.
+    async fn cancel_submission(&self, app_id: String) -> Result<(), StackError>;
+
+    /// Rejects the approved (pending-developer-release) version identified by
+    /// `version_id`, if it has a submission.
+    async fn reject_version(&self, version_id: String) -> Result<(), StackError>;
 
     /// Fetches the phased release for `version_id`, or `None` when there is no
     /// phased release.
@@ -285,18 +290,38 @@ impl AppStoreVersions {
         self.inner.release_version(version_id).await
     }
 
-    /// Rejects the most recent submission for `app_id`.
+    /// Cancels the active submission for `app_id`, removing a not-yet-approved
+    /// submission from review.
     ///
-    /// Looks up the first submission for `app_id` (regardless of state) and
-    /// marks it canceled. When no submission exists this is a no-op that returns
-    /// `Ok(())`.
+    /// Fetches the app's active/cancellable submissions and clears them: an
+    /// in-flight submission (`WAITING_FOR_REVIEW` / `IN_REVIEW` /
+    /// `UNRESOLVED_ISSUES`) is canceled, and a not-yet-submitted submission
+    /// (`READY_FOR_REVIEW`) has its items removed. Either path returns the
+    /// `appStoreVersion` to `PREPARE_FOR_SUBMISSION`. When there is no active
+    /// submission this is a no-op that returns `Ok(())`.
     ///
     /// # Errors
     /// [`StackError::PendingAgreements`] on a pending-agreements 403,
     /// [`StackError::Http`] on any other non-2xx response, [`StackError::Decode`]
     /// on malformed JSON, or [`StackError::Network`] on transport failure.
-    pub async fn reject_version(&self, app_id: String) -> Result<(), StackError> {
-        self.inner.reject_version(app_id).await
+    pub async fn cancel_submission(&self, app_id: String) -> Result<(), StackError> {
+        self.inner.cancel_submission(app_id).await
+    }
+
+    /// Rejects the approved version identified by `version_id`.
+    ///
+    /// Intended for a developer rejecting an already-approved version that is in
+    /// `PENDING_DEVELOPER_RELEASE`. Resolves the version's singular
+    /// `appStoreVersionSubmission` relationship and deletes it. When the version
+    /// has no submission (the relationship's `data` is null/absent, or the
+    /// endpoint answers 404) this is a no-op that returns `Ok(())`.
+    ///
+    /// # Errors
+    /// [`StackError::PendingAgreements`] on a pending-agreements 403,
+    /// [`StackError::Http`] on any other non-2xx response, [`StackError::Decode`]
+    /// on malformed JSON, or [`StackError::Network`] on transport failure.
+    pub async fn reject_version(&self, version_id: String) -> Result<(), StackError> {
+        self.inner.reject_version(version_id).await
     }
 
     /// Fetches the phased (staged) release for `version_id`.
