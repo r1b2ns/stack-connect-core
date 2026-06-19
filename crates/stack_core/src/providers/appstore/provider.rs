@@ -9,8 +9,8 @@ use crate::domain::{
     AppInfoLocalizationInfo, AppReviewDetailInfo, AppStoreLocalizationInfo, AppStoreVersionInfo,
     BetaAppLocalizationInfo, BetaAppReviewDetailInfo, BetaBuildLocalizationInfo, BetaGroupInfo,
     BetaTesterInfo, BuildDetailInfo, BuildInfo, BuildsPage, CustomerReview, CustomerReviewsPage,
-    PhasedReleaseInfo, ReviewResponse, ReviewSubmission, ScreenshotSetInfo, TeamMemberInfo,
-    UserInfo,
+    DeviceInfo, PhasedReleaseInfo, ReviewResponse, ReviewSubmission, ScreenshotSetInfo,
+    TeamMemberInfo, UserInfo,
 };
 use crate::error::StackError;
 use crate::ports::DebugLogger;
@@ -30,6 +30,7 @@ use crate::service::capabilities::beta_build_localizations::{
 };
 use crate::service::capabilities::beta_groups::{BetaGroups, BetaGroupsImpl};
 use crate::service::capabilities::builds::{Builds, BuildsImpl};
+use crate::service::capabilities::devices::{Devices, DevicesImpl};
 use crate::service::capabilities::reviews::{Reviews, ReviewsImpl};
 use crate::service::capabilities::users::{Users, UsersImpl};
 use crate::service::kind::ServiceKind;
@@ -80,6 +81,7 @@ impl ProviderImpl for AppStoreProvider {
             Capability::AppMetadata,
             Capability::AccessibilityDeclarations,
             Capability::Users,
+            Capability::Devices,
         ]
     }
 
@@ -155,6 +157,12 @@ impl ProviderImpl for AppStoreProvider {
 
     fn users(&self) -> Option<Arc<Users>> {
         Some(Users::new(Box::new(AppStoreUsers {
+            client: Arc::clone(&self.client),
+        })))
+    }
+
+    fn devices(&self) -> Option<Arc<Devices>> {
+        Some(Devices::new(Box::new(AppStoreDevices {
             client: Arc::clone(&self.client),
         })))
     }
@@ -967,6 +975,39 @@ impl UsersImpl for AppStoreUsers {
     }
 }
 
+/// App Store Connect implementation of the [`DevicesImpl`] capability contract.
+/// Holds a shared [`AppStoreClient`] so it reuses the provider's token cache.
+struct AppStoreDevices {
+    client: Arc<AppStoreClient>,
+}
+
+#[async_trait]
+impl DevicesImpl for AppStoreDevices {
+    async fn fetch_devices(&self) -> Result<Vec<DeviceInfo>, StackError> {
+        self.client.fetch_devices().await
+    }
+
+    async fn create_device(
+        &self,
+        name: String,
+        platform: String,
+        udid: String,
+    ) -> Result<DeviceInfo, StackError> {
+        self.client.create_device(&name, &platform, &udid).await
+    }
+
+    async fn update_device(
+        &self,
+        id: String,
+        name: Option<String>,
+        status: Option<String>,
+    ) -> Result<(), StackError> {
+        self.client
+            .update_device(&id, name.as_deref(), status.as_deref())
+            .await
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -997,7 +1038,8 @@ mod tests {
                 Capability::BetaAppReviewDetail,
                 Capability::AppMetadata,
                 Capability::AccessibilityDeclarations,
-                Capability::Users
+                Capability::Users,
+                Capability::Devices
             ]
         );
     }
@@ -1089,5 +1131,12 @@ mod tests {
         // App Store Connect supports Users, so the accessor must return `Some`.
         assert!(provider().users().is_some());
         assert!(provider().capabilities().contains(&Capability::Users));
+    }
+
+    #[test]
+    fn exposes_devices_capability_handle() {
+        // App Store Connect supports Devices, so the accessor must return `Some`.
+        assert!(provider().devices().is_some());
+        assert!(provider().capabilities().contains(&Capability::Devices));
     }
 }

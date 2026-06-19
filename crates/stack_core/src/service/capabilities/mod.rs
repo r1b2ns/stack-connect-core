@@ -16,5 +16,6 @@ pub(crate) mod beta_app_review_detail;
 pub(crate) mod beta_build_localizations;
 pub(crate) mod beta_groups;
 pub(crate) mod builds;
+pub(crate) mod devices;
 pub(crate) mod reviews;
 pub(crate) mod users;

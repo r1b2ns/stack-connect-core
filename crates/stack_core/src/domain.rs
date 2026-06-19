@@ -228,6 +228,29 @@ pub struct AccessibilityDeclarationInfo {
     pub supports_voiceover: bool,
 }
 
+/// A registered device of the connected App Store Connect account (a development
+/// device used for provisioning). `name` and `status` are non-optional with sane
+/// fallbacks (`""` and `"ENABLED"`) applied at the wire-mapping boundary when the
+/// attribute is absent; the remaining attributes are optional.
+///
+/// `platform` is the raw ASC `BundleIdPlatform` value (`IOS`, `MAC_OS`, or
+/// `UNIVERSAL`); `status` is the raw ASC device status (`ENABLED` or `DISABLED`).
+/// `device_class` mirrors the ASC `deviceClass` attribute and `added_date` the
+/// `addedDate` attribute — a raw ISO8601 string passed through verbatim (the host
+/// owns any date parsing). All raw ASC strings are forwarded without remapping.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, uniffi::Record)]
+#[serde(rename_all = "camelCase")]
+pub struct DeviceInfo {
+    pub id: String,
+    pub name: String,
+    pub udid: Option<String>,
+    pub platform: Option<String>,
+    pub device_class: Option<String>,
+    pub model: Option<String>,
+    pub status: String,
+    pub added_date: Option<String>,
+}
+
 /// The TestFlight "Test Information" beta review detail for an app: the beta
 /// review contact (name, email, phone), optional demo account credentials, and
 /// reviewer notes. App Store Connect exposes exactly one per app (the singular

@@ -12,6 +12,7 @@ use crate::service::capabilities::beta_app_review_detail::BetaAppReviewDetail;
 use crate::service::capabilities::beta_build_localizations::BetaBuildLocalizations;
 use crate::service::capabilities::beta_groups::BetaGroups;
 use crate::service::capabilities::builds::Builds;
+use crate::service::capabilities::devices::Devices;
 use crate::service::capabilities::reviews::Reviews;
 use crate::service::capabilities::users::Users;
 use crate::service::kind::ServiceKind;
@@ -33,6 +34,7 @@ pub enum Capability {
     AppMetadata,
     AccessibilityDeclarations,
     Users,
+    Devices,
 }
 
 /// Internal, non-exported contract every concrete plugin implements. Kept off the
@@ -118,6 +120,12 @@ pub(crate) trait ProviderImpl: Send + Sync {
     /// The Users capability handle, or `None` if this provider lacks
     /// [`Capability::Users`]. Default `None` so providers opt in explicitly.
     fn users(&self) -> Option<Arc<Users>> {
+        None
+    }
+
+    /// The Devices capability handle, or `None` if this provider lacks
+    /// [`Capability::Devices`]. Default `None` so providers opt in explicitly.
+    fn devices(&self) -> Option<Arc<Devices>> {
         None
     }
 }
@@ -227,6 +235,14 @@ impl Provider {
     /// `provider.users()` and gets `None` when user management is unsupported.
     pub fn users(&self) -> Option<Arc<Users>> {
         self.inner.users()
+    }
+
+    /// The Devices capability handle, or `None` when this provider does not
+    /// expose [`Capability::Devices`]. This is the discovery mechanism: the host
+    /// calls `provider.devices()` and gets `None` when device management is
+    /// unsupported.
+    pub fn devices(&self) -> Option<Arc<Devices>> {
+        self.inner.devices()
     }
 }
 

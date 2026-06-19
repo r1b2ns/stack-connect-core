@@ -10,7 +10,7 @@ use crate::domain::{
     AppInfoDetails, AppInfoLocalizationInfo, AppReviewDetailInfo, AppStoreLocalizationInfo,
     AppStoreVersionInfo, BetaAppLocalizationInfo, BetaAppReviewDetailInfo,
     BetaBuildLocalizationInfo, BetaGroupInfo, BetaTesterInfo, BuildDetailInfo, BuildInfo,
-    BuildsPage, CustomerReview, CustomerReviewsPage, PhasedReleaseInfo, ReviewResponse,
+    BuildsPage, CustomerReview, CustomerReviewsPage, DeviceInfo, PhasedReleaseInfo, ReviewResponse,
     ReviewSubmission, ScreenshotInfo, ScreenshotSetInfo, TeamMemberInfo, UserInfo,
 };
 use crate::error::StackError;
@@ -1794,6 +1794,74 @@ impl UserInvitationResource {
             provisioning_allowed: self.attributes.provisioning_allowed.unwrap_or(false),
             is_pending: true,
             expiration_date: self.attributes.expiration_date,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Devices (JSON:API)
+// ---------------------------------------------------------------------------
+
+/// A JSON:API document page of `devices` resources.
+#[derive(Deserialize)]
+struct DevicesResponse {
+    #[serde(default)]
+    data: Vec<DeviceResource>,
+    #[serde(default)]
+    links: Links,
+}
+
+/// A JSON:API single-resource document of a `devices` resource (create/update
+/// responses).
+#[derive(Deserialize)]
+struct DeviceDocument {
+    data: DeviceResource,
+}
+
+#[derive(Deserialize)]
+struct DeviceResource {
+    id: String,
+    #[serde(default)]
+    attributes: DeviceAttributes,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct DeviceAttributes {
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    udid: Option<String>,
+    #[serde(default)]
+    platform: Option<String>,
+    #[serde(default)]
+    device_class: Option<String>,
+    #[serde(default)]
+    model: Option<String>,
+    #[serde(default)]
+    status: Option<String>,
+    /// Raw ISO8601 string passed through verbatim — the core does no date parsing.
+    #[serde(default)]
+    added_date: Option<String>,
+}
+
+impl DeviceResource {
+    /// Maps a `devices` resource into [`DeviceInfo`], applying the non-optional
+    /// fallbacks: `name` → `""` and `status` → `"ENABLED"` when the attribute is
+    /// absent.
+    fn into_device_info(self) -> DeviceInfo {
+        DeviceInfo {
+            id: self.id,
+            name: self.attributes.name.unwrap_or_default(),
+            udid: self.attributes.udid,
+            platform: self.attributes.platform,
+            device_class: self.attributes.device_class,
+            model: self.attributes.model,
+            status: self
+                .attributes
+                .status
+                .unwrap_or_else(|| "ENABLED".to_string()),
+            added_date: self.attributes.added_date,
         }
     }
 }
@@ -5288,6 +5356,105 @@ impl AppStoreClient {
             status: status.as_u16(),
             message: body,
         })
+    }
+
+    /// Lists every registered device of the connected account, sorted by name.
+    ///
+    /// `GET /v1/devices?sort=name&limit=200`, following `links.next` pagination
+    /// until exhausted (`limit` is the page size, not a cap on the total).
+    ///
+    /// # Errors
+    /// [`StackError::PendingAgreements`] on a pending-agreements 403,
+    /// [`StackError::Http`] on any other non-2xx page, [`StackError::Decode`] on
+    /// malformed JSON, or [`StackError::Network`] on transport failure.
+    pub(crate) async fn fetch_devices(&self) -> Result<Vec<DeviceInfo>, StackError> {
+        let mut devices = Vec::new();
+        let mut next_url = Some(format!("{}/v1/devices?sort=name&limit=200", self.base_url));
+
+        while let Some(url) = next_url {
+            let body = self.get_page(&url).await?;
+            let page: DevicesResponse = serde_json::from_str(&body)
+                .map_err(|e| StackError::decode(format!("devices response: {e}")))?;
+            devices.extend(page.data.into_iter().map(DeviceResource::into_device_info));
+
+            // `links.next` is an absolute URL; follow it verbatim until absent.
+            next_url = page.links.next.filter(|u| !u.is_empty());
+        }
+
+        Ok(devices)
+    }
+
+    /// Registers a new device with `name`, ASC `platform`, and `udid`.
+    ///
+    /// `POST /v1/devices` with a JSON:API body whose `attributes` carry
+    /// `name`/`platform`/`udid`. `platform` is forwarded verbatim (App Store
+    /// Connect validates the `BundleIdPlatform` enum). Returns the created device.
+    ///
+    /// # Errors
+    /// [`StackError::PendingAgreements`] on a pending-agreements 403,
+    /// [`StackError::Http`] on any other non-2xx response, [`StackError::Decode`]
+    /// on malformed JSON, or [`StackError::Network`] on transport failure.
+    pub(crate) async fn create_device(
+        &self,
+        name: &str,
+        platform: &str,
+        udid: &str,
+    ) -> Result<DeviceInfo, StackError> {
+        let url = format!("{}/v1/devices", self.base_url);
+        let request_body = json!({
+            "data": {
+                "type": "devices",
+                "attributes": {
+                    "name": name,
+                    "platform": platform,
+                    "udid": udid,
+                }
+            }
+        });
+
+        let response_body = self.post_json_2xx(&url, &request_body).await?;
+        let document: DeviceDocument = serde_json::from_str(&response_body)
+            .map_err(|e| StackError::decode(format!("device response: {e}")))?;
+        Ok(document.data.into_device_info())
+    }
+
+    /// Updates the device `id`, sending only the attributes that are `Some`.
+    ///
+    /// `PATCH /v1/devices/{id}`. `name` renames the device; `status`
+    /// (`"DISABLED"` removes it from the account, `"ENABLED"` re-enables it) is
+    /// forwarded verbatim. Attributes left `None` are omitted entirely. Any 2xx →
+    /// `Ok(())` (the response is discarded).
+    ///
+    /// # Errors
+    /// [`StackError::PendingAgreements`] on a pending-agreements 403,
+    /// [`StackError::Http`] on any other non-2xx response, or
+    /// [`StackError::Network`] on transport failure.
+    pub(crate) async fn update_device(
+        &self,
+        id: &str,
+        name: Option<&str>,
+        status: Option<&str>,
+    ) -> Result<(), StackError> {
+        let url = format!("{}/v1/devices/{id}", self.base_url);
+        let token = self.auth.bearer_token().await?;
+
+        let mut attributes = serde_json::Map::new();
+        if let Some(value) = name {
+            attributes.insert("name".into(), json!(value));
+        }
+        if let Some(value) = status {
+            attributes.insert("status".into(), json!(value));
+        }
+
+        let request_body = json!({
+            "data": {
+                "type": "devices",
+                "id": id,
+                "attributes": attributes
+            }
+        });
+
+        self.patch_no_content(&url, &token, &request_body).await
     }
 
     async fn patch_no_content(
@@ -10800,5 +10967,249 @@ mod tests {
         let pretty = pretty_json(br#"{"a":1}"#);
         assert!(pretty.contains("\"a\": 1"));
         assert!(pretty.contains('\n'));
+    }
+
+    // -----------------------------------------------------------------------
+    // Devices
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn fetch_devices_maps_all_fields_and_paginates() {
+        let server = MockServer::start().await;
+        let next = format!("{}/v1/devices?cursor=PAGE2", server.uri());
+
+        // Page 1: a fully-populated device; assert the sort/limit query is sent.
+        Mock::given(method("GET"))
+            .and(path("/v1/devices"))
+            .and(query_param("sort", "name"))
+            .and(query_param("limit", "200"))
+            .and(wiremock::matchers::query_param_is_missing("cursor"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": [{
+                    "type": "devices",
+                    "id": "dev-1",
+                    "attributes": {
+                        "name": "Alice iPhone",
+                        "udid": "00008030-ABC",
+                        "platform": "IOS",
+                        "deviceClass": "IPHONE",
+                        "model": "iPhone 15 Pro",
+                        "status": "ENABLED",
+                        "addedDate": "2026-03-01T12:00:00Z"
+                    }
+                }],
+                "links": { "next": next }
+            })))
+            .mount(&server)
+            .await;
+
+        // Page 2: a device with missing `name`/`status` — the fallbacks apply.
+        Mock::given(method("GET"))
+            .and(path("/v1/devices"))
+            .and(query_param("cursor", "PAGE2"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": [{
+                    "type": "devices",
+                    "id": "dev-2",
+                    "attributes": {
+                        "udid": "00008030-DEF",
+                        "platform": "MAC_OS"
+                    }
+                }],
+                "links": {}
+            })))
+            .mount(&server)
+            .await;
+
+        let devices = client(server.uri()).fetch_devices().await.unwrap();
+        assert_eq!(devices.len(), 2);
+        assert_eq!(
+            devices[0],
+            DeviceInfo {
+                id: "dev-1".into(),
+                name: "Alice iPhone".into(),
+                udid: Some("00008030-ABC".into()),
+                platform: Some("IOS".into()),
+                device_class: Some("IPHONE".into()),
+                model: Some("iPhone 15 Pro".into()),
+                status: "ENABLED".into(),
+                added_date: Some("2026-03-01T12:00:00Z".into()),
+            }
+        );
+        // The second device exercises the non-optional fallbacks.
+        assert_eq!(devices[1].id, "dev-2");
+        assert_eq!(devices[1].name, "");
+        assert_eq!(devices[1].status, "ENABLED");
+        assert_eq!(devices[1].udid.as_deref(), Some("00008030-DEF"));
+        assert_eq!(devices[1].platform.as_deref(), Some("MAC_OS"));
+        assert!(devices[1].device_class.is_none());
+        assert!(devices[1].added_date.is_none());
+    }
+
+    #[tokio::test]
+    async fn fetch_devices_surfaces_pending_agreements() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v1/devices"))
+            .respond_with(ResponseTemplate::new(403).set_body_json(serde_json::json!({
+                "errors": [{ "detail": "The agreement is pending acceptance." }]
+            })))
+            .mount(&server)
+            .await;
+
+        let err = client(server.uri()).fetch_devices().await.unwrap_err();
+        match err {
+            StackError::PendingAgreements { message } => {
+                assert!(message.contains("pending agreements"))
+            }
+            other => panic!("expected PendingAgreements, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn fetch_devices_surfaces_http_error() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v1/devices"))
+            .respond_with(ResponseTemplate::new(500).set_body_string("boom"))
+            .mount(&server)
+            .await;
+
+        let err = client(server.uri()).fetch_devices().await.unwrap_err();
+        assert!(matches!(err, StackError::Http { status: 500, .. }));
+    }
+
+    #[tokio::test]
+    async fn create_device_posts_and_maps() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/v1/devices"))
+            // Assert the request carries the expected name/platform/udid attributes.
+            .and(wiremock::matchers::body_partial_json(serde_json::json!({
+                "data": {
+                    "type": "devices",
+                    "attributes": {
+                        "name": "Bob iPad",
+                        "platform": "IOS",
+                        "udid": "00008030-XYZ"
+                    }
+                }
+            })))
+            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
+                "data": {
+                    "type": "devices",
+                    "id": "dev-new",
+                    "attributes": {
+                        "name": "Bob iPad",
+                        "udid": "00008030-XYZ",
+                        "platform": "IOS",
+                        "deviceClass": "IPAD",
+                        "model": "iPad Pro",
+                        "status": "ENABLED",
+                        "addedDate": "2026-03-02T08:00:00Z"
+                    }
+                }
+            })))
+            .mount(&server)
+            .await;
+
+        let device = client(server.uri())
+            .create_device("Bob iPad", "IOS", "00008030-XYZ")
+            .await
+            .unwrap();
+
+        assert_eq!(device.id, "dev-new");
+        assert_eq!(device.name, "Bob iPad");
+        assert_eq!(device.udid.as_deref(), Some("00008030-XYZ"));
+        assert_eq!(device.platform.as_deref(), Some("IOS"));
+        assert_eq!(device.device_class.as_deref(), Some("IPAD"));
+        assert_eq!(device.model.as_deref(), Some("iPad Pro"));
+        assert_eq!(device.status, "ENABLED");
+        assert_eq!(device.added_date.as_deref(), Some("2026-03-02T08:00:00Z"));
+    }
+
+    #[tokio::test]
+    async fn create_device_surfaces_http_error() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/devices"))
+            .respond_with(ResponseTemplate::new(409).set_body_string("conflict"))
+            .mount(&server)
+            .await;
+
+        let err = client(server.uri())
+            .create_device("Bob iPad", "IOS", "00008030-XYZ")
+            .await
+            .unwrap_err();
+        assert!(matches!(err, StackError::Http { status: 409, .. }));
+    }
+
+    #[tokio::test]
+    async fn update_device_sends_only_name_when_status_absent() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("PATCH"))
+            .and(path("/v1/devices/dev-1"))
+            // Only `name` must be present; `status` must be omitted entirely.
+            .and(wiremock::matchers::body_partial_json(serde_json::json!({
+                "data": {
+                    "type": "devices",
+                    "id": "dev-1",
+                    "attributes": { "name": "Renamed" }
+                }
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": { "type": "devices", "id": "dev-1", "attributes": {} }
+            })))
+            .mount(&server)
+            .await;
+
+        let result = client(server.uri())
+            .update_device("dev-1", Some("Renamed"), None)
+            .await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn update_device_sends_only_status_when_name_absent() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("PATCH"))
+            .and(path("/v1/devices/dev-1"))
+            // Only `status` must be present; `name` must be omitted entirely.
+            .and(wiremock::matchers::body_partial_json(serde_json::json!({
+                "data": {
+                    "type": "devices",
+                    "id": "dev-1",
+                    "attributes": { "status": "DISABLED" }
+                }
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": { "type": "devices", "id": "dev-1", "attributes": {} }
+            })))
+            .mount(&server)
+            .await;
+
+        let result = client(server.uri())
+            .update_device("dev-1", None, Some("DISABLED"))
+            .await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn update_device_surfaces_http_error() {
+        let server = MockServer::start().await;
+        Mock::given(method("PATCH"))
+            .and(path("/v1/devices/dev-1"))
+            .respond_with(ResponseTemplate::new(422).set_body_string("unprocessable"))
+            .mount(&server)
+            .await;
+
+        let err = client(server.uri())
+            .update_device("dev-1", Some("Renamed"), None)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, StackError::Http { status: 422, .. }));
     }
 }
