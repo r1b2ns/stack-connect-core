@@ -217,6 +217,14 @@ struct ReviewSubmissionRelationships {
     submitted_by_actor: ToOneRelationship,
 }
 
+/// A JSON:API single-resource document wrapping one `reviewSubmissions`, as
+/// returned by `GET /v1/reviewSubmissions/{id}`. Only the resource is needed —
+/// its `attributes.state` drives the discard branching.
+#[derive(Deserialize)]
+struct ReviewSubmissionDocument {
+    data: ReviewSubmissionResource,
+}
+
 /// A JSON:API document page of `reviewSubmissionItems`, returned by
 /// `GET /v1/reviewSubmissions/{id}/items`. Only each item's `id` is needed (to
 /// `DELETE` it) plus `links.next` to follow pagination; any `included[]` is
@@ -2913,6 +2921,112 @@ impl AppStoreClient {
                 // Unknown / non-cancellable state: never blindly PATCH (would 409).
                 _ => {}
             }
+        }
+        Ok(())
+    }
+
+    /// Resubmits a single draft review submission identified by `submission_id`.
+    ///
+    /// `PATCH /v1/reviewSubmissions/{submission_id}` setting the `submitted`
+    /// attribute to `true` (the documented "Submit Submission" action). Any 2xx
+    /// → `Ok(())`. The call routes through the shared pending-agreements 403
+    /// guard via [`Self::patch_no_content`] (the same helper used by
+    /// [`Self::cancel_submission`]/[`Self::cancel_review`]).
+    ///
+    /// # Errors
+    /// [`StackError::PendingAgreements`] on a pending-agreements 403,
+    /// [`StackError::Http`] on any other non-2xx response, or
+    /// [`StackError::Network`] on transport failure.
+    pub(crate) async fn submit_review_submission(
+        &self,
+        submission_id: &str,
+    ) -> Result<(), StackError> {
+        let patch_url = format!("{}/v1/reviewSubmissions/{submission_id}", self.base_url);
+        let patch_body = json!({
+            "data": {
+                "type": "reviewSubmissions",
+                "id": submission_id,
+                "attributes": { "submitted": true }
+            }
+        });
+        let token = self.auth.bearer_token().await?;
+        self.patch_no_content(&patch_url, &token, &patch_body).await
+    }
+
+    /// Discards a single review submission identified by `submission_id`,
+    /// branching on its current `state` so an invalid mutation is never issued
+    /// (Apple returns `409 STATE_ERROR.*` for the wrong action per state).
+    ///
+    /// 1. `GET /v1/reviewSubmissions/{submission_id}` reads `data.attributes.state`.
+    ///    A `404` (submission already gone) is a no-op that returns `Ok(())`.
+    /// 2. Branch on the resolved `state` (mirroring [`Self::cancel_submission`]):
+    ///    - `WAITING_FOR_REVIEW` / `IN_REVIEW` / `UNRESOLVED_ISSUES` → already
+    ///      sent to review, so it is canceled via
+    ///      `PATCH /v1/reviewSubmissions/{id}` with `canceled: true`.
+    ///    - `READY_FOR_REVIEW` → created but not yet submitted. The
+    ///      `reviewSubmissions` resource forbids `DELETE` and rejects
+    ///      `canceled: true` in this state, so its items are removed via
+    ///      [`Self::delete_submission_items`] (returning the version to
+    ///      `PREPARE_FOR_SUBMISSION` and clearing the draft).
+    ///    - any other state (e.g. `COMPLETE`, `CANCELING`, `COMPLETING`, or a
+    ///      missing `state`) → skipped with no mutating call (a blind PATCH would
+    ///      `409`).
+    ///
+    /// All requests route through the shared pending-agreements 403 guard.
+    ///
+    /// # Errors
+    /// [`StackError::PendingAgreements`] on a pending-agreements 403,
+    /// [`StackError::Http`] on any other non-2xx response (other than the GET's
+    /// 404, which is absent), [`StackError::Decode`] on malformed JSON, or
+    /// [`StackError::Network`] on transport failure.
+    pub(crate) async fn discard_review_submission(
+        &self,
+        submission_id: &str,
+    ) -> Result<(), StackError> {
+        let get_url = format!("{}/v1/reviewSubmissions/{submission_id}", self.base_url);
+        let token = self.auth.bearer_token().await?;
+        let (status, body) = self
+            .send_and_read(self.http.get(&get_url).bearer_auth(token))
+            .await?;
+        // Submission already gone → ASC returns 404; treat as a no-op.
+        if status.as_u16() == 404 {
+            return Ok(());
+        }
+        if !status.is_success() {
+            if let Some(err) = pending_agreements_error(status.as_u16(), &body) {
+                return Err(err);
+            }
+            return Err(StackError::Http {
+                status: status.as_u16(),
+                message: body,
+            });
+        }
+
+        let document: ReviewSubmissionDocument = serde_json::from_str(&body)
+            .map_err(|e| StackError::decode(format!("review submission response: {e}")))?;
+        match document.data.attributes.state.as_deref() {
+            // Already sent to review: cancel the in-flight submission.
+            Some("WAITING_FOR_REVIEW") | Some("IN_REVIEW") | Some("UNRESOLVED_ISSUES") => {
+                let patch_url = format!("{}/v1/reviewSubmissions/{submission_id}", self.base_url);
+                let patch_body = json!({
+                    "data": {
+                        "type": "reviewSubmissions",
+                        "id": submission_id,
+                        "attributes": { "canceled": true }
+                    }
+                });
+                let token = self.auth.bearer_token().await?;
+                self.patch_no_content(&patch_url, &token, &patch_body)
+                    .await?;
+            }
+            // Created but not yet submitted: `reviewSubmissions` forbids DELETE
+            // and rejects `canceled: true` here, so drop the submission's items
+            // instead — emptying it returns the version to PREPARE_FOR_SUBMISSION.
+            Some("READY_FOR_REVIEW") => {
+                self.delete_submission_items(submission_id).await?;
+            }
+            // Unknown / non-cancellable state: never blindly PATCH (would 409).
+            _ => {}
         }
         Ok(())
     }
@@ -8095,6 +8209,192 @@ mod tests {
 
         let err = client(server.uri())
             .cancel_review("APP1")
+            .await
+            .unwrap_err();
+        assert!(matches!(err, StackError::PendingAgreements { .. }));
+    }
+
+    #[tokio::test]
+    async fn submit_review_submission_patches_submitted() {
+        let server = MockServer::start().await;
+
+        // The draft is resubmitted via PATCH { submitted: true }.
+        Mock::given(method("PATCH"))
+            .and(path("/v1/reviewSubmissions/sub-1"))
+            .and(wiremock::matchers::body_partial_json(serde_json::json!({
+                "data": {
+                    "type": "reviewSubmissions",
+                    "id": "sub-1",
+                    "attributes": { "submitted": true }
+                }
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": { "type": "reviewSubmissions", "id": "sub-1" }
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        assert!(client(server.uri())
+            .submit_review_submission("sub-1")
+            .await
+            .is_ok());
+    }
+
+    #[tokio::test]
+    async fn submit_review_submission_surfaces_http_error() {
+        let server = MockServer::start().await;
+        Mock::given(method("PATCH"))
+            .and(path("/v1/reviewSubmissions/sub-1"))
+            .respond_with(ResponseTemplate::new(409).set_body_string("conflict"))
+            .mount(&server)
+            .await;
+
+        let err = client(server.uri())
+            .submit_review_submission("sub-1")
+            .await
+            .unwrap_err();
+        assert!(matches!(err, StackError::Http { status: 409, .. }));
+    }
+
+    #[tokio::test]
+    async fn discard_review_submission_deletes_items_when_ready_for_review() {
+        let server = MockServer::start().await;
+
+        // GET the single submission; it is a not-yet-submitted draft.
+        Mock::given(method("GET"))
+            .and(path("/v1/reviewSubmissions/sub-ready"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": {
+                    "type": "reviewSubmissions",
+                    "id": "sub-ready",
+                    "attributes": { "state": "READY_FOR_REVIEW" }
+                }
+            })))
+            .mount(&server)
+            .await;
+
+        // Its items list returns one item.
+        Mock::given(method("GET"))
+            .and(path("/v1/reviewSubmissions/sub-ready/items"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": [{ "type": "reviewSubmissionItems", "id": "item-1" }]
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        // The item is removed via DELETE /v1/reviewSubmissionItems/{itemId}.
+        Mock::given(method("DELETE"))
+            .and(path("/v1/reviewSubmissionItems/item-1"))
+            .respond_with(ResponseTemplate::new(204))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        // A DELETE on /v1/reviewSubmissions/* or a PATCH would hit no mock, 404,
+        // and fail the `is_ok()` assertion below.
+        assert!(client(server.uri())
+            .discard_review_submission("sub-ready")
+            .await
+            .is_ok());
+    }
+
+    #[tokio::test]
+    async fn discard_review_submission_cancels_when_in_review() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/v1/reviewSubmissions/sub-r"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": {
+                    "type": "reviewSubmissions",
+                    "id": "sub-r",
+                    "attributes": { "state": "IN_REVIEW" }
+                }
+            })))
+            .mount(&server)
+            .await;
+
+        // An IN_REVIEW submission is canceled via PATCH { canceled: true }.
+        Mock::given(method("PATCH"))
+            .and(path("/v1/reviewSubmissions/sub-r"))
+            .and(wiremock::matchers::body_partial_json(serde_json::json!({
+                "data": {
+                    "type": "reviewSubmissions",
+                    "id": "sub-r",
+                    "attributes": { "canceled": true }
+                }
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": { "type": "reviewSubmissions", "id": "sub-r" }
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        assert!(client(server.uri())
+            .discard_review_submission("sub-r")
+            .await
+            .is_ok());
+    }
+
+    #[tokio::test]
+    async fn discard_review_submission_is_noop_for_complete() {
+        let server = MockServer::start().await;
+
+        // A COMPLETE submission resolves to a no-op: only the GET is served and
+        // no mutating mock is mounted, so any PATCH/DELETE would 404 and fail.
+        Mock::given(method("GET"))
+            .and(path("/v1/reviewSubmissions/sub-c"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": {
+                    "type": "reviewSubmissions",
+                    "id": "sub-c",
+                    "attributes": { "state": "COMPLETE" }
+                }
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        assert!(client(server.uri())
+            .discard_review_submission("sub-c")
+            .await
+            .is_ok());
+    }
+
+    #[tokio::test]
+    async fn discard_review_submission_is_noop_on_404() {
+        let server = MockServer::start().await;
+
+        // The submission is already gone: GET 404, no further calls.
+        Mock::given(method("GET"))
+            .and(path("/v1/reviewSubmissions/sub-gone"))
+            .respond_with(ResponseTemplate::new(404).set_body_string("not found"))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        assert!(client(server.uri())
+            .discard_review_submission("sub-gone")
+            .await
+            .is_ok());
+    }
+
+    #[tokio::test]
+    async fn discard_review_submission_surfaces_pending_agreements_on_get() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v1/reviewSubmissions/sub-1"))
+            .respond_with(ResponseTemplate::new(403).set_body_json(serde_json::json!({
+                "errors": [{ "detail": "The agreement is pending acceptance." }]
+            })))
+            .mount(&server)
+            .await;
+
+        let err = client(server.uri())
+            .discard_review_submission("sub-1")
             .await
             .unwrap_err();
         assert!(matches!(err, StackError::PendingAgreements { .. }));

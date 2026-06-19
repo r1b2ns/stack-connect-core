@@ -52,6 +52,14 @@ pub(crate) trait ReviewsImpl: Send + Sync {
 
     /// Deletes the developer response identified by `response_id`.
     async fn delete_review_response(&self, response_id: String) -> Result<(), StackError>;
+
+    /// Resubmits the draft review submission identified by `submission_id`.
+    async fn submit_review_submission(&self, submission_id: String) -> Result<(), StackError>;
+
+    /// Discards the review submission identified by `submission_id`, branching on
+    /// its current state to clear a stale draft or cancel an in-flight
+    /// submission.
+    async fn discard_review_submission(&self, submission_id: String) -> Result<(), StackError>;
 }
 
 /// UniFFI-exported Reviews capability handle. A thin, binding-friendly wrapper
@@ -146,5 +154,35 @@ impl Reviews {
     /// transport failure.
     pub async fn delete_review_response(&self, response_id: String) -> Result<(), StackError> {
         self.inner.delete_review_response(response_id).await
+    }
+
+    /// Resubmits the draft review submission identified by `submission_id` by
+    /// setting its `submitted` attribute to `true`. Use this to re-send a
+    /// submission that was left in `READY_FOR_REVIEW`.
+    ///
+    /// # Errors
+    /// [`StackError::PendingAgreements`] when App Store Connect reports pending
+    /// agreements, [`StackError::Http`] on any other non-2xx response, or
+    /// [`StackError::Network`] on transport failure.
+    pub async fn submit_review_submission(&self, submission_id: String) -> Result<(), StackError> {
+        self.inner.submit_review_submission(submission_id).await
+    }
+
+    /// Discards the review submission identified by `submission_id`, branching on
+    /// its current state: an in-flight submission (`WAITING_FOR_REVIEW` /
+    /// `IN_REVIEW` / `UNRESOLVED_ISSUES`) is canceled, a not-yet-submitted draft
+    /// (`READY_FOR_REVIEW`) is emptied of its items (returning its version to
+    /// `PREPARE_FOR_SUBMISSION`), and any other/absent state is a no-op. A
+    /// submission that no longer exists (`404`) is also a no-op. Use this to
+    /// clear stale drafts that block creating a new submission.
+    ///
+    /// # Errors
+    /// [`StackError::PendingAgreements`] when App Store Connect reports pending
+    /// agreements, [`StackError::Http`] on any other non-2xx response (other than
+    /// the lookup's 404, which is treated as already-discarded),
+    /// [`StackError::Decode`] on malformed JSON, or [`StackError::Network`] on
+    /// transport failure.
+    pub async fn discard_review_submission(&self, submission_id: String) -> Result<(), StackError> {
+        self.inner.discard_review_submission(submission_id).await
     }
 }

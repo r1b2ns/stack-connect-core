@@ -245,6 +245,14 @@ impl ReviewsImpl for AppStoreReviews {
     async fn delete_review_response(&self, response_id: String) -> Result<(), StackError> {
         self.client.delete_review_response(&response_id).await
     }
+
+    async fn submit_review_submission(&self, submission_id: String) -> Result<(), StackError> {
+        self.client.submit_review_submission(&submission_id).await
+    }
+
+    async fn discard_review_submission(&self, submission_id: String) -> Result<(), StackError> {
+        self.client.discard_review_submission(&submission_id).await
+    }
 }
 
 /// App Store Connect implementation of the [`AppStoreVersionsImpl`] capability
