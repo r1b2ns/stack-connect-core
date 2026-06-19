@@ -9,8 +9,8 @@ use crate::domain::{
     AppInfoLocalizationInfo, AppReviewDetailInfo, AppStoreLocalizationInfo, AppStoreVersionInfo,
     BetaAppLocalizationInfo, BetaAppReviewDetailInfo, BetaBuildLocalizationInfo, BetaGroupInfo,
     BetaTesterInfo, BuildDetailInfo, BuildInfo, BuildsPage, BundleIdCapabilityInfo, BundleIdInfo,
-    CustomerReview, CustomerReviewsPage, DeviceInfo, PhasedReleaseInfo, ReviewResponse,
-    ReviewSubmission, ScreenshotSetInfo, TeamMemberInfo, UserInfo,
+    CertificateInfo, CustomerReview, CustomerReviewsPage, DeviceInfo, PhasedReleaseInfo,
+    ReviewResponse, ReviewSubmission, ScreenshotSetInfo, TeamMemberInfo, UserInfo,
 };
 use crate::error::StackError;
 use crate::ports::DebugLogger;
@@ -31,6 +31,7 @@ use crate::service::capabilities::beta_build_localizations::{
 use crate::service::capabilities::beta_groups::{BetaGroups, BetaGroupsImpl};
 use crate::service::capabilities::builds::{Builds, BuildsImpl};
 use crate::service::capabilities::bundle_ids::{BundleIds, BundleIdsImpl};
+use crate::service::capabilities::certificates::{Certificates, CertificatesImpl};
 use crate::service::capabilities::devices::{Devices, DevicesImpl};
 use crate::service::capabilities::reviews::{Reviews, ReviewsImpl};
 use crate::service::capabilities::users::{Users, UsersImpl};
@@ -84,6 +85,7 @@ impl ProviderImpl for AppStoreProvider {
             Capability::Users,
             Capability::Devices,
             Capability::BundleIds,
+            Capability::Certificates,
         ]
     }
 
@@ -171,6 +173,12 @@ impl ProviderImpl for AppStoreProvider {
 
     fn bundle_ids(&self) -> Option<Arc<BundleIds>> {
         Some(BundleIds::new(Box::new(AppStoreBundleIds {
+            client: Arc::clone(&self.client),
+        })))
+    }
+
+    fn certificates(&self) -> Option<Arc<Certificates>> {
+        Some(Certificates::new(Box::new(AppStoreCertificates {
             client: Arc::clone(&self.client),
         })))
     }
@@ -1069,6 +1077,45 @@ impl BundleIdsImpl for AppStoreBundleIds {
     }
 }
 
+/// App Store Connect implementation of the [`CertificatesImpl`] capability
+/// contract. Holds a shared [`AppStoreClient`] so it reuses the provider's token
+/// cache.
+struct AppStoreCertificates {
+    client: Arc<AppStoreClient>,
+}
+
+#[async_trait]
+impl CertificatesImpl for AppStoreCertificates {
+    async fn fetch_certificates(&self) -> Result<Vec<CertificateInfo>, StackError> {
+        self.client.fetch_certificates().await
+    }
+
+    async fn fetch_certificate_content(&self, id: String) -> Result<Option<String>, StackError> {
+        self.client.fetch_certificate_content(&id).await
+    }
+
+    async fn create_certificate(
+        &self,
+        csr_content: String,
+        certificate_type: String,
+        pass_type_id: Option<String>,
+        merchant_id: Option<String>,
+    ) -> Result<CertificateInfo, StackError> {
+        self.client
+            .create_certificate(
+                &csr_content,
+                &certificate_type,
+                pass_type_id.as_deref(),
+                merchant_id.as_deref(),
+            )
+            .await
+    }
+
+    async fn revoke_certificate(&self, id: String) -> Result<(), StackError> {
+        self.client.revoke_certificate(&id).await
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1101,7 +1148,8 @@ mod tests {
                 Capability::AccessibilityDeclarations,
                 Capability::Users,
                 Capability::Devices,
-                Capability::BundleIds
+                Capability::BundleIds,
+                Capability::Certificates
             ]
         );
     }
@@ -1207,5 +1255,15 @@ mod tests {
         // App Store Connect supports BundleIds, so the accessor must return `Some`.
         assert!(provider().bundle_ids().is_some());
         assert!(provider().capabilities().contains(&Capability::BundleIds));
+    }
+
+    #[test]
+    fn exposes_certificates_capability_handle() {
+        // App Store Connect supports Certificates, so the accessor must return
+        // `Some`.
+        assert!(provider().certificates().is_some());
+        assert!(provider()
+            .capabilities()
+            .contains(&Capability::Certificates));
     }
 }

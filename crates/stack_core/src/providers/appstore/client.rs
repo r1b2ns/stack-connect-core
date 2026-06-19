@@ -10,9 +10,9 @@ use crate::domain::{
     AppInfoDetails, AppInfoLocalizationInfo, AppReviewDetailInfo, AppStoreLocalizationInfo,
     AppStoreVersionInfo, BetaAppLocalizationInfo, BetaAppReviewDetailInfo,
     BetaBuildLocalizationInfo, BetaGroupInfo, BetaTesterInfo, BuildDetailInfo, BuildInfo,
-    BuildsPage, BundleIdCapabilityInfo, BundleIdInfo, CustomerReview, CustomerReviewsPage,
-    DeviceInfo, PhasedReleaseInfo, ReviewResponse, ReviewSubmission, ScreenshotInfo,
-    ScreenshotSetInfo, TeamMemberInfo, UserInfo,
+    BuildsPage, BundleIdCapabilityInfo, BundleIdInfo, CertificateInfo, CustomerReview,
+    CustomerReviewsPage, DeviceInfo, PhasedReleaseInfo, ReviewResponse, ReviewSubmission,
+    ScreenshotInfo, ScreenshotSetInfo, TeamMemberInfo, UserInfo,
 };
 use crate::error::StackError;
 use crate::ports::DebugLogger;
@@ -1963,6 +1963,81 @@ impl BundleIdCapabilityResource {
             id: self.id,
             capability_type,
         })
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Certificates (JSON:API)
+// ---------------------------------------------------------------------------
+
+/// A JSON:API document page of `certificates` resources.
+#[derive(Deserialize)]
+struct CertificatesResponse {
+    #[serde(default)]
+    data: Vec<CertificateResource>,
+    #[serde(default)]
+    links: Links,
+}
+
+/// A JSON:API single-resource document of a `certificates` resource (create and
+/// single-fetch responses).
+#[derive(Deserialize)]
+struct CertificateDocument {
+    data: CertificateResource,
+}
+
+#[derive(Deserialize)]
+struct CertificateResource {
+    id: String,
+    #[serde(default)]
+    attributes: CertificateAttributes,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct CertificateAttributes {
+    #[serde(default)]
+    display_name: Option<String>,
+    #[serde(default)]
+    name: Option<String>,
+    /// Read as a plain string: App Store Connect keeps adding `CertificateType`
+    /// values, so this is never an enum.
+    #[serde(default)]
+    certificate_type: Option<String>,
+    #[serde(default)]
+    platform: Option<String>,
+    #[serde(default)]
+    serial_number: Option<String>,
+    /// Raw ISO8601 string passed through verbatim — the core does no date parsing.
+    #[serde(default)]
+    expiration_date: Option<String>,
+    /// NB: the wire key is `activated`, not `isActivated`; `rename` overrides the
+    /// container-level `camelCase` rule.
+    #[serde(rename = "activated", default)]
+    activated: bool,
+    /// Base64-encoded certificate payload. Absent on list pages, present after a
+    /// create or single-resource fetch.
+    #[serde(default)]
+    certificate_content: Option<String>,
+}
+
+impl CertificateResource {
+    /// Maps a `certificates` resource into [`CertificateInfo`], applying the
+    /// empty-string fallbacks for the non-optional
+    /// `display_name`/`name`/`certificate_type` attributes and mapping the wire
+    /// `activated` flag onto `is_activated`.
+    fn into_certificate_info(self) -> CertificateInfo {
+        CertificateInfo {
+            id: self.id,
+            display_name: self.attributes.display_name.unwrap_or_default(),
+            name: self.attributes.name.unwrap_or_default(),
+            certificate_type: self.attributes.certificate_type.unwrap_or_default(),
+            platform: self.attributes.platform,
+            serial_number: self.attributes.serial_number,
+            expiration_date: self.attributes.expiration_date,
+            is_activated: self.attributes.activated,
+            certificate_content: self.attributes.certificate_content,
+        }
     }
 }
 
@@ -5759,6 +5834,141 @@ impl AppStoreClient {
     /// [`StackError::Network`] on transport failure.
     pub(crate) async fn disable_capability(&self, capability_id: &str) -> Result<(), StackError> {
         let url = format!("{}/v1/bundleIdCapabilities/{capability_id}", self.base_url);
+        let token = self.auth.bearer_token().await?;
+        let (status, body) = self
+            .send_and_read(self.http.delete(&url).bearer_auth(token))
+            .await?;
+        if status.is_success() {
+            return Ok(());
+        }
+        if let Some(err) = pending_agreements_error(status.as_u16(), &body) {
+            return Err(err);
+        }
+        Err(StackError::Http {
+            status: status.as_u16(),
+            message: body,
+        })
+    }
+
+    /// Lists every certificate of the connected account, sorted by display name.
+    ///
+    /// `GET /v1/certificates?sort=displayName&limit=200`, following `links.next`
+    /// pagination until exhausted (`limit` is the page size, not a cap on the
+    /// total). The list omits certificate content, so every entry's
+    /// `certificate_content` is `None`.
+    ///
+    /// # Errors
+    /// [`StackError::PendingAgreements`] on a pending-agreements 403,
+    /// [`StackError::Http`] on any other non-2xx page, [`StackError::Decode`] on
+    /// malformed JSON, or [`StackError::Network`] on transport failure.
+    pub(crate) async fn fetch_certificates(&self) -> Result<Vec<CertificateInfo>, StackError> {
+        let mut certificates = Vec::new();
+        let mut next_url = Some(format!(
+            "{}/v1/certificates?sort=displayName&limit=200",
+            self.base_url
+        ));
+
+        while let Some(url) = next_url {
+            let body = self.get_page(&url).await?;
+            let page: CertificatesResponse = serde_json::from_str(&body)
+                .map_err(|e| StackError::decode(format!("certificates response: {e}")))?;
+            certificates.extend(
+                page.data
+                    .into_iter()
+                    .map(CertificateResource::into_certificate_info),
+            );
+
+            // `links.next` is an absolute URL; follow it verbatim until absent.
+            next_url = page.links.next.filter(|u| !u.is_empty());
+        }
+
+        Ok(certificates)
+    }
+
+    /// Fetches the base64 `certificateContent` of the certificate `id`.
+    ///
+    /// `GET /v1/certificates/{id}?fields[certificates]=certificateContent,...`,
+    /// requesting the content field explicitly (the list omits it). Returns
+    /// `None` when the attribute is absent.
+    ///
+    /// # Errors
+    /// [`StackError::PendingAgreements`] on a pending-agreements 403,
+    /// [`StackError::Http`] on any other non-2xx response, [`StackError::Decode`]
+    /// on malformed JSON, or [`StackError::Network`] on transport failure.
+    pub(crate) async fn fetch_certificate_content(
+        &self,
+        id: &str,
+    ) -> Result<Option<String>, StackError> {
+        let url = format!(
+            "{}/v1/certificates/{id}?fields[certificates]=certificateContent,displayName,name,certificateType,platform,serialNumber,expirationDate,activated",
+            self.base_url
+        );
+        let body = self.get_page(&url).await?;
+        let document: CertificateDocument = serde_json::from_str(&body)
+            .map_err(|e| StackError::decode(format!("certificate response: {e}")))?;
+        Ok(document.data.attributes.certificate_content)
+    }
+
+    /// Creates a certificate from `csr_content` of `certificate_type`, optionally
+    /// related to a Pass Type ID or an Apple Pay merchant ID.
+    ///
+    /// `POST /v1/certificates` with a JSON:API body whose `attributes` carry the
+    /// raw `csrContent`/`certificateType`. When `pass_type_id` is `Some` and
+    /// non-empty it is attached as the `passTypeId` relationship; otherwise when
+    /// `merchant_id` is `Some` and non-empty it is attached as the `merchantId`
+    /// relationship; otherwise no `relationships` object is sent. The response
+    /// carries the created certificate including its `certificateContent`.
+    ///
+    /// # Errors
+    /// [`StackError::PendingAgreements`] on a pending-agreements 403,
+    /// [`StackError::Http`] on any other non-2xx response, [`StackError::Decode`]
+    /// on malformed JSON, or [`StackError::Network`] on transport failure.
+    pub(crate) async fn create_certificate(
+        &self,
+        csr_content: &str,
+        certificate_type: &str,
+        pass_type_id: Option<&str>,
+        merchant_id: Option<&str>,
+    ) -> Result<CertificateInfo, StackError> {
+        let url = format!("{}/v1/certificates", self.base_url);
+
+        let mut data = json!({
+            "type": "certificates",
+            "attributes": {
+                "csrContent": csr_content,
+                "certificateType": certificate_type,
+            }
+        });
+
+        // passTypeId wins over merchantId; empty strings are treated as absent.
+        if let Some(id) = pass_type_id.filter(|v| !v.is_empty()) {
+            data["relationships"] = json!({
+                "passTypeId": { "data": { "type": "passTypeIds", "id": id } }
+            });
+        } else if let Some(id) = merchant_id.filter(|v| !v.is_empty()) {
+            data["relationships"] = json!({
+                "merchantId": { "data": { "type": "merchantIds", "id": id } }
+            });
+        }
+
+        let request_body = json!({ "data": data });
+
+        let response_body = self.post_json_2xx(&url, &request_body).await?;
+        let document: CertificateDocument = serde_json::from_str(&response_body)
+            .map_err(|e| StackError::decode(format!("certificate response: {e}")))?;
+        Ok(document.data.into_certificate_info())
+    }
+
+    /// Revokes (deletes) the certificate `id`.
+    ///
+    /// `DELETE /v1/certificates/{id}`. Any 2xx → `Ok(())`.
+    ///
+    /// # Errors
+    /// [`StackError::PendingAgreements`] on a pending-agreements 403,
+    /// [`StackError::Http`] on any other non-2xx response, or
+    /// [`StackError::Network`] on transport failure.
+    pub(crate) async fn revoke_certificate(&self, id: &str) -> Result<(), StackError> {
+        let url = format!("{}/v1/certificates/{id}", self.base_url);
         let token = self.auth.bearer_token().await?;
         let (status, body) = self
             .send_and_read(self.http.delete(&url).bearer_auth(token))
@@ -11926,6 +12136,349 @@ mod tests {
 
         let err = client(server.uri())
             .disable_capability("cap-1")
+            .await
+            .unwrap_err();
+        assert!(matches!(err, StackError::Http { status: 404, .. }));
+    }
+
+    // -----------------------------------------------------------------------
+    // Certificates
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn fetch_certificates_maps_all_fields_and_paginates() {
+        let server = MockServer::start().await;
+        let next = format!("{}/v1/certificates?cursor=PAGE2", server.uri());
+
+        // Page 1: a fully-populated certificate; assert the sort/limit query is
+        // sent and that the list omits certificate content (→ None).
+        Mock::given(method("GET"))
+            .and(path("/v1/certificates"))
+            .and(query_param("sort", "displayName"))
+            .and(query_param("limit", "200"))
+            .and(wiremock::matchers::query_param_is_missing("cursor"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": [{
+                    "type": "certificates",
+                    "id": "cert-1",
+                    "attributes": {
+                        "displayName": "Apple Distribution",
+                        "name": "Acme Inc.",
+                        "certificateType": "DISTRIBUTION",
+                        "platform": "IOS",
+                        "serialNumber": "ABC123",
+                        "expirationDate": "2027-01-01T00:00:00Z",
+                        // NB: wire key is `activated`, not `isActivated`.
+                        "activated": true
+                    }
+                }],
+                "links": { "next": next }
+            })))
+            .mount(&server)
+            .await;
+
+        // Page 2: a certificate with missing string attributes — the empty-string
+        // fallbacks apply, `activated` defaults to false, optionals stay None.
+        Mock::given(method("GET"))
+            .and(path("/v1/certificates"))
+            .and(query_param("cursor", "PAGE2"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": [{
+                    "type": "certificates",
+                    "id": "cert-2",
+                    "attributes": {}
+                }],
+                "links": {}
+            })))
+            .mount(&server)
+            .await;
+
+        let certs = client(server.uri()).fetch_certificates().await.unwrap();
+        assert_eq!(certs.len(), 2);
+        assert_eq!(
+            certs[0],
+            CertificateInfo {
+                id: "cert-1".into(),
+                display_name: "Apple Distribution".into(),
+                name: "Acme Inc.".into(),
+                certificate_type: "DISTRIBUTION".into(),
+                platform: Some("IOS".into()),
+                serial_number: Some("ABC123".into()),
+                expiration_date: Some("2027-01-01T00:00:00Z".into()),
+                is_activated: true,
+                // The list never includes certificate content.
+                certificate_content: None,
+            }
+        );
+        // The second certificate exercises the fallbacks + `activated` default.
+        assert_eq!(certs[1].id, "cert-2");
+        assert_eq!(certs[1].display_name, "");
+        assert_eq!(certs[1].name, "");
+        assert_eq!(certs[1].certificate_type, "");
+        assert!(!certs[1].is_activated);
+        assert!(certs[1].platform.is_none());
+        assert!(certs[1].serial_number.is_none());
+        assert!(certs[1].expiration_date.is_none());
+        assert!(certs[1].certificate_content.is_none());
+    }
+
+    #[tokio::test]
+    async fn fetch_certificates_surfaces_pending_agreements() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v1/certificates"))
+            .respond_with(ResponseTemplate::new(403).set_body_json(serde_json::json!({
+                "errors": [{ "detail": "The agreement is pending acceptance." }]
+            })))
+            .mount(&server)
+            .await;
+
+        let err = client(server.uri()).fetch_certificates().await.unwrap_err();
+        match err {
+            StackError::PendingAgreements { message } => {
+                assert!(message.contains("pending agreements"))
+            }
+            other => panic!("expected PendingAgreements, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn fetch_certificates_surfaces_http_error() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v1/certificates"))
+            .respond_with(ResponseTemplate::new(500).set_body_string("boom"))
+            .mount(&server)
+            .await;
+
+        let err = client(server.uri()).fetch_certificates().await.unwrap_err();
+        assert!(matches!(err, StackError::Http { status: 500, .. }));
+    }
+
+    #[tokio::test]
+    async fn fetch_certificate_content_returns_content_and_sends_fields_query() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v1/certificates/cert-1"))
+            // The explicit fields[certificates] selector must be sent so the
+            // single-resource doc includes certificateContent.
+            .and(query_param(
+                "fields[certificates]",
+                "certificateContent,displayName,name,certificateType,platform,serialNumber,expirationDate,activated",
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": {
+                    "type": "certificates",
+                    "id": "cert-1",
+                    "attributes": {
+                        "certificateContent": "BASE64CONTENT=="
+                    }
+                }
+            })))
+            .mount(&server)
+            .await;
+
+        let content = client(server.uri())
+            .fetch_certificate_content("cert-1")
+            .await
+            .unwrap();
+        assert_eq!(content.as_deref(), Some("BASE64CONTENT=="));
+    }
+
+    #[tokio::test]
+    async fn fetch_certificate_content_returns_none_when_absent() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v1/certificates/cert-1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": {
+                    "type": "certificates",
+                    "id": "cert-1",
+                    "attributes": {}
+                }
+            })))
+            .mount(&server)
+            .await;
+
+        let content = client(server.uri())
+            .fetch_certificate_content("cert-1")
+            .await
+            .unwrap();
+        assert!(content.is_none());
+    }
+
+    #[tokio::test]
+    async fn create_certificate_with_pass_type_id_posts_relationship() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/certificates"))
+            // The attributes carry the raw csrContent/certificateType, and the
+            // passTypeId relationship is attached.
+            .and(wiremock::matchers::body_partial_json(serde_json::json!({
+                "data": {
+                    "type": "certificates",
+                    "attributes": {
+                        "csrContent": "CSR",
+                        "certificateType": "PASS_TYPE_ID"
+                    },
+                    "relationships": {
+                        "passTypeId": {
+                            "data": { "type": "passTypeIds", "id": "pass-1" }
+                        }
+                    }
+                }
+            })))
+            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
+                "data": {
+                    "type": "certificates",
+                    "id": "cert-new",
+                    "attributes": {
+                        "displayName": "Pass Cert",
+                        "name": "Acme",
+                        "certificateType": "PASS_TYPE_ID",
+                        "activated": true,
+                        "certificateContent": "NEWCONTENT=="
+                    }
+                }
+            })))
+            .mount(&server)
+            .await;
+
+        let cert = client(server.uri())
+            .create_certificate("CSR", "PASS_TYPE_ID", Some("pass-1"), None)
+            .await
+            .unwrap();
+        assert_eq!(cert.id, "cert-new");
+        assert_eq!(cert.certificate_content.as_deref(), Some("NEWCONTENT=="));
+    }
+
+    #[tokio::test]
+    async fn create_certificate_with_merchant_id_posts_relationship() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/certificates"))
+            .and(wiremock::matchers::body_partial_json(serde_json::json!({
+                "data": {
+                    "type": "certificates",
+                    "attributes": {
+                        "csrContent": "CSR",
+                        "certificateType": "APPLE_PAY_MERCHANT_IDENTITY"
+                    },
+                    "relationships": {
+                        "merchantId": {
+                            "data": { "type": "merchantIds", "id": "merch-1" }
+                        }
+                    }
+                }
+            })))
+            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
+                "data": {
+                    "type": "certificates",
+                    "id": "cert-merch",
+                    "attributes": { "certificateContent": "MERCHCONTENT==" }
+                }
+            })))
+            .mount(&server)
+            .await;
+
+        // passTypeId is None, so merchantId is used.
+        let cert = client(server.uri())
+            .create_certificate("CSR", "APPLE_PAY_MERCHANT_IDENTITY", None, Some("merch-1"))
+            .await
+            .unwrap();
+        assert_eq!(cert.id, "cert-merch");
+        assert_eq!(cert.certificate_content.as_deref(), Some("MERCHCONTENT=="));
+    }
+
+    #[tokio::test]
+    async fn create_certificate_with_neither_posts_no_relationships_and_maps_content() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/certificates"))
+            .and(wiremock::matchers::body_partial_json(serde_json::json!({
+                "data": {
+                    "type": "certificates",
+                    "attributes": {
+                        "csrContent": "CSR",
+                        "certificateType": "DISTRIBUTION"
+                    }
+                }
+            })))
+            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
+                "data": {
+                    "type": "certificates",
+                    "id": "cert-x",
+                    "attributes": {
+                        "displayName": "Dist",
+                        "certificateType": "DISTRIBUTION",
+                        "certificateContent": "PLAINCONTENT=="
+                    }
+                }
+            })))
+            .mount(&server)
+            .await;
+
+        // Empty strings are treated as absent → no relationship attached.
+        let cert = client(server.uri())
+            .create_certificate("CSR", "DISTRIBUTION", Some(""), Some(""))
+            .await
+            .unwrap();
+        assert_eq!(cert.id, "cert-x");
+        assert_eq!(cert.certificate_content.as_deref(), Some("PLAINCONTENT=="));
+
+        // Assert the request body carried NO `relationships` object at all
+        // (body_partial_json cannot assert absence, so inspect the request).
+        let requests = server.received_requests().await.unwrap();
+        assert_eq!(requests.len(), 1);
+        let body: serde_json::Value = serde_json::from_slice(&requests[0].body).unwrap();
+        assert!(
+            body["data"].get("relationships").is_none(),
+            "expected no relationships object, got: {body}"
+        );
+    }
+
+    #[tokio::test]
+    async fn create_certificate_surfaces_http_error() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/certificates"))
+            .respond_with(ResponseTemplate::new(409).set_body_string("conflict"))
+            .mount(&server)
+            .await;
+
+        let err = client(server.uri())
+            .create_certificate("CSR", "DISTRIBUTION", None, None)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, StackError::Http { status: 409, .. }));
+    }
+
+    #[tokio::test]
+    async fn revoke_certificate_hits_certificates_endpoint() {
+        let server = MockServer::start().await;
+        Mock::given(method("DELETE"))
+            .and(path("/v1/certificates/cert-1"))
+            .respond_with(ResponseTemplate::new(204))
+            .mount(&server)
+            .await;
+
+        assert!(client(server.uri())
+            .revoke_certificate("cert-1")
+            .await
+            .is_ok());
+    }
+
+    #[tokio::test]
+    async fn revoke_certificate_surfaces_http_error() {
+        let server = MockServer::start().await;
+        Mock::given(method("DELETE"))
+            .and(path("/v1/certificates/cert-1"))
+            .respond_with(ResponseTemplate::new(404).set_body_string("not found"))
+            .mount(&server)
+            .await;
+
+        let err = client(server.uri())
+            .revoke_certificate("cert-1")
             .await
             .unwrap_err();
         assert!(matches!(err, StackError::Http { status: 404, .. }));

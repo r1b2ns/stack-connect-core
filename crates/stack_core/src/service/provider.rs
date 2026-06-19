@@ -13,6 +13,7 @@ use crate::service::capabilities::beta_build_localizations::BetaBuildLocalizatio
 use crate::service::capabilities::beta_groups::BetaGroups;
 use crate::service::capabilities::builds::Builds;
 use crate::service::capabilities::bundle_ids::BundleIds;
+use crate::service::capabilities::certificates::Certificates;
 use crate::service::capabilities::devices::Devices;
 use crate::service::capabilities::reviews::Reviews;
 use crate::service::capabilities::users::Users;
@@ -37,6 +38,7 @@ pub enum Capability {
     Users,
     Devices,
     BundleIds,
+    Certificates,
 }
 
 /// Internal, non-exported contract every concrete plugin implements. Kept off the
@@ -134,6 +136,13 @@ pub(crate) trait ProviderImpl: Send + Sync {
     /// The BundleIds capability handle, or `None` if this provider lacks
     /// [`Capability::BundleIds`]. Default `None` so providers opt in explicitly.
     fn bundle_ids(&self) -> Option<Arc<BundleIds>> {
+        None
+    }
+
+    /// The Certificates capability handle, or `None` if this provider lacks
+    /// [`Capability::Certificates`]. Default `None` so providers opt in
+    /// explicitly.
+    fn certificates(&self) -> Option<Arc<Certificates>> {
         None
     }
 }
@@ -259,6 +268,14 @@ impl Provider {
     /// unsupported.
     pub fn bundle_ids(&self) -> Option<Arc<BundleIds>> {
         self.inner.bundle_ids()
+    }
+
+    /// The Certificates capability handle, or `None` when this provider does not
+    /// expose [`Capability::Certificates`]. This is the discovery mechanism: the
+    /// host calls `provider.certificates()` and gets `None` when certificate
+    /// management is unsupported.
+    pub fn certificates(&self) -> Option<Arc<Certificates>> {
+        self.inner.certificates()
     }
 }
 

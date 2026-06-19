@@ -285,6 +285,39 @@ pub struct BundleIdCapabilityInfo {
     pub capability_type: String,
 }
 
+/// A signing certificate registered for the connected App Store Connect account
+/// (development, distribution, push, Pass Type ID, or Apple Pay merchant
+/// certificate).
+///
+/// `display_name`, `name`, and `certificate_type` are non-optional with an
+/// empty-string fallback applied at the wire-mapping boundary when the attribute
+/// is absent; `platform`, `serial_number`, and `expiration_date` are optional.
+/// `certificate_type` is the raw ASC `CertificateType` value (e.g.
+/// `IOS_DEVELOPMENT`, `IOS_DISTRIBUTION`, `MAC_APP_DISTRIBUTION`), forwarded
+/// without remapping. `expiration_date` is the raw ISO8601 string passed through
+/// verbatim — the core does no date parsing.
+///
+/// `is_activated` maps the ASC `activated` attribute (note the wire key is
+/// `activated`, not `isActivated`). `certificate_content` is the base64-encoded
+/// certificate payload: it is `None` for list results (the list omits it) and
+/// `Some` after a create or single-resource fetch.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, uniffi::Record)]
+#[serde(rename_all = "camelCase")]
+pub struct CertificateInfo {
+    pub id: String,
+    #[serde(default)]
+    pub display_name: String,
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub certificate_type: String,
+    pub platform: Option<String>,
+    pub serial_number: Option<String>,
+    pub expiration_date: Option<String>,
+    pub is_activated: bool,
+    pub certificate_content: Option<String>,
+}
+
 /// The TestFlight "Test Information" beta review detail for an app: the beta
 /// review contact (name, email, phone), optional demo account credentials, and
 /// reviewer notes. App Store Connect exposes exactly one per app (the singular
