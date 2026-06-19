@@ -6,60 +6,60 @@ for the full plan and roadmap.
 
 ## Status
 
-**Arquitetura multi-serviço por plugins.** O core é um hub: cada serviço externo
-(App Store Connect, Firebase, Google hoje; AWS, GitHub, … no futuro) entra como um
-`Provider` que implementa um contrato comum, registrado num `registry`. Adicionar
-um serviço não toca o núcleo nem o facade UniFFI — ver [RUST_CORE_PLAN.md](RUST_CORE_PLAN.md)
-(§3 contrato, §4 como adicionar um serviço).
+**Plugin-based multi-service architecture.** The core is a hub: each external
+service (App Store Connect, Firebase, Google today; AWS, GitHub, … in the future)
+plugs in as a `Provider` implementing a common contract, registered in a
+`registry`. Adding a service touches neither the core nor the UniFFI facade — see
+[RUST_CORE_PLAN.md](RUST_CORE_PLAN.md) (§3 contract, §4 how to add a service).
 
-**Phase 0 — esqueleto + prova de binding ✅.** Workspace Cargo, facade UniFFI,
-callback `CredentialStore`, `StackError`, xcframework (iOS device/sim) + smoke/XCTest.
+**Phase 0 — skeleton + binding proof ✅.** Cargo workspace, UniFFI facade,
+`CredentialStore` callback, `StackError`, xcframework (iOS device/sim) + smoke/XCTest.
 
-**Phase 1 — contrato de serviço + 1º plugin (App Store Connect) ✅.** `service::{provider,
+**Phase 1 — service contract + 1st plugin (App Store Connect) ✅.** `service::{provider,
 kind, registry}` (`Provider`/`ServiceKind`/`Capability`/`CredentialField`), `auth::es256`
 (`.p8`/P-256), `providers/appstore` (`validate` + `fetch_apps` via `GET /v1/apps`,
-paginação `links.next`), facade `connect()`/`credential_schema()`/`available_services()`.
-Sample Google removido. **17 testes Rust** + host smoke + XCTest no simulador iOS — verdes.
+`links.next` pagination), facade `connect()`/`credential_schema()`/`available_services()`.
+Google sample removed. **17 Rust tests** + host smoke + XCTest on the iOS simulator — green.
 
-Próximo: **Fase 2** — plugar o App Store Connect no app iOS (strangler) + capacidades
-ASC completas (~31 recursos) + `SyncService` sobre `BlobStore`.
+Next: **Phase 2** — plug App Store Connect into the iOS app (strangler) + full ASC
+capabilities (~31 resources) + `SyncService` over `BlobStore`.
 
 ## Layout
 
 ```
-crates/stack_core/      # o crate do core
+crates/stack_core/      # the core crate
   src/
-    api/play.rs         # cliente Play Developer Reporting (apps:search)
+    api/play.rs         # Play Developer Reporting client (apps:search)
     auth/               # service account · JWT RS256 · OAuth2 + cache
     domain.rs           # AppInfo (uniffi::Record)
     error.rs            # StackError (uniffi::Error)
     ports.rs            # CredentialStore (foreign trait)
     facade.rs           # PlayProvider (uniffi::Object)
     bin/uniffi-bindgen.rs
-  tests/                # smoke (API pública) + fixtures de chave RSA
-bindings/swift/         # pacote SwiftPM consumível pelo app (binaryTarget)
-  Package.swift         # StackCore.xcframework + StackCore.swift gerado
-  smoke/main.swift      # smoke de host (cross-FFI)
+  tests/                # smoke (public API) + RSA key fixtures
+bindings/swift/         # SwiftPM package consumable by the app (binaryTarget)
+  Package.swift         # StackCore.xcframework + generated StackCore.swift
+  smoke/main.swift      # host smoke (cross-FFI)
   Tests/                # XCTest (iOS simulator)
 build/
-  gen-swift.sh          # gera os bindings Swift (UniFFI library mode)
-  build-xcframework.sh  # gera StackCore.xcframework (iOS device + sim)
-  swift-smoke.sh        # compila + roda o smoke cross-FFI no host
+  gen-swift.sh          # generates the Swift bindings (UniFFI library mode)
+  build-xcframework.sh  # generates StackCore.xcframework (iOS device + sim)
+  swift-smoke.sh        # builds + runs the cross-FFI smoke on the host
 ```
 
-## Desenvolvimento
+## Development
 
 ```bash
 cargo fmt --all
 cargo clippy --all-targets --all-features -- -D warnings
 cargo test
 
-# Bindings Swift + xcframework (macOS):
+# Swift bindings + xcframework (macOS):
 ./build/build-xcframework.sh
 
-# Smoke cross-FFI no host (Swift → Rust → callback → erro):
+# Cross-FFI smoke on the host (Swift → Rust → callback → error):
 ./build/swift-smoke.sh
 ```
 
-UniFFI é proc-macro puro (`uniffi::setup_scaffolding!()`); o `uniffi-bindgen` é
-embutido como bin do crate, fixado na mesma versão do runtime.
+UniFFI is pure proc-macro (`uniffi::setup_scaffolding!()`); `uniffi-bindgen` is
+embedded as a crate bin, pinned to the same version as the runtime.
