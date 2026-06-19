@@ -12,6 +12,7 @@ use crate::service::capabilities::beta_app_review_detail::BetaAppReviewDetail;
 use crate::service::capabilities::beta_build_localizations::BetaBuildLocalizations;
 use crate::service::capabilities::beta_groups::BetaGroups;
 use crate::service::capabilities::builds::Builds;
+use crate::service::capabilities::bundle_ids::BundleIds;
 use crate::service::capabilities::devices::Devices;
 use crate::service::capabilities::reviews::Reviews;
 use crate::service::capabilities::users::Users;
@@ -35,6 +36,7 @@ pub enum Capability {
     AccessibilityDeclarations,
     Users,
     Devices,
+    BundleIds,
 }
 
 /// Internal, non-exported contract every concrete plugin implements. Kept off the
@@ -126,6 +128,12 @@ pub(crate) trait ProviderImpl: Send + Sync {
     /// The Devices capability handle, or `None` if this provider lacks
     /// [`Capability::Devices`]. Default `None` so providers opt in explicitly.
     fn devices(&self) -> Option<Arc<Devices>> {
+        None
+    }
+
+    /// The BundleIds capability handle, or `None` if this provider lacks
+    /// [`Capability::BundleIds`]. Default `None` so providers opt in explicitly.
+    fn bundle_ids(&self) -> Option<Arc<BundleIds>> {
         None
     }
 }
@@ -243,6 +251,14 @@ impl Provider {
     /// unsupported.
     pub fn devices(&self) -> Option<Arc<Devices>> {
         self.inner.devices()
+    }
+
+    /// The BundleIds capability handle, or `None` when this provider does not
+    /// expose [`Capability::BundleIds`]. This is the discovery mechanism: the host
+    /// calls `provider.bundle_ids()` and gets `None` when bundle ID management is
+    /// unsupported.
+    pub fn bundle_ids(&self) -> Option<Arc<BundleIds>> {
+        self.inner.bundle_ids()
     }
 }
 

@@ -8,9 +8,9 @@ use crate::domain::{
     AccessibilityDeclarationInfo, AppCategoryInfo, AppInfo, AppInfoDetails,
     AppInfoLocalizationInfo, AppReviewDetailInfo, AppStoreLocalizationInfo, AppStoreVersionInfo,
     BetaAppLocalizationInfo, BetaAppReviewDetailInfo, BetaBuildLocalizationInfo, BetaGroupInfo,
-    BetaTesterInfo, BuildDetailInfo, BuildInfo, BuildsPage, CustomerReview, CustomerReviewsPage,
-    DeviceInfo, PhasedReleaseInfo, ReviewResponse, ReviewSubmission, ScreenshotSetInfo,
-    TeamMemberInfo, UserInfo,
+    BetaTesterInfo, BuildDetailInfo, BuildInfo, BuildsPage, BundleIdCapabilityInfo, BundleIdInfo,
+    CustomerReview, CustomerReviewsPage, DeviceInfo, PhasedReleaseInfo, ReviewResponse,
+    ReviewSubmission, ScreenshotSetInfo, TeamMemberInfo, UserInfo,
 };
 use crate::error::StackError;
 use crate::ports::DebugLogger;
@@ -30,6 +30,7 @@ use crate::service::capabilities::beta_build_localizations::{
 };
 use crate::service::capabilities::beta_groups::{BetaGroups, BetaGroupsImpl};
 use crate::service::capabilities::builds::{Builds, BuildsImpl};
+use crate::service::capabilities::bundle_ids::{BundleIds, BundleIdsImpl};
 use crate::service::capabilities::devices::{Devices, DevicesImpl};
 use crate::service::capabilities::reviews::{Reviews, ReviewsImpl};
 use crate::service::capabilities::users::{Users, UsersImpl};
@@ -82,6 +83,7 @@ impl ProviderImpl for AppStoreProvider {
             Capability::AccessibilityDeclarations,
             Capability::Users,
             Capability::Devices,
+            Capability::BundleIds,
         ]
     }
 
@@ -163,6 +165,12 @@ impl ProviderImpl for AppStoreProvider {
 
     fn devices(&self) -> Option<Arc<Devices>> {
         Some(Devices::new(Box::new(AppStoreDevices {
+            client: Arc::clone(&self.client),
+        })))
+    }
+
+    fn bundle_ids(&self) -> Option<Arc<BundleIds>> {
+        Some(BundleIds::new(Box::new(AppStoreBundleIds {
             client: Arc::clone(&self.client),
         })))
     }
@@ -1008,6 +1016,59 @@ impl DevicesImpl for AppStoreDevices {
     }
 }
 
+/// App Store Connect implementation of the [`BundleIdsImpl`] capability contract.
+/// Holds a shared [`AppStoreClient`] so it reuses the provider's token cache.
+struct AppStoreBundleIds {
+    client: Arc<AppStoreClient>,
+}
+
+#[async_trait]
+impl BundleIdsImpl for AppStoreBundleIds {
+    async fn fetch_bundle_ids(&self) -> Result<Vec<BundleIdInfo>, StackError> {
+        self.client.fetch_bundle_ids().await
+    }
+
+    async fn create_bundle_id(
+        &self,
+        identifier: String,
+        name: String,
+        platform: String,
+    ) -> Result<BundleIdInfo, StackError> {
+        self.client
+            .create_bundle_id(&identifier, &name, &platform)
+            .await
+    }
+
+    async fn update_bundle_id(&self, id: String, name: String) -> Result<(), StackError> {
+        self.client.update_bundle_id(&id, &name).await
+    }
+
+    async fn delete_bundle_id(&self, id: String) -> Result<(), StackError> {
+        self.client.delete_bundle_id(&id).await
+    }
+
+    async fn fetch_bundle_id_capabilities(
+        &self,
+        bundle_id: String,
+    ) -> Result<Vec<BundleIdCapabilityInfo>, StackError> {
+        self.client.fetch_bundle_id_capabilities(&bundle_id).await
+    }
+
+    async fn enable_capability(
+        &self,
+        bundle_id: String,
+        capability_type: String,
+    ) -> Result<BundleIdCapabilityInfo, StackError> {
+        self.client
+            .enable_capability(&bundle_id, &capability_type)
+            .await
+    }
+
+    async fn disable_capability(&self, capability_id: String) -> Result<(), StackError> {
+        self.client.disable_capability(&capability_id).await
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1039,7 +1100,8 @@ mod tests {
                 Capability::AppMetadata,
                 Capability::AccessibilityDeclarations,
                 Capability::Users,
-                Capability::Devices
+                Capability::Devices,
+                Capability::BundleIds
             ]
         );
     }
@@ -1138,5 +1200,12 @@ mod tests {
         // App Store Connect supports Devices, so the accessor must return `Some`.
         assert!(provider().devices().is_some());
         assert!(provider().capabilities().contains(&Capability::Devices));
+    }
+
+    #[test]
+    fn exposes_bundle_ids_capability_handle() {
+        // App Store Connect supports BundleIds, so the accessor must return `Some`.
+        assert!(provider().bundle_ids().is_some());
+        assert!(provider().capabilities().contains(&Capability::BundleIds));
     }
 }

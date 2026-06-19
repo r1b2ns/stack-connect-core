@@ -10,8 +10,9 @@ use crate::domain::{
     AppInfoDetails, AppInfoLocalizationInfo, AppReviewDetailInfo, AppStoreLocalizationInfo,
     AppStoreVersionInfo, BetaAppLocalizationInfo, BetaAppReviewDetailInfo,
     BetaBuildLocalizationInfo, BetaGroupInfo, BetaTesterInfo, BuildDetailInfo, BuildInfo,
-    BuildsPage, CustomerReview, CustomerReviewsPage, DeviceInfo, PhasedReleaseInfo, ReviewResponse,
-    ReviewSubmission, ScreenshotInfo, ScreenshotSetInfo, TeamMemberInfo, UserInfo,
+    BuildsPage, BundleIdCapabilityInfo, BundleIdInfo, CustomerReview, CustomerReviewsPage,
+    DeviceInfo, PhasedReleaseInfo, ReviewResponse, ReviewSubmission, ScreenshotInfo,
+    ScreenshotSetInfo, TeamMemberInfo, UserInfo,
 };
 use crate::error::StackError;
 use crate::ports::DebugLogger;
@@ -1863,6 +1864,105 @@ impl DeviceResource {
                 .unwrap_or_else(|| "ENABLED".to_string()),
             added_date: self.attributes.added_date,
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Bundle IDs (JSON:API)
+// ---------------------------------------------------------------------------
+
+/// A JSON:API document page of `bundleIds` resources.
+#[derive(Deserialize)]
+struct BundleIdsResponse {
+    #[serde(default)]
+    data: Vec<BundleIdResource>,
+    #[serde(default)]
+    links: Links,
+}
+
+/// A JSON:API single-resource document of a `bundleIds` resource (create/update
+/// responses).
+#[derive(Deserialize)]
+struct BundleIdDocument {
+    data: BundleIdResource,
+}
+
+#[derive(Deserialize)]
+struct BundleIdResource {
+    id: String,
+    #[serde(default)]
+    attributes: BundleIdAttributes,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct BundleIdAttributes {
+    #[serde(default)]
+    identifier: Option<String>,
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    platform: Option<String>,
+    #[serde(default)]
+    seed_id: Option<String>,
+}
+
+impl BundleIdResource {
+    /// Maps a `bundleIds` resource into [`BundleIdInfo`], applying the empty-string
+    /// fallbacks for the non-optional `identifier`/`name`/`platform` attributes.
+    fn into_bundle_id_info(self) -> BundleIdInfo {
+        BundleIdInfo {
+            id: self.id,
+            identifier: self.attributes.identifier.unwrap_or_default(),
+            name: self.attributes.name.unwrap_or_default(),
+            platform: self.attributes.platform.unwrap_or_default(),
+            seed_id: self.attributes.seed_id,
+        }
+    }
+}
+
+/// A JSON:API document page of `bundleIdCapabilities` resources.
+#[derive(Deserialize)]
+struct BundleIdCapabilitiesResponse {
+    #[serde(default)]
+    data: Vec<BundleIdCapabilityResource>,
+    #[serde(default)]
+    links: Links,
+}
+
+/// A JSON:API single-resource document of a `bundleIdCapabilities` resource
+/// (enable response).
+#[derive(Deserialize)]
+struct BundleIdCapabilityDocument {
+    data: BundleIdCapabilityResource,
+}
+
+#[derive(Deserialize)]
+struct BundleIdCapabilityResource {
+    id: String,
+    #[serde(default)]
+    attributes: BundleIdCapabilityAttributes,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct BundleIdCapabilityAttributes {
+    /// Read as a plain string: App Store Connect keeps adding values
+    /// (e.g. `FONT_INSTALLATION`, `CARPLAY_CHARGING`), so this is never an enum.
+    #[serde(default)]
+    capability_type: Option<String>,
+}
+
+impl BundleIdCapabilityResource {
+    /// Maps a `bundleIdCapabilities` resource into [`BundleIdCapabilityInfo`],
+    /// returning `None` when `capabilityType` is missing or empty so the caller
+    /// can skip it.
+    fn into_capability_info(self) -> Option<BundleIdCapabilityInfo> {
+        let capability_type = self.attributes.capability_type.filter(|t| !t.is_empty())?;
+        Some(BundleIdCapabilityInfo {
+            id: self.id,
+            capability_type,
+        })
     }
 }
 
@@ -5455,6 +5555,224 @@ impl AppStoreClient {
         });
 
         self.patch_no_content(&url, &token, &request_body).await
+    }
+
+    /// Lists every bundle ID of the connected account, sorted by name.
+    ///
+    /// `GET /v1/bundleIds?sort=name&limit=200`, following `links.next` pagination
+    /// until exhausted (`limit` is the page size, not a cap on the total).
+    ///
+    /// # Errors
+    /// [`StackError::PendingAgreements`] on a pending-agreements 403,
+    /// [`StackError::Http`] on any other non-2xx page, [`StackError::Decode`] on
+    /// malformed JSON, or [`StackError::Network`] on transport failure.
+    pub(crate) async fn fetch_bundle_ids(&self) -> Result<Vec<BundleIdInfo>, StackError> {
+        let mut bundle_ids = Vec::new();
+        let mut next_url = Some(format!(
+            "{}/v1/bundleIds?sort=name&limit=200",
+            self.base_url
+        ));
+
+        while let Some(url) = next_url {
+            let body = self.get_page(&url).await?;
+            let page: BundleIdsResponse = serde_json::from_str(&body)
+                .map_err(|e| StackError::decode(format!("bundleIds response: {e}")))?;
+            bundle_ids.extend(
+                page.data
+                    .into_iter()
+                    .map(BundleIdResource::into_bundle_id_info),
+            );
+
+            // `links.next` is an absolute URL; follow it verbatim until absent.
+            next_url = page.links.next.filter(|u| !u.is_empty());
+        }
+
+        Ok(bundle_ids)
+    }
+
+    /// Registers a new bundle ID with `identifier`, `name`, and ASC `platform`.
+    ///
+    /// `POST /v1/bundleIds` with a JSON:API body whose `attributes` carry
+    /// `name`/`platform`/`identifier`. `platform` is forwarded verbatim (App Store
+    /// Connect validates the `BundleIdPlatform` enum). Returns the created bundle
+    /// ID.
+    ///
+    /// # Errors
+    /// [`StackError::PendingAgreements`] on a pending-agreements 403,
+    /// [`StackError::Http`] on any other non-2xx response, [`StackError::Decode`]
+    /// on malformed JSON, or [`StackError::Network`] on transport failure.
+    pub(crate) async fn create_bundle_id(
+        &self,
+        identifier: &str,
+        name: &str,
+        platform: &str,
+    ) -> Result<BundleIdInfo, StackError> {
+        let url = format!("{}/v1/bundleIds", self.base_url);
+        let request_body = json!({
+            "data": {
+                "type": "bundleIds",
+                "attributes": {
+                    "name": name,
+                    "platform": platform,
+                    "identifier": identifier,
+                }
+            }
+        });
+
+        let response_body = self.post_json_2xx(&url, &request_body).await?;
+        let document: BundleIdDocument = serde_json::from_str(&response_body)
+            .map_err(|e| StackError::decode(format!("bundleId response: {e}")))?;
+        Ok(document.data.into_bundle_id_info())
+    }
+
+    /// Renames the bundle ID `id` (only `name` is mutable).
+    ///
+    /// `PATCH /v1/bundleIds/{id}` with a JSON:API body carrying only the `name`
+    /// attribute. Any 2xx → `Ok(())` (the response is discarded).
+    ///
+    /// # Errors
+    /// [`StackError::PendingAgreements`] on a pending-agreements 403,
+    /// [`StackError::Http`] on any other non-2xx response, or
+    /// [`StackError::Network`] on transport failure.
+    pub(crate) async fn update_bundle_id(&self, id: &str, name: &str) -> Result<(), StackError> {
+        let url = format!("{}/v1/bundleIds/{id}", self.base_url);
+        let token = self.auth.bearer_token().await?;
+        let request_body = json!({
+            "data": {
+                "type": "bundleIds",
+                "id": id,
+                "attributes": { "name": name }
+            }
+        });
+
+        self.patch_no_content(&url, &token, &request_body).await
+    }
+
+    /// Deletes the bundle ID `id`.
+    ///
+    /// `DELETE /v1/bundleIds/{id}`. Any 2xx → `Ok(())`.
+    ///
+    /// # Errors
+    /// [`StackError::PendingAgreements`] on a pending-agreements 403,
+    /// [`StackError::Http`] on any other non-2xx response, or
+    /// [`StackError::Network`] on transport failure.
+    pub(crate) async fn delete_bundle_id(&self, id: &str) -> Result<(), StackError> {
+        let url = format!("{}/v1/bundleIds/{id}", self.base_url);
+        let token = self.auth.bearer_token().await?;
+        let (status, body) = self
+            .send_and_read(self.http.delete(&url).bearer_auth(token))
+            .await?;
+        if status.is_success() {
+            return Ok(());
+        }
+        if let Some(err) = pending_agreements_error(status.as_u16(), &body) {
+            return Err(err);
+        }
+        Err(StackError::Http {
+            status: status.as_u16(),
+            message: body,
+        })
+    }
+
+    /// Lists the capabilities enabled on `bundle_id`.
+    ///
+    /// `GET /v1/bundleIds/{bundleId}/bundleIdCapabilities`, following `links.next`
+    /// pagination until exhausted. No `limit` query parameter is sent: the
+    /// relationship endpoint rejects it with `PARAMETER_ERROR.ILLEGAL`. Resources
+    /// whose `capabilityType` is missing or empty are skipped.
+    ///
+    /// # Errors
+    /// [`StackError::PendingAgreements`] on a pending-agreements 403,
+    /// [`StackError::Http`] on any other non-2xx page, [`StackError::Decode`] on
+    /// malformed JSON, or [`StackError::Network`] on transport failure.
+    pub(crate) async fn fetch_bundle_id_capabilities(
+        &self,
+        bundle_id: &str,
+    ) -> Result<Vec<BundleIdCapabilityInfo>, StackError> {
+        let mut capabilities = Vec::new();
+        // NB: no `limit` param — the relationship endpoint rejects it.
+        let mut next_url = Some(format!(
+            "{}/v1/bundleIds/{bundle_id}/bundleIdCapabilities",
+            self.base_url
+        ));
+
+        while let Some(url) = next_url {
+            let body = self.get_page(&url).await?;
+            let page: BundleIdCapabilitiesResponse = serde_json::from_str(&body)
+                .map_err(|e| StackError::decode(format!("bundleIdCapabilities response: {e}")))?;
+            capabilities.extend(
+                page.data
+                    .into_iter()
+                    .filter_map(BundleIdCapabilityResource::into_capability_info),
+            );
+
+            // `links.next` is an absolute URL; follow it verbatim until absent.
+            next_url = page.links.next.filter(|u| !u.is_empty());
+        }
+
+        Ok(capabilities)
+    }
+
+    /// Enables `capability_type` on `bundle_id`, returning the created capability.
+    ///
+    /// `POST /v1/bundleIdCapabilities` with a JSON:API body whose `attributes`
+    /// carry the raw `capabilityType` string and whose `relationships.bundleId`
+    /// points at `bundle_id`.
+    ///
+    /// # Errors
+    /// [`StackError::PendingAgreements`] on a pending-agreements 403,
+    /// [`StackError::Http`] on any other non-2xx response, [`StackError::Decode`]
+    /// on malformed JSON, or [`StackError::Network`] on transport failure.
+    pub(crate) async fn enable_capability(
+        &self,
+        bundle_id: &str,
+        capability_type: &str,
+    ) -> Result<BundleIdCapabilityInfo, StackError> {
+        let url = format!("{}/v1/bundleIdCapabilities", self.base_url);
+        let request_body = json!({
+            "data": {
+                "type": "bundleIdCapabilities",
+                "attributes": { "capabilityType": capability_type },
+                "relationships": {
+                    "bundleId": {
+                        "data": { "type": "bundleIds", "id": bundle_id }
+                    }
+                }
+            }
+        });
+
+        let response_body = self.post_json_2xx(&url, &request_body).await?;
+        let document: BundleIdCapabilityDocument = serde_json::from_str(&response_body)
+            .map_err(|e| StackError::decode(format!("bundleIdCapability response: {e}")))?;
+        document.data.into_capability_info().ok_or_else(|| {
+            StackError::decode("bundleIdCapability response: missing capabilityType".to_string())
+        })
+    }
+
+    /// Disables the capability `capability_id`.
+    ///
+    /// `DELETE /v1/bundleIdCapabilities/{capabilityId}`. Any 2xx → `Ok(())`.
+    ///
+    /// # Errors
+    /// [`StackError::PendingAgreements`] on a pending-agreements 403,
+    /// [`StackError::Http`] on any other non-2xx response, or
+    /// [`StackError::Network`] on transport failure.
+    pub(crate) async fn disable_capability(&self, capability_id: &str) -> Result<(), StackError> {
+        let url = format!("{}/v1/bundleIdCapabilities/{capability_id}", self.base_url);
+        let token = self.auth.bearer_token().await?;
+        let (status, body) = self
+            .send_and_read(self.http.delete(&url).bearer_auth(token))
+            .await?;
+        if status.is_success() {
+            return Ok(());
+        }
+        if let Some(err) = pending_agreements_error(status.as_u16(), &body) {
+            return Err(err);
+        }
+        Err(StackError::Http {
+            status: status.as_u16(),
+            message: body,
+        })
     }
 
     async fn patch_no_content(
@@ -11211,5 +11529,405 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(err, StackError::Http { status: 422, .. }));
+    }
+
+    // -----------------------------------------------------------------------
+    // Bundle IDs
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn fetch_bundle_ids_maps_all_fields_and_paginates() {
+        let server = MockServer::start().await;
+        let next = format!("{}/v1/bundleIds?cursor=PAGE2", server.uri());
+
+        // Page 1: a fully-populated bundle id; assert the sort/limit query is sent.
+        Mock::given(method("GET"))
+            .and(path("/v1/bundleIds"))
+            .and(query_param("sort", "name"))
+            .and(query_param("limit", "200"))
+            .and(wiremock::matchers::query_param_is_missing("cursor"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": [{
+                    "type": "bundleIds",
+                    "id": "bid-1",
+                    "attributes": {
+                        "identifier": "com.example.app",
+                        "name": "Example App",
+                        "platform": "IOS",
+                        "seedId": "SEED123"
+                    }
+                }],
+                "links": { "next": next }
+            })))
+            .mount(&server)
+            .await;
+
+        // Page 2: a bundle id with missing identifier/name/platform — the
+        // empty-string fallbacks apply, and `seedId` is absent.
+        Mock::given(method("GET"))
+            .and(path("/v1/bundleIds"))
+            .and(query_param("cursor", "PAGE2"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": [{
+                    "type": "bundleIds",
+                    "id": "bid-2",
+                    "attributes": {}
+                }],
+                "links": {}
+            })))
+            .mount(&server)
+            .await;
+
+        let bundle_ids = client(server.uri()).fetch_bundle_ids().await.unwrap();
+        assert_eq!(bundle_ids.len(), 2);
+        assert_eq!(
+            bundle_ids[0],
+            BundleIdInfo {
+                id: "bid-1".into(),
+                identifier: "com.example.app".into(),
+                name: "Example App".into(),
+                platform: "IOS".into(),
+                seed_id: Some("SEED123".into()),
+            }
+        );
+        // The second bundle id exercises the empty-string fallbacks + absent seed.
+        assert_eq!(bundle_ids[1].id, "bid-2");
+        assert_eq!(bundle_ids[1].identifier, "");
+        assert_eq!(bundle_ids[1].name, "");
+        assert_eq!(bundle_ids[1].platform, "");
+        assert!(bundle_ids[1].seed_id.is_none());
+    }
+
+    #[tokio::test]
+    async fn fetch_bundle_ids_surfaces_pending_agreements() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v1/bundleIds"))
+            .respond_with(ResponseTemplate::new(403).set_body_json(serde_json::json!({
+                "errors": [{ "detail": "The agreement is pending acceptance." }]
+            })))
+            .mount(&server)
+            .await;
+
+        let err = client(server.uri()).fetch_bundle_ids().await.unwrap_err();
+        match err {
+            StackError::PendingAgreements { message } => {
+                assert!(message.contains("pending agreements"))
+            }
+            other => panic!("expected PendingAgreements, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn fetch_bundle_ids_surfaces_http_error() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v1/bundleIds"))
+            .respond_with(ResponseTemplate::new(500).set_body_string("boom"))
+            .mount(&server)
+            .await;
+
+        let err = client(server.uri()).fetch_bundle_ids().await.unwrap_err();
+        assert!(matches!(err, StackError::Http { status: 500, .. }));
+    }
+
+    #[tokio::test]
+    async fn create_bundle_id_posts_and_maps() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/v1/bundleIds"))
+            // Assert the request carries name/platform/identifier attributes.
+            .and(wiremock::matchers::body_partial_json(serde_json::json!({
+                "data": {
+                    "type": "bundleIds",
+                    "attributes": {
+                        "name": "Example App",
+                        "platform": "IOS",
+                        "identifier": "com.example.app"
+                    }
+                }
+            })))
+            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
+                "data": {
+                    "type": "bundleIds",
+                    "id": "bid-new",
+                    "attributes": {
+                        "identifier": "com.example.app",
+                        "name": "Example App",
+                        "platform": "IOS",
+                        "seedId": "SEED999"
+                    }
+                }
+            })))
+            .mount(&server)
+            .await;
+
+        let bundle_id = client(server.uri())
+            .create_bundle_id("com.example.app", "Example App", "IOS")
+            .await
+            .unwrap();
+
+        assert_eq!(
+            bundle_id,
+            BundleIdInfo {
+                id: "bid-new".into(),
+                identifier: "com.example.app".into(),
+                name: "Example App".into(),
+                platform: "IOS".into(),
+                seed_id: Some("SEED999".into()),
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn create_bundle_id_surfaces_http_error() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/bundleIds"))
+            .respond_with(ResponseTemplate::new(409).set_body_string("conflict"))
+            .mount(&server)
+            .await;
+
+        let err = client(server.uri())
+            .create_bundle_id("com.example.app", "Example App", "IOS")
+            .await
+            .unwrap_err();
+        assert!(matches!(err, StackError::Http { status: 409, .. }));
+    }
+
+    #[tokio::test]
+    async fn update_bundle_id_sends_only_name() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("PATCH"))
+            .and(path("/v1/bundleIds/bid-1"))
+            // Only `name` must be present in the attributes.
+            .and(wiremock::matchers::body_partial_json(serde_json::json!({
+                "data": {
+                    "type": "bundleIds",
+                    "id": "bid-1",
+                    "attributes": { "name": "Renamed" }
+                }
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": { "type": "bundleIds", "id": "bid-1", "attributes": {} }
+            })))
+            .mount(&server)
+            .await;
+
+        let result = client(server.uri())
+            .update_bundle_id("bid-1", "Renamed")
+            .await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn update_bundle_id_surfaces_http_error() {
+        let server = MockServer::start().await;
+        Mock::given(method("PATCH"))
+            .and(path("/v1/bundleIds/bid-1"))
+            .respond_with(ResponseTemplate::new(422).set_body_string("unprocessable"))
+            .mount(&server)
+            .await;
+
+        let err = client(server.uri())
+            .update_bundle_id("bid-1", "Renamed")
+            .await
+            .unwrap_err();
+        assert!(matches!(err, StackError::Http { status: 422, .. }));
+    }
+
+    #[tokio::test]
+    async fn delete_bundle_id_hits_bundle_ids_endpoint() {
+        let server = MockServer::start().await;
+        Mock::given(method("DELETE"))
+            .and(path("/v1/bundleIds/bid-1"))
+            .respond_with(ResponseTemplate::new(204))
+            .mount(&server)
+            .await;
+
+        assert!(client(server.uri()).delete_bundle_id("bid-1").await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn delete_bundle_id_surfaces_http_error() {
+        let server = MockServer::start().await;
+        Mock::given(method("DELETE"))
+            .and(path("/v1/bundleIds/bid-1"))
+            .respond_with(ResponseTemplate::new(404).set_body_string("not found"))
+            .mount(&server)
+            .await;
+
+        let err = client(server.uri())
+            .delete_bundle_id("bid-1")
+            .await
+            .unwrap_err();
+        assert!(matches!(err, StackError::Http { status: 404, .. }));
+    }
+
+    #[tokio::test]
+    async fn fetch_bundle_id_capabilities_maps_skips_empty_and_sends_no_limit() {
+        let server = MockServer::start().await;
+        let next = format!(
+            "{}/v1/bundleIds/bid-1/bundleIdCapabilities?cursor=PAGE2",
+            server.uri()
+        );
+
+        // Page 1: one valid capability + one with empty capabilityType (skipped) +
+        // one with the attribute missing entirely (skipped). Assert NO `limit`
+        // query param is sent — the relationship endpoint rejects it.
+        Mock::given(method("GET"))
+            .and(path("/v1/bundleIds/bid-1/bundleIdCapabilities"))
+            .and(wiremock::matchers::query_param_is_missing("limit"))
+            .and(wiremock::matchers::query_param_is_missing("cursor"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": [
+                    {
+                        "type": "bundleIdCapabilities",
+                        "id": "cap-1",
+                        "attributes": { "capabilityType": "PUSH_NOTIFICATIONS" }
+                    },
+                    {
+                        "type": "bundleIdCapabilities",
+                        "id": "cap-empty",
+                        "attributes": { "capabilityType": "" }
+                    },
+                    {
+                        "type": "bundleIdCapabilities",
+                        "id": "cap-missing",
+                        "attributes": {}
+                    }
+                ],
+                "links": { "next": next }
+            })))
+            .mount(&server)
+            .await;
+
+        // Page 2: a newer, non-enum capability type passed through verbatim.
+        Mock::given(method("GET"))
+            .and(path("/v1/bundleIds/bid-1/bundleIdCapabilities"))
+            .and(query_param("cursor", "PAGE2"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": [{
+                    "type": "bundleIdCapabilities",
+                    "id": "cap-2",
+                    "attributes": { "capabilityType": "FONT_INSTALLATION" }
+                }],
+                "links": {}
+            })))
+            .mount(&server)
+            .await;
+
+        let capabilities = client(server.uri())
+            .fetch_bundle_id_capabilities("bid-1")
+            .await
+            .unwrap();
+
+        // Only the two non-empty capabilities survive; the empty + missing are skipped.
+        assert_eq!(capabilities.len(), 2);
+        assert_eq!(
+            capabilities[0],
+            BundleIdCapabilityInfo {
+                id: "cap-1".into(),
+                capability_type: "PUSH_NOTIFICATIONS".into(),
+            }
+        );
+        assert_eq!(
+            capabilities[1],
+            BundleIdCapabilityInfo {
+                id: "cap-2".into(),
+                capability_type: "FONT_INSTALLATION".into(),
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn enable_capability_posts_and_maps() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/v1/bundleIdCapabilities"))
+            // Assert attributes.capabilityType + relationships.bundleId are sent.
+            .and(wiremock::matchers::body_partial_json(serde_json::json!({
+                "data": {
+                    "type": "bundleIdCapabilities",
+                    "attributes": { "capabilityType": "PUSH_NOTIFICATIONS" },
+                    "relationships": {
+                        "bundleId": {
+                            "data": { "type": "bundleIds", "id": "bid-1" }
+                        }
+                    }
+                }
+            })))
+            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
+                "data": {
+                    "type": "bundleIdCapabilities",
+                    "id": "cap-new",
+                    "attributes": { "capabilityType": "PUSH_NOTIFICATIONS" }
+                }
+            })))
+            .mount(&server)
+            .await;
+
+        let capability = client(server.uri())
+            .enable_capability("bid-1", "PUSH_NOTIFICATIONS")
+            .await
+            .unwrap();
+
+        assert_eq!(
+            capability,
+            BundleIdCapabilityInfo {
+                id: "cap-new".into(),
+                capability_type: "PUSH_NOTIFICATIONS".into(),
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn enable_capability_surfaces_http_error() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/bundleIdCapabilities"))
+            .respond_with(ResponseTemplate::new(422).set_body_string("unprocessable"))
+            .mount(&server)
+            .await;
+
+        let err = client(server.uri())
+            .enable_capability("bid-1", "PUSH_NOTIFICATIONS")
+            .await
+            .unwrap_err();
+        assert!(matches!(err, StackError::Http { status: 422, .. }));
+    }
+
+    #[tokio::test]
+    async fn disable_capability_hits_bundle_id_capabilities_endpoint() {
+        let server = MockServer::start().await;
+        Mock::given(method("DELETE"))
+            .and(path("/v1/bundleIdCapabilities/cap-1"))
+            .respond_with(ResponseTemplate::new(204))
+            .mount(&server)
+            .await;
+
+        assert!(client(server.uri())
+            .disable_capability("cap-1")
+            .await
+            .is_ok());
+    }
+
+    #[tokio::test]
+    async fn disable_capability_surfaces_http_error() {
+        let server = MockServer::start().await;
+        Mock::given(method("DELETE"))
+            .and(path("/v1/bundleIdCapabilities/cap-1"))
+            .respond_with(ResponseTemplate::new(404).set_body_string("not found"))
+            .mount(&server)
+            .await;
+
+        let err = client(server.uri())
+            .disable_capability("cap-1")
+            .await
+            .unwrap_err();
+        assert!(matches!(err, StackError::Http { status: 404, .. }));
     }
 }

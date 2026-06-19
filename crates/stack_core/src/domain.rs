@@ -251,6 +251,40 @@ pub struct DeviceInfo {
     pub added_date: Option<String>,
 }
 
+/// A bundle ID (App ID) registered for the connected App Store Connect account.
+///
+/// `identifier`, `name`, and `platform` are non-optional with an empty-string
+/// fallback applied at the wire-mapping boundary when the attribute is absent;
+/// `seed_id` is optional (the ASC `seedId` attribute). `platform` is the raw ASC
+/// `BundleIdPlatform` value (`IOS`, `MAC_OS`, or `UNIVERSAL`), forwarded without
+/// remapping.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, uniffi::Record)]
+#[serde(rename_all = "camelCase")]
+pub struct BundleIdInfo {
+    pub id: String,
+    #[serde(default)]
+    pub identifier: String,
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub platform: String,
+    pub seed_id: Option<String>,
+}
+
+/// A capability enabled on a bundle ID (e.g. `PUSH_NOTIFICATIONS`,
+/// `FONT_INSTALLATION`, `CARPLAY_CHARGING`).
+///
+/// `capability_type` is the raw ASC `capabilityType` string, forwarded verbatim:
+/// App Store Connect keeps adding values, so the core never models it as a closed
+/// enum. The wire-mapping boundary skips resources whose `capabilityType` is
+/// missing or empty.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, uniffi::Record)]
+#[serde(rename_all = "camelCase")]
+pub struct BundleIdCapabilityInfo {
+    pub id: String,
+    pub capability_type: String,
+}
+
 /// The TestFlight "Test Information" beta review detail for an app: the beta
 /// review contact (name, email, phone), optional demo account credentials, and
 /// reviewer notes. App Store Connect exposes exactly one per app (the singular
