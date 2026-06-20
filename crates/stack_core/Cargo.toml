@@ -14,6 +14,15 @@ crate-type = ["staticlib", "cdylib", "lib"]
 [features]
 # Enables the embedded uniffi-bindgen binary without pulling clap into the iOS staticlib.
 cli = ["uniffi/cli"]
+# Enables the flutter_rust_bridge (FRB) Dart binding. OFF by default so the iOS
+# staticlib and the default `cargo test` are completely unaffected.
+frb = ["dep:flutter_rust_bridge"]
+
+[lints.rust]
+# `frb_expand` is set by `flutter_rust_bridge_codegen` only while it runs
+# `cargo expand`; the FRB attribute macro references it, so declare it known to
+# keep `cargo build --features frb` warning-free.
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(frb_expand)'] }
 
 [[bin]]
 name = "uniffi-bindgen"
@@ -29,6 +38,8 @@ jsonwebtoken = { workspace = true }
 tokio = { workspace = true }
 thiserror = { workspace = true }
 async-trait = { workspace = true }
+# Optional: only compiled when the `frb` feature is enabled (Dart binding).
+flutter_rust_bridge = { version = "=2.12.0", optional = true }
 
 [dev-dependencies]
 wiremock = "0.6"

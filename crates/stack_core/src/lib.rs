@@ -16,6 +16,15 @@ mod ports;
 mod providers;
 mod service;
 
+// Second binding: flutter_rust_bridge (Dart). Entirely behind the `frb` feature
+// (default OFF) so the iOS staticlib and the default test build are unaffected.
+// `frb_api` is the hand-written FRB facade; `frb_generated` is produced by
+// `flutter_rust_bridge_codegen generate` and must not be edited by hand.
+#[cfg(feature = "frb")]
+pub mod frb_api;
+#[cfg(feature = "frb")]
+mod frb_generated;
+
 pub use domain::{
     AppInfo, AppReviewDetailInfo, AppStoreLocalizationInfo, AppStoreVersionInfo, BetaGroupInfo,
     BetaTesterInfo, BuildDetailInfo, BuildInfo, BuildsPage, CustomerReview, CustomerReviewsPage,
