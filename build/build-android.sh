@@ -38,7 +38,7 @@ export ANDROID_HOME
 if [[ -z "${ANDROID_NDK_HOME:-}" ]]; then
   # Prefer the NDK this project is pinned to (build.gradle.kts ndkVersion),
   # else fall back to the newest NDK installed under the SDK.
-  PINNED_NDK="$ANDROID_HOME/ndk/27.2.12479018"
+  PINNED_NDK="$ANDROID_HOME/ndk/28.2.13676358"
   if [[ -d "$PINNED_NDK" ]]; then
     ANDROID_NDK_HOME="$PINNED_NDK"
   elif [[ -d "$ANDROID_HOME/ndk" ]]; then
