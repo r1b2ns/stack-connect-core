@@ -12,6 +12,10 @@ build *ARGS:
 build-xcframework:
     ./build/build-xcframework.sh
 
+# Build libstack_core.so (FRB) for Android and copy into the stack_mobile jniLibs.
+build-android:
+    ./build/build-android.sh
+
 # Run all tests (lib + facade smoke).
 test *ARGS:
     cargo test -p stack_core {{ARGS}}
