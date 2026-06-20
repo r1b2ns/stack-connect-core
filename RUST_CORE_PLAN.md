@@ -15,7 +15,7 @@
 
 | Decision | Choice | Design Consequence |
 |---|---|---|
-| Bindings | **Swift/iOS via UniFFI** | Public API designed for UniFFI; core **binding-agnostic** (thin facade) to enable Kotlin/FRB later at low cost |
+| Bindings | **Swift/iOS via UniFFI** (done) + **Dart via flutter_rust_bridge** (active, for the Flutter Android+desktop apps) | Core stays **binding-agnostic** (thin facade per generator); FRB is a *separate* toolchain from UniFFI, added as a second facade behind a `frb` feature — see §11 |
 | Architecture | **Multi-service via plugins** (`Provider` + `registry`) | FFI surface **stable** regardless of how many services exist; new service does not touch core |
 | 1st service | **App Store Connect** | First complete plugin; validates the contract with a real service |
 | Next | **Firebase, Google Play** (porting the Swift packages) → then **AWS, GitHub, …** | Enter as plugins reusing existing or new authenticators |
@@ -247,6 +247,19 @@ only loads what is enabled.
 - **Phase 2 — Full ASC capabilities + sync.** The ~31 resources as capabilities; 403 error *pending agreements*; generic `SyncService` over `BlobStore`. Migrate the rest of `AppleAccountConnection`.
 - **Phase 3 — Firebase and Google Play plugins.** Port `APIProviderFirebase`/`APIProviderPlay` to `providers/firebase` and `providers/googleplay`, reusing `auth::oauth_jwt`. Swap those providers in the app.
 - **Phase 4 — Cleanup.** Remove legacy Swift packages + `appstoreconnect-swift-sdk` usage; keep native only `WidgetIconCache`/`Log`/`AppGroup`.
+- **Dart binding (flutter_rust_bridge).** Second binding generator, alongside UniFFI, for the
+  Flutter Android + desktop apps (`../stack-connect/FLUTTER_PLAN.md`). FRB is a *separate* toolchain
+  from UniFFI (not a `uniffi.toml` backend): add an **FRB facade behind a `frb` cargo feature**
+  (e.g. `src/frb_api.rs` / `bindings/dart/`), mirroring the UniFFI `facade.rs` / `bindings/swift`
+  split — the core modules and the UniFFI facade stay untouched. Re-expose `available_services` /
+  `credential_schema` / `connect` / `make_sync_service` + `Provider`/capability objects (opaque
+  handles; `async fn` → Dart `Future`). Adapt the `with_foreign` callbacks (`CredentialStore` /
+  `BlobStore` / `DebugLogger`) to Dart implementations. Build matrix: Android via `cargo-ndk`
+  (`*-linux-android`) + desktop cdylib (`*-pc-windows-msvc`, `*-unknown-linux-gnu`); the
+  `crate-type` already includes `cdylib`. Add `build/build-android.sh` + `build/build-desktop.sh`
+  mirroring `build/build-xcframework.sh`. It initially serves **Apple-only** Flutter apps; Firebase/
+  Play exposure follows naturally once those providers land (the existing Phase 3 above — no
+  reordering needed).
 - **Future — New services** (AWS via `auth::sigv4`, GitHub via `auth::oauth2`, …): each is just a `providers/<x>/` + registration (see §4). Without touching core or facade.
 
 ## 12. Phase 0 — Definition of Done ✅
