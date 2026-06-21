@@ -16,6 +16,10 @@ build-xcframework:
 build-android:
     ./build/build-android.sh
 
+# Regenerate the Dart (flutter_rust_bridge) binding into bindings/dart/stack_core_rust.
+gen-dart:
+    ./build/gen-dart.sh
+
 # Run all tests (lib + facade smoke).
 test *ARGS:
     cargo test -p stack_core {{ARGS}}

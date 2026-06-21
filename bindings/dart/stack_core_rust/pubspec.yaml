@@ -1,0 +1,41 @@
+name: stack_core_rust
+description: >-
+  Generated flutter_rust_bridge (FRB) binding for the `stack_core` Rust crate.
+  This package contains ONLY the FRB-generated Dart surface (under
+  `lib/src/rust/`), regenerated locally via `build/gen-dart.sh` in the core repo
+  (mirroring the Swift binding under `bindings/swift`). The generated sources are
+  gitignored; only this manifest, the barrel and tooling are tracked.
+version: 0.0.1
+homepage:
+# Never published: regenerated locally and consumed via a path dependency.
+publish_to: none
+
+environment:
+  sdk: ^3.12.2
+  flutter: ">=1.17.0"
+
+# Standalone package (NOT a pub workspace member): the Flutter app workspace
+# consumes it via a path dependency that reaches into this (sibling) repo.
+
+dependencies:
+  flutter:
+    sdk: flutter
+  # Pinned to match the Rust runtime crate `flutter_rust_bridge` and the
+  # installed `flutter_rust_bridge_codegen` (all 2.12.0).
+  flutter_rust_bridge: 2.12.0
+  # flutter_rust_bridge codegen emits freezed classes for the records/enums that
+  # cross the boundary (e.g. the `StackError` error enum).
+  freezed_annotation: ^2.4.4
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^6.0.0
+  # Code generators backing the freezed classes emitted by flutter_rust_bridge.
+  build_runner: ^2.4.13
+  freezed: ^2.5.7
+  # NOTE: Riverpod code generation is intentionally NOT used here. Its analyzer
+  # chain does not compile against the analyzer bundled with the Dart 3.12 SDK
+  # (analyzer 7.6). This package carries no Riverpod code anyway.
+
+flutter:
