@@ -245,8 +245,13 @@ only loads what is enabled.
 - **Phase 0 — Skeleton + proof of binding. ✅ COMPLETE.** Cargo workspace; UniFFI facade; `CredentialStore` callback (foreign trait); typed error `StackError`; `build-xcframework.sh`/`gen-swift.sh`/`swift-smoke.sh`; host Swift smoke + **XCTest on iOS simulator** crossing the boundary. fmt/clippy passing. Rust toolchain 1.96. *(Used a disposable example provider; to be replaced by the service contract.)*
 - **Phase 1 — Service contract + 1st plugin (App Store Connect). ✅ COMPLETE.** `service::{provider, kind, registry}` (`Provider`/`ServiceKind`/`Capability`/`CredentialField`); `auth::es256`; `providers/appstore` with `validate` + `fetch_apps` (`GET /v1/apps`, `links.next` pagination); facade `connect`/`credential_schema`/`available_services`. Google sample removed. 17 Rust tests + host smoke + simulator XCTest passing. *Remains to plug into iOS app (strangler) — start of Phase 2.*
 - **Phase 2 — Full ASC capabilities + sync.** The ~31 resources as capabilities; 403 error *pending agreements*; generic `SyncService` over `BlobStore`. Migrate the rest of `AppleAccountConnection`.
-- **Phase 3 — Firebase and Google Play plugins.** Port `APIProviderFirebase`/`APIProviderPlay` to `providers/firebase` and `providers/googleplay`, reusing `auth::oauth_jwt`. Swap those providers in the app.
-- **Phase 4 — Cleanup.** Remove legacy Swift packages + `appstoreconnect-swift-sdk` usage; keep native only `WidgetIconCache`/`Log`/`AppGroup`.
+- **Phase 3 — Cleanup.** Remove legacy Swift packages + `appstoreconnect-swift-sdk` usage; keep native only `WidgetIconCache`/`Log`/`AppGroup`.
+
+> **Out of scope (for now): Firebase / Google Play.** These providers are **not** being
+> migrated to the core at this time — they remain implemented **natively in the iOS app**
+> (`APIProviderFirebase`/`APIProviderPlay`). If they are ported later, each is just a
+> `providers/<x>/` + registration reusing `auth::oauth_jwt` (see §4), without touching core or
+> facade.
 - **Dart binding (flutter_rust_bridge).** Second binding generator, alongside UniFFI, for the
   Flutter Android + desktop apps (`../stack-connect/FLUTTER_PLAN.md`). FRB is a *separate* toolchain
   from UniFFI (not a `uniffi.toml` backend): add an **FRB facade behind a `frb` cargo feature**
@@ -257,9 +262,8 @@ only loads what is enabled.
   `BlobStore` / `DebugLogger`) to Dart implementations. Build matrix: Android via `cargo-ndk`
   (`*-linux-android`) + desktop cdylib (`*-pc-windows-msvc`, `*-unknown-linux-gnu`); the
   `crate-type` already includes `cdylib`. Add `build/build-android.sh` + `build/build-desktop.sh`
-  mirroring `build/build-xcframework.sh`. It initially serves **Apple-only** Flutter apps; Firebase/
-  Play exposure follows naturally once those providers land (the existing Phase 3 above — no
-  reordering needed).
+  mirroring `build/build-xcframework.sh`. It serves **Apple-only** Flutter apps (Firebase/Play stay
+  native in the iOS app — see the out-of-scope note above).
 - **Future — New services** (AWS via `auth::sigv4`, GitHub via `auth::oauth2`, …): each is just a `providers/<x>/` + registration (see §4). Without touching core or facade.
 
 ## 12. Phase 0 — Definition of Done ✅
