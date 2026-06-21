@@ -1,17 +1,19 @@
 #!/usr/bin/env bash
 # Builds the flutter_rust_bridge (FRB) desktop cdylib for the stack_desktop app
-# (Windows `.dll`, optionally Linux `.so`).
+# (Windows `.dll`, Linux `.so`, or macOS `.dylib`).
 #
 # Mirrors build/build-android.sh in style. Android loads the FRB cdylib from the
 # APK's jniLibs; desktop loads it from next to the executable (bundled per
-# platform via the app's CMake / Flutter native-assets step).
+# platform via the app's CMake / Flutter native-assets step). On macOS the app
+# repackages the `.dylib` into a `stack_core.framework` inside the .app bundle
+# (FRB's macOS loader opens `stack_core.framework/stack_core`).
 #
-# IMPORTANT — runs in CI, not on macOS. `stack_desktop` targets Windows (and
-# Linux); there is no `macos/` desktop runner. Cross-compiling to
-# `x86_64-pc-windows-msvc` needs the MSVC toolchain, so in practice this script
-# runs on the matching platform's CI runner (a Windows runner for the `.dll`, a
-# Linux runner for the `.so`). On a host that CAN target the triple it also works
-# locally for `flutter run -d <platform>`.
+# Windows/Linux normally build in CI: cross-compiling to `x86_64-pc-windows-msvc`
+# needs the MSVC toolchain, so those targets run on the matching platform's CI
+# runner (a Windows runner for the `.dll`, a Linux runner for the `.so`). The
+# macOS `.dylib` is meant for local-dev convenience on an Apple-Silicon Mac
+# (`flutter run -d macos`); the `apps/stack_desktop/macos/` runner exists for
+# that. On a host that CAN target a given triple the script also works locally.
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
@@ -21,11 +23,13 @@ cd "$(dirname "$0")/.."
 # First arg selects the desktop target. Accepts a friendly name or a raw triple.
 #   windows (default) -> x86_64-pc-windows-msvc   -> stack_core.dll
 #   linux             -> x86_64-unknown-linux-gnu -> libstack_core.so
+#   macos             -> aarch64-apple-darwin     -> libstack_core.dylib
 TARGET_ARG="${1:-windows}"
 
 case "$TARGET_ARG" in
   windows) TRIPLE="x86_64-pc-windows-msvc"  ; LIB_FILE="stack_core.dll"    ;;
   linux)   TRIPLE="x86_64-unknown-linux-gnu"; LIB_FILE="libstack_core.so"  ;;
+  macos)   TRIPLE="aarch64-apple-darwin"    ; LIB_FILE="libstack_core.dylib" ;;
   *)       TRIPLE="$TARGET_ARG"  # raw triple; infer the artifact name below
            case "$TRIPLE" in
              *windows*) LIB_FILE="stack_core.dll"   ;;
