@@ -11,19 +11,19 @@
 
 # Module-path inputs (v2 style), pointing at the core's FRB facade.
 rust_input: crate::frb_api
-# Path to the core crate root (contains its Cargo.toml). Absolute to keep FRB's
-# path math unambiguous.
-rust_root: "\\\\?\\C:\\Users\\ruben\\OneDrive\\Desktop\\repos\\stack-connect-core\\crates\\stack_core"
+# NOTE: `rust_root` and `rust_output` are intentionally NOT set here. They are
+# machine-specific absolute paths (and on Windows/OneDrive must carry the
+# extended-length `\\?\` prefix that FRB's std::fs::canonicalize produces),
+# so committing them would force a manual edit on every host switch. Instead,
+# build/gen-dart.sh derives them from the repo layout at runtime and injects
+# them via the codegen's --rust-root / --rust-output CLI flags (which take
+# precedence over this file). The script emits both in the SAME canonical form
+# so FRB's literal prefix-match of rust_output against rust_root holds.
 # Enable the cfg-gated FRB module so codegen can parse `frb_api`.
 rust_features:
   - frb
 # Generated Dart bindings land here, inside this package's lib/.
 dart_output: lib/src/rust
-# Generated Rust glue is written into the core crate as `frb_generated.rs`.
-# Use an absolute, already-normalized path: FRB's module-path computation needs
-# this to sit cleanly under `<rust_root>/src`, and `..`-laden relative paths
-# break that prefix match.
-rust_output: "\\\\?\\C:\\Users\\ruben\\OneDrive\\Desktop\\repos\\stack-connect-core\\crates\\stack_core\\src\\frb_generated.rs"
 # `lib.rs` already declares `mod frb_generated;` (behind #[cfg(feature = "frb")]),
 # so don't let codegen insert an unguarded `mod frb_generated;`.
 add_mod_to_lib: false
