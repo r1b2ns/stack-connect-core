@@ -13,7 +13,7 @@
 rust_input: crate::frb_api
 # Path to the core crate root (contains its Cargo.toml). Absolute to keep FRB's
 # path math unambiguous.
-rust_root: /Users/rubensmachion/repos/Open/stack-connect-core/crates/stack_core
+rust_root: "\\\\?\\C:\\Users\\ruben\\OneDrive\\Desktop\\repos\\stack-connect-core\\crates\\stack_core"
 # Enable the cfg-gated FRB module so codegen can parse `frb_api`.
 rust_features:
   - frb
@@ -23,7 +23,7 @@ dart_output: lib/src/rust
 # Use an absolute, already-normalized path: FRB's module-path computation needs
 # this to sit cleanly under `<rust_root>/src`, and `..`-laden relative paths
 # break that prefix match.
-rust_output: /Users/rubensmachion/repos/Open/stack-connect-core/crates/stack_core/src/frb_generated.rs
+rust_output: "\\\\?\\C:\\Users\\ruben\\OneDrive\\Desktop\\repos\\stack-connect-core\\crates\\stack_core\\src\\frb_generated.rs"
 # `lib.rs` already declares `mod frb_generated;` (behind #[cfg(feature = "frb")]),
 # so don't let codegen insert an unguarded `mod frb_generated;`.
 add_mod_to_lib: false
