@@ -6,4 +6,6 @@ targets = [
     "aarch64-apple-ios-sim",
     "x86_64-apple-ios",
     "aarch64-apple-darwin",
+    # Flutter desktop (stack_desktop) — FRB cdylib via build/build-desktop.sh.
+    "x86_64-pc-windows-msvc",
 ]
