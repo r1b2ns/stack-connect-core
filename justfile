@@ -16,6 +16,10 @@ build-xcframework:
 build-android:
     ./build/build-android.sh
 
+# Build the FRB desktop cdylib for stack_desktop (default windows; pass linux or a triple).
+build-desktop *ARGS:
+    ./build/build-desktop.sh {{ARGS}}
+
 # Regenerate the Dart (flutter_rust_bridge) binding into bindings/dart/stack_core_rust.
 gen-dart:
     ./build/gen-dart.sh
