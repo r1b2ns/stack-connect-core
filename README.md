@@ -1,7 +1,7 @@
 # stack-connect-core
 
 Shared Rust core for [stack-connect](../stack-connect), consumed natively by iOS
-via UniFFI (`StackCore.xcframework`). See [RUST_CORE_PLAN.md](RUST_CORE_PLAN.md)
+via UniFFI (`StackCoreRust.xcframework`). See [RUST_CORE_PLAN.md](RUST_CORE_PLAN.md)
 for the full plan and roadmap.
 
 ## Status
@@ -38,12 +38,12 @@ crates/stack_core/      # the core crate
     bin/uniffi-bindgen.rs
   tests/                # smoke (public API) + RSA key fixtures
 bindings/swift/         # SwiftPM package consumable by the app (binaryTarget)
-  Package.swift         # StackCore.xcframework + generated StackCore.swift
+  Package.swift         # StackCoreRust.xcframework + generated StackCoreRust.swift
   smoke/main.swift      # host smoke (cross-FFI)
   Tests/                # XCTest (iOS simulator)
 build/
   gen-swift.sh          # generates the Swift bindings (UniFFI library mode)
-  build-xcframework.sh  # generates StackCore.xcframework (iOS device + sim)
+  build-xcframework.sh  # generates StackCoreRust.xcframework (iOS device + sim)
   swift-smoke.sh        # builds + runs the cross-FFI smoke on the host
 ```
 

@@ -4,7 +4,7 @@
 > external service (App Store Connect, Firebase, Google Play today; AWS, GitHub and
 > others in the future) enters as a **plugin** (`Provider`) that implements a
 > common contract. Consumed natively by iOS via **UniFFI**
-> (`StackCore.xcframework`).
+> (`StackCoreRust.xcframework`).
 > Historical companion: `../stack-connect/SHARED_CORE_PLAN.md` and `FLUTTER_PLAN.md`.
 >
 > **Central principle:** adding a new service = adding a `providers/<x>/` module
@@ -270,7 +270,7 @@ only loads what is enabled.
 
 1. `cargo build` + `cargo clippy -D warnings` + `cargo fmt --check` passing.
 2. UniFFI facade exports an `async` provider object + the `CredentialStore` callback.
-3. `build/build-xcframework.sh` generates `StackCore.xcframework` (iOS device + sim) and
+3. `build/build-xcframework.sh` generates `StackCoreRust.xcframework` (iOS device + sim) and
    `build/gen-swift.sh` generates Swift bindings.
 4. Host Swift smoke + **XCTest on iOS simulator** validate the call crossing the
    boundary (typed error + Rust→Swift callback).
