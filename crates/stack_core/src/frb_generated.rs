@@ -39,7 +39,7 @@ flutter_rust_bridge::frb_generated_boilerplate!(
     default_rust_auto_opaque = RustAutoOpaqueMoi,
 );
 pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_VERSION: &str = "2.12.0";
-pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = 1939699710;
+pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = -1124704399;
 
 // Section: executor
 
@@ -6184,6 +6184,68 @@ fn wire__crate__frb_api__credential_schema_impl(
         },
     )
 }
+fn wire__crate__frb_api__decrypt_scexport_impl(
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) -> flutter_rust_bridge::for_generated::WireSyncRust2DartSse {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_sync::<flutter_rust_bridge::for_generated::SseCodec, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "decrypt_scexport",
+            port: None,
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Sync,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            let api_bytes = <Vec<u8>>::sse_decode(&mut deserializer);
+            let api_password = <String>::sse_decode(&mut deserializer);
+            deserializer.end();
+            transform_result_sse::<_, crate::error::StackError>((move || {
+                let output_ok = crate::frb_api::decrypt_scexport(api_bytes, api_password)?;
+                Ok(output_ok)
+            })())
+        },
+    )
+}
+fn wire__crate__frb_api__encrypt_scexport_impl(
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) -> flutter_rust_bridge::for_generated::WireSyncRust2DartSse {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_sync::<flutter_rust_bridge::for_generated::SseCodec, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "encrypt_scexport",
+            port: None,
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Sync,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            let api_account = <crate::domain::AccountExport>::sse_decode(&mut deserializer);
+            let api_password = <String>::sse_decode(&mut deserializer);
+            deserializer.end();
+            transform_result_sse::<_, crate::error::StackError>((move || {
+                let output_ok = crate::frb_api::encrypt_scexport(api_account, api_password)?;
+                Ok(output_ok)
+            })())
+        },
+    )
+}
 fn wire__crate__frb_api__make_sync_service_impl(
     ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
     rust_vec_len_: i32,
@@ -6541,6 +6603,14 @@ impl SseDecode for flutter_rust_bridge::DartOpaque {
     }
 }
 
+impl SseDecode for std::collections::HashMap<String, String> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut inner = <Vec<(String, String)>>::sse_decode(deserializer);
+        return inner.into_iter().collect();
+    }
+}
+
 impl SseDecode
     for RustOpaqueMoi<
         flutter_rust_bridge::for_generated::RustAutoOpaqueInner<FrbAccessibilityDeclarations>,
@@ -6745,6 +6815,21 @@ impl SseDecode for crate::domain::AccessibilityDeclarationInfo {
             supports_sufficient_contrast: var_supportsSufficientContrast,
             supports_voice_control: var_supportsVoiceControl,
             supports_voiceover: var_supportsVoiceover,
+        };
+    }
+}
+
+impl SseDecode for crate::domain::AccountExport {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut var_name = <String>::sse_decode(deserializer);
+        let mut var_providerType = <String>::sse_decode(deserializer);
+        let mut var_credentials =
+            <std::collections::HashMap<String, String>>::sse_decode(deserializer);
+        return crate::domain::AccountExport {
+            name: var_name,
+            provider_type: var_providerType,
+            credentials: var_credentials,
         };
     }
 }
@@ -7618,6 +7703,18 @@ impl SseDecode for Vec<crate::domain::ProvisioningProfileInfo> {
     }
 }
 
+impl SseDecode for Vec<(String, String)> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut len_ = <i32>::sse_decode(deserializer);
+        let mut ans_ = Vec::with_capacity(len_ as usize);
+        for idx_ in 0..len_ {
+            ans_.push(<(String, String)>::sse_decode(deserializer));
+        }
+        return ans_;
+    }
+}
+
 impl SseDecode for Vec<crate::domain::ScreenshotInfo> {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
@@ -7969,6 +8066,15 @@ impl SseDecode for crate::domain::ProvisioningProfileInfo {
             expiration_date: var_expirationDate,
             profile_content: var_profileContent,
         };
+    }
+}
+
+impl SseDecode for (String, String) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut var_field0 = <String>::sse_decode(deserializer);
+        let mut var_field1 = <String>::sse_decode(deserializer);
+        return (var_field0, var_field1);
     }
 }
 
@@ -8693,7 +8799,9 @@ fn pde_ffi_dispatcher_sync_impl(
         95 => wire__crate__frb_api__FrbProvider_users_impl(ptr, rust_vec_len, data_len),
         105 => wire__crate__frb_api__available_services_impl(ptr, rust_vec_len, data_len),
         107 => wire__crate__frb_api__credential_schema_impl(ptr, rust_vec_len, data_len),
-        108 => wire__crate__frb_api__make_sync_service_impl(ptr, rust_vec_len, data_len),
+        108 => wire__crate__frb_api__decrypt_scexport_impl(ptr, rust_vec_len, data_len),
+        109 => wire__crate__frb_api__encrypt_scexport_impl(ptr, rust_vec_len, data_len),
+        110 => wire__crate__frb_api__make_sync_service_impl(ptr, rust_vec_len, data_len),
         _ => unreachable!(),
     }
 }
@@ -8997,6 +9105,25 @@ impl flutter_rust_bridge::IntoIntoDart<crate::domain::AccessibilityDeclarationIn
     for crate::domain::AccessibilityDeclarationInfo
 {
     fn into_into_dart(self) -> crate::domain::AccessibilityDeclarationInfo {
+        self
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for crate::domain::AccountExport {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        [
+            self.name.into_into_dart().into_dart(),
+            self.provider_type.into_into_dart().into_dart(),
+            self.credentials.into_into_dart().into_dart(),
+        ]
+        .into_dart()
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive for crate::domain::AccountExport {}
+impl flutter_rust_bridge::IntoIntoDart<crate::domain::AccountExport>
+    for crate::domain::AccountExport
+{
+    fn into_into_dart(self) -> crate::domain::AccountExport {
         self
     }
 }
@@ -10005,6 +10132,13 @@ impl SseEncode for flutter_rust_bridge::DartOpaque {
     }
 }
 
+impl SseEncode for std::collections::HashMap<String, String> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <Vec<(String, String)>>::sse_encode(self.into_iter().collect(), serializer);
+    }
+}
+
 impl SseEncode
     for RustOpaqueMoi<
         flutter_rust_bridge::for_generated::RustAutoOpaqueInner<FrbAccessibilityDeclarations>,
@@ -10211,6 +10345,15 @@ impl SseEncode for crate::domain::AccessibilityDeclarationInfo {
         <bool>::sse_encode(self.supports_sufficient_contrast, serializer);
         <bool>::sse_encode(self.supports_voice_control, serializer);
         <bool>::sse_encode(self.supports_voiceover, serializer);
+    }
+}
+
+impl SseEncode for crate::domain::AccountExport {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <String>::sse_encode(self.name, serializer);
+        <String>::sse_encode(self.provider_type, serializer);
+        <std::collections::HashMap<String, String>>::sse_encode(self.credentials, serializer);
     }
 }
 
@@ -10808,6 +10951,16 @@ impl SseEncode for Vec<crate::domain::ProvisioningProfileInfo> {
     }
 }
 
+impl SseEncode for Vec<(String, String)> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <i32>::sse_encode(self.len() as _, serializer);
+        for item in self {
+            <(String, String)>::sse_encode(item, serializer);
+        }
+    }
+}
+
 impl SseEncode for Vec<crate::domain::ScreenshotInfo> {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
@@ -11102,6 +11255,14 @@ impl SseEncode for crate::domain::ProvisioningProfileInfo {
         <Option<String>>::sse_encode(self.created_date, serializer);
         <Option<String>>::sse_encode(self.expiration_date, serializer);
         <Option<String>>::sse_encode(self.profile_content, serializer);
+    }
+}
+
+impl SseEncode for (String, String) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <String>::sse_encode(self.0, serializer);
+        <String>::sse_encode(self.1, serializer);
     }
 }
 
