@@ -1688,7 +1688,7 @@ struct BetaAppReviewDetailAttributes {
     demo_account_name: Option<String>,
     #[serde(default)]
     demo_account_password: Option<String>,
-    #[serde(default)]
+    #[serde(default, rename = "demoAccountRequired")]
     is_demo_account_required: Option<bool>,
     #[serde(default)]
     notes: Option<String>,
@@ -1749,7 +1749,7 @@ struct AppReviewDetailAttributes {
     demo_account_name: Option<String>,
     #[serde(default)]
     demo_account_password: Option<String>,
-    #[serde(default)]
+    #[serde(default, rename = "demoAccountRequired")]
     is_demo_account_required: Option<bool>,
 }
 
@@ -5894,7 +5894,7 @@ impl AppStoreClient {
             attributes.insert("demoAccountPassword".into(), json!(value));
         }
         if let Some(value) = is_demo_account_required {
-            attributes.insert("isDemoAccountRequired".into(), json!(value));
+            attributes.insert("demoAccountRequired".into(), json!(value));
         }
         if let Some(value) = notes {
             attributes.insert("notes".into(), json!(value));
@@ -6025,7 +6025,7 @@ impl AppStoreClient {
             attributes.insert("demoAccountPassword".into(), json!(value));
         }
         if let Some(value) = is_demo_account_required {
-            attributes.insert("isDemoAccountRequired".into(), json!(value));
+            attributes.insert("demoAccountRequired".into(), json!(value));
         }
 
         let request_body = json!({
@@ -12208,7 +12208,7 @@ mod tests {
                         "contactPhone": "+15551234567",
                         "demoAccountName": "demo-user",
                         "demoAccountPassword": "s3cr3t",
-                        "isDemoAccountRequired": true,
+                        "demoAccountRequired": true,
                         "notes": "Use the demo account to reach the paywall."
                     }
                 }
@@ -12291,14 +12291,14 @@ mod tests {
         Mock::given(method("PATCH"))
             .and(path("/v1/betaAppReviewDetails/detail-1"))
             // Only the provided attributes should be present; no relationships.
-            // `isDemoAccountRequired` is sent as a bool.
+            // `demoAccountRequired` is sent as a bool.
             .and(wiremock::matchers::body_partial_json(serde_json::json!({
                 "data": {
                     "type": "betaAppReviewDetails",
                     "id": "detail-1",
                     "attributes": {
                         "contactEmail": "ada@example.com",
-                        "isDemoAccountRequired": false
+                        "demoAccountRequired": false
                     }
                 }
             })))
@@ -12313,7 +12313,7 @@ mod tests {
                         "contactPhone": "+15551234567",
                         "demoAccountName": "demo-user",
                         "demoAccountPassword": "s3cr3t",
-                        "isDemoAccountRequired": false,
+                        "demoAccountRequired": false,
                         "notes": "No demo account needed."
                     }
                 }
@@ -12413,7 +12413,7 @@ mod tests {
                         "notes": "Use the demo account to reach the paywall.",
                         "demoAccountName": "demo-user",
                         "demoAccountPassword": "s3cr3t",
-                        "isDemoAccountRequired": true
+                        "demoAccountRequired": true
                     }
                 }
             })))
@@ -12488,7 +12488,7 @@ mod tests {
             // relationship segment used by the fetch.
             .and(path("/v1/appStoreReviewDetails/detail-1"))
             // Only the provided attributes should be present; no relationships.
-            // `isDemoAccountRequired` is sent as a bool.
+            // `demoAccountRequired` is sent as a bool.
             .and(wiremock::matchers::body_partial_json(serde_json::json!({
                 "data": {
                     "type": "appStoreReviewDetails",
@@ -12496,7 +12496,7 @@ mod tests {
                     "attributes": {
                         "contactEmail": "ada@example.com",
                         "notes": "No demo account needed.",
-                        "isDemoAccountRequired": false
+                        "demoAccountRequired": false
                     }
                 }
             })))
@@ -12512,7 +12512,7 @@ mod tests {
                         "notes": "No demo account needed.",
                         "demoAccountName": "demo-user",
                         "demoAccountPassword": "s3cr3t",
-                        "isDemoAccountRequired": false
+                        "demoAccountRequired": false
                     }
                 }
             })))
