@@ -130,6 +130,10 @@ pub(crate) struct ScexportPayload {
     /// Passed through unchanged; the core does not interpret them.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rules: Option<HashMap<String, Vec<String>>>,
+    /// Optional per-app export scope: app bundle ids the file grants access to.
+    /// Passed through unchanged; the core does not interpret it. Absent ⇒ None.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub apps_bundles: Option<Vec<String>>,
     /// The provider credentials, keyed by the iOS credential keys. Required.
     pub credentials: HashMap<String, String>,
 }
@@ -338,6 +342,7 @@ mod tests {
             role: Some("ADMIN".to_string()),
             expiration_date: None,
             rules: None,
+            apps_bundles: None,
             credentials,
         }
     }
@@ -348,6 +353,68 @@ mod tests {
         let bytes = encrypt(&payload, "correct horse battery staple").unwrap();
         let decoded = decrypt(&bytes, "correct horse battery staple").unwrap();
         assert_eq!(decoded, payload);
+    }
+
+    #[test]
+    fn round_trip_preserves_apps_bundles_scope() {
+        let mut payload = apple_payload();
+        payload.apps_bundles = Some(vec!["com.a".to_string(), "com.b".to_string()]);
+
+        let bytes = encrypt(&payload, "pw").unwrap();
+        let decoded = decrypt(&bytes, "pw").unwrap();
+
+        assert_eq!(
+            decoded.apps_bundles,
+            Some(vec!["com.a".to_string(), "com.b".to_string()])
+        );
+        assert_eq!(decoded, payload);
+    }
+
+    /// Backward compatibility: a payload/JSON without the `appsBundles` key must
+    /// decode with `apps_bundles == None`, and serializing a `None` scope must
+    /// OMIT the key entirely (older iOS builds never wrote it).
+    #[test]
+    fn apps_bundles_absent_decodes_to_none_and_is_omitted_when_none() {
+        // Serialize omits the key when None.
+        let payload = apple_payload();
+        assert_eq!(payload.apps_bundles, None);
+        let json = serde_json::to_string(&payload).unwrap();
+        assert!(
+            !json.contains("appsBundles"),
+            "None scope must be omitted from JSON, got: {json}"
+        );
+
+        // Deserialize a JSON that never mentions the key -> None.
+        let legacy_json = r#"{
+            "name": "My Team",
+            "providerType": "apple",
+            "credentials": { "issuerID": "issuer-123" }
+        }"#;
+        let decoded: ScexportPayload = serde_json::from_str(legacy_json).unwrap();
+        assert_eq!(decoded.apps_bundles, None);
+    }
+
+    /// iOS key compatibility: the scope MUST serialize to the exact JSON key
+    /// `"appsBundles"` (camelCase) — never `apps_bundles` — so the file the core
+    /// writes is read by the iOS `AccountCrypto` and vice versa.
+    #[test]
+    fn apps_bundles_serializes_with_ios_camelcase_key() {
+        let mut payload = apple_payload();
+        payload.apps_bundles = Some(vec!["com.a".to_string()]);
+
+        let json = serde_json::to_string(&payload).unwrap();
+        assert!(
+            json.contains("\"appsBundles\""),
+            "expected iOS-compatible key \"appsBundles\", got: {json}"
+        );
+        assert!(
+            !json.contains("apps_bundles"),
+            "snake_case key must never appear, got: {json}"
+        );
+
+        // And it round-trips back from that exact key.
+        let decoded: ScexportPayload = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded.apps_bundles, Some(vec!["com.a".to_string()]));
     }
 
     #[test]

@@ -7070,11 +7070,13 @@ impl SseDecode for crate::domain::AccountExport {
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
         let mut var_name = <String>::sse_decode(deserializer);
         let mut var_providerType = <String>::sse_decode(deserializer);
+        let mut var_appsBundles = <Option<Vec<String>>>::sse_decode(deserializer);
         let mut var_credentials =
             <std::collections::HashMap<String, String>>::sse_decode(deserializer);
         return crate::domain::AccountExport {
             name: var_name,
             provider_type: var_providerType,
+            apps_bundles: var_appsBundles,
             credentials: var_credentials,
         };
     }
@@ -8269,6 +8271,17 @@ impl SseDecode for Option<crate::domain::ReviewResponse> {
     }
 }
 
+impl SseDecode for Option<Vec<String>> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        if (<bool>::sse_decode(deserializer)) {
+            return Some(<Vec<String>>::sse_decode(deserializer));
+        } else {
+            return None;
+        }
+    }
+}
+
 impl SseDecode for crate::domain::PhasedReleaseInfo {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
@@ -9384,6 +9397,7 @@ impl flutter_rust_bridge::IntoDart for crate::domain::AccountExport {
         [
             self.name.into_into_dart().into_dart(),
             self.provider_type.into_into_dart().into_dart(),
+            self.apps_bundles.into_into_dart().into_dart(),
             self.credentials.into_into_dart().into_dart(),
         ]
         .into_dart()
@@ -10623,6 +10637,7 @@ impl SseEncode for crate::domain::AccountExport {
     fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
         <String>::sse_encode(self.name, serializer);
         <String>::sse_encode(self.provider_type, serializer);
+        <Option<Vec<String>>>::sse_encode(self.apps_bundles, serializer);
         <std::collections::HashMap<String, String>>::sse_encode(self.credentials, serializer);
     }
 }
@@ -11497,6 +11512,16 @@ impl SseEncode for Option<crate::domain::ReviewResponse> {
         <bool>::sse_encode(self.is_some(), serializer);
         if let Some(value) = self {
             <crate::domain::ReviewResponse>::sse_encode(value, serializer);
+        }
+    }
+}
+
+impl SseEncode for Option<Vec<String>> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <bool>::sse_encode(self.is_some(), serializer);
+        if let Some(value) = self {
+            <Vec<String>>::sse_encode(value, serializer);
         }
     }
 }

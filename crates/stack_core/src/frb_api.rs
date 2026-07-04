@@ -226,6 +226,7 @@ pub fn decrypt_scexport(bytes: Vec<u8>, password: String) -> Result<AccountExpor
     Ok(AccountExport {
         name: payload.name,
         provider_type: payload.provider_type,
+        apps_bundles: payload.apps_bundles,
         credentials,
     })
 }
@@ -263,6 +264,7 @@ pub fn encrypt_scexport(account: AccountExport, password: String) -> Result<Vec<
         role: None,
         expiration_date: None,
         rules: None,
+        apps_bundles: account.apps_bundles,
         credentials,
     };
 
@@ -2822,6 +2824,54 @@ mod tests {
     #[test]
     fn available_services_returns_app_store_connect() {
         assert_eq!(available_services(), vec![ServiceKind::AppStoreConnect]);
+    }
+
+    /// The per-app scope (`appsBundles`) survives a full FRB round-trip:
+    /// `encrypt_scexport` carries it into the `.scexport` file and
+    /// `decrypt_scexport` carries it back out to the Dart-facing `AccountExport`.
+    #[test]
+    fn scexport_round_trip_preserves_apps_bundles() {
+        let mut credentials = std::collections::HashMap::new();
+        credentials.insert("issuerId".to_string(), "issuer-123".to_string());
+        credentials.insert("keyId".to_string(), "key-abc".to_string());
+        credentials.insert("privateKeyP8".to_string(), "-----PEM-----".to_string());
+
+        let scope = vec!["com.a".to_string(), "com.b".to_string()];
+        let account = AccountExport {
+            name: "My Team".to_string(),
+            provider_type: "apple".to_string(),
+            apps_bundles: Some(scope.clone()),
+            credentials,
+        };
+
+        let bytes = encrypt_scexport(account.clone(), "pw".to_string()).unwrap();
+        let decoded = decrypt_scexport(bytes, "pw".to_string()).unwrap();
+
+        assert_eq!(decoded.apps_bundles, Some(scope));
+        // Credentials round-trip through the iOS<->schema key remap unchanged.
+        assert_eq!(decoded.credentials, account.credentials);
+    }
+
+    /// Backward compatibility at the FRB boundary: an account with no scope
+    /// (`apps_bundles == None`) round-trips as `None` — the file omits the key.
+    #[test]
+    fn scexport_round_trip_without_scope_is_none() {
+        let mut credentials = std::collections::HashMap::new();
+        credentials.insert("issuerId".to_string(), "issuer-123".to_string());
+        credentials.insert("keyId".to_string(), "key-abc".to_string());
+        credentials.insert("privateKeyP8".to_string(), "-----PEM-----".to_string());
+
+        let account = AccountExport {
+            name: "My Team".to_string(),
+            provider_type: "apple".to_string(),
+            apps_bundles: None,
+            credentials,
+        };
+
+        let bytes = encrypt_scexport(account, "pw".to_string()).unwrap();
+        let decoded = decrypt_scexport(bytes, "pw".to_string()).unwrap();
+
+        assert_eq!(decoded.apps_bundles, None);
     }
 
     #[test]

@@ -7,11 +7,17 @@
 ///
 /// `provider_type` is the raw discriminator from the file (`"apple"`,
 /// `"firebase"`, `"googlePlay"`), serialized camelCase as `providerType`.
+///
+/// `apps_bundles` (serialized `appsBundles`) is the optional per-app export scope:
+/// the list of app bundle ids the file grants access to. The core only carries it
+/// through — it does not interpret it. The host decides what `None`/empty means
+/// (conventionally "all apps").
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, uniffi::Record)]
 #[serde(rename_all = "camelCase")]
 pub struct AccountExport {
     pub name: String,
     pub provider_type: String,
+    pub apps_bundles: Option<Vec<String>>,
     pub credentials: std::collections::HashMap<String, String>,
 }
 
