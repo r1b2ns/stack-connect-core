@@ -10,8 +10,8 @@ use crate::domain::{
     BetaAppLocalizationInfo, BetaAppReviewDetailInfo, BetaBuildLocalizationInfo, BetaGroupInfo,
     BetaTesterInfo, BuildDetailInfo, BuildInfo, BuildsPage, BundleIdCapabilityInfo, BundleIdInfo,
     CertificateInfo, CustomerReview, CustomerReviewsPage, DeviceInfo, PhasedReleaseInfo,
-    ProvisioningProfileInfo, ReviewResponse, ReviewSubmission, ScreenshotSetInfo, TeamMemberInfo,
-    UserInfo,
+    ProvisioningProfileInfo, ReviewResponse, ReviewSubmission, ScreenshotInfo, ScreenshotSetInfo,
+    TeamMemberInfo, UserInfo,
 };
 use crate::error::StackError;
 use crate::ports::DebugLogger;
@@ -396,6 +396,35 @@ impl AppStoreVersionsImpl for AppStoreAppStoreVersions {
         localization_id: String,
     ) -> Result<Vec<ScreenshotSetInfo>, StackError> {
         self.client.fetch_screenshot_sets(&localization_id).await
+    }
+
+    async fn create_screenshot_set(
+        &self,
+        localization_id: String,
+        display_type: String,
+    ) -> Result<ScreenshotSetInfo, StackError> {
+        self.client
+            .create_screenshot_set(&localization_id, &display_type)
+            .await
+    }
+
+    async fn upload_screenshot(
+        &self,
+        screenshot_set_id: String,
+        file_name: String,
+        file_data: Vec<u8>,
+    ) -> Result<ScreenshotInfo, StackError> {
+        self.client
+            .upload_screenshot(&screenshot_set_id, &file_name, &file_data)
+            .await
+    }
+
+    async fn delete_screenshot(&self, screenshot_id: String) -> Result<(), StackError> {
+        self.client.delete_screenshot(&screenshot_id).await
+    }
+
+    async fn delete_screenshot_set(&self, screenshot_set_id: String) -> Result<(), StackError> {
+        self.client.delete_screenshot_set(&screenshot_set_id).await
     }
 
     async fn fetch_app_review_detail(

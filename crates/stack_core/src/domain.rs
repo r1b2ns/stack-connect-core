@@ -1,3 +1,20 @@
+/// A decrypted (or to-be-encrypted) `.scexport` account export, in the shape the
+/// Dart host consumes. `credentials` is keyed by the host's *schema* keys — for
+/// App Store Connect that is `issuerId` / `keyId` / `privateKeyP8`, so the host
+/// can feed the map straight into the connect flow. The FRB layer remaps to/from
+/// the iOS on-disk credential keys (`issuerID` / `privateKeyID` / `privateKey`)
+/// at the boundary, keeping the cross-platform file format unchanged.
+///
+/// `provider_type` is the raw discriminator from the file (`"apple"`,
+/// `"firebase"`, `"googlePlay"`), serialized camelCase as `providerType`.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, uniffi::Record)]
+#[serde(rename_all = "camelCase")]
+pub struct AccountExport {
+    pub name: String,
+    pub provider_type: String,
+    pub credentials: std::collections::HashMap<String, String>,
+}
+
 /// Cross-provider app metadata. Mirrors the Swift `AppInfo` from `StackProtocols`,
 /// which is dissolved into the core (see RUST_CORE_PLAN.md §4).
 ///

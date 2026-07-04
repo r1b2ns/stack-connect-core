@@ -4,7 +4,7 @@ use async_trait::async_trait;
 
 use crate::domain::{
     AppReviewDetailInfo, AppStoreLocalizationInfo, AppStoreVersionInfo, PhasedReleaseInfo,
-    ScreenshotSetInfo,
+    ScreenshotInfo, ScreenshotSetInfo,
 };
 use crate::error::StackError;
 
@@ -132,6 +132,29 @@ pub(crate) trait AppStoreVersionsImpl: Send + Sync {
         &self,
         localization_id: String,
     ) -> Result<Vec<ScreenshotSetInfo>, StackError>;
+
+    /// Creates a new (empty) screenshot set of `display_type` in the version
+    /// localization identified by `localization_id`.
+    async fn create_screenshot_set(
+        &self,
+        localization_id: String,
+        display_type: String,
+    ) -> Result<ScreenshotSetInfo, StackError>;
+
+    /// Uploads the image `file_data` (named `file_name`) into the screenshot set
+    /// identified by `screenshot_set_id`, returning the committed screenshot.
+    async fn upload_screenshot(
+        &self,
+        screenshot_set_id: String,
+        file_name: String,
+        file_data: Vec<u8>,
+    ) -> Result<ScreenshotInfo, StackError>;
+
+    /// Deletes the screenshot identified by `screenshot_id`.
+    async fn delete_screenshot(&self, screenshot_id: String) -> Result<(), StackError>;
+
+    /// Deletes the screenshot set identified by `screenshot_set_id`.
+    async fn delete_screenshot_set(&self, screenshot_set_id: String) -> Result<(), StackError>;
 
     /// Fetches the single app review detail for `version_id`, or `None` when
     /// there is no app review detail.
@@ -456,6 +479,71 @@ impl AppStoreVersions {
         localization_id: String,
     ) -> Result<Vec<ScreenshotSetInfo>, StackError> {
         self.inner.fetch_screenshot_sets(localization_id).await
+    }
+
+    /// Creates a new (empty) screenshot set of `display_type` in the version
+    /// localization identified by `localization_id`, returning the created set.
+    ///
+    /// `display_type` is the raw ASC `screenshotDisplayType` value (e.g.
+    /// `APP_IPHONE_67`), passed through verbatim. The returned set has an empty
+    /// `screenshots` list — a freshly created set has none until screenshots are
+    /// uploaded into it.
+    ///
+    /// # Errors
+    /// [`StackError::PendingAgreements`] on a pending-agreements 403,
+    /// [`StackError::Http`] on any other non-2xx response, [`StackError::Decode`]
+    /// on malformed JSON, or [`StackError::Network`] on transport failure.
+    pub async fn create_screenshot_set(
+        &self,
+        localization_id: String,
+        display_type: String,
+    ) -> Result<ScreenshotSetInfo, StackError> {
+        self.inner
+            .create_screenshot_set(localization_id, display_type)
+            .await
+    }
+
+    /// Uploads the image `file_data` (named `file_name`) into the screenshot set
+    /// identified by `screenshot_set_id`, returning the committed screenshot.
+    ///
+    /// This drives the three-step App Store Connect asset upload: reserve the
+    /// screenshot, upload the bytes to the pre-signed URLs, then commit with the
+    /// image's MD5 checksum.
+    ///
+    /// # Errors
+    /// [`StackError::PendingAgreements`] on a pending-agreements 403,
+    /// [`StackError::Http`] on any other non-2xx response (from any step),
+    /// [`StackError::Decode`] on malformed JSON, or [`StackError::Network`] on
+    /// transport failure.
+    pub async fn upload_screenshot(
+        &self,
+        screenshot_set_id: String,
+        file_name: String,
+        file_data: Vec<u8>,
+    ) -> Result<ScreenshotInfo, StackError> {
+        self.inner
+            .upload_screenshot(screenshot_set_id, file_name, file_data)
+            .await
+    }
+
+    /// Deletes the screenshot identified by `screenshot_id`.
+    ///
+    /// # Errors
+    /// [`StackError::PendingAgreements`] on a pending-agreements 403,
+    /// [`StackError::Http`] on any other non-2xx response, or
+    /// [`StackError::Network`] on transport failure.
+    pub async fn delete_screenshot(&self, screenshot_id: String) -> Result<(), StackError> {
+        self.inner.delete_screenshot(screenshot_id).await
+    }
+
+    /// Deletes the screenshot set identified by `screenshot_set_id`.
+    ///
+    /// # Errors
+    /// [`StackError::PendingAgreements`] on a pending-agreements 403,
+    /// [`StackError::Http`] on any other non-2xx response, or
+    /// [`StackError::Network`] on transport failure.
+    pub async fn delete_screenshot_set(&self, screenshot_set_id: String) -> Result<(), StackError> {
+        self.inner.delete_screenshot_set(screenshot_set_id).await
     }
 
     /// Fetches the single app review detail for `version_id` — the version's

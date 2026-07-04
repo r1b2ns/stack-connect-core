@@ -49,13 +49,15 @@ use std::sync::{Arc, Mutex};
 
 use flutter_rust_bridge::DartFnFuture;
 
+use crate::crypto::{self, CryptoError, ScexportPayload};
 use crate::domain::{
-    AccessibilityDeclarationInfo, AppCategoryInfo, AppInfo, AppInfoDetails,
+    AccessibilityDeclarationInfo, AccountExport, AppCategoryInfo, AppInfo, AppInfoDetails,
     AppInfoLocalizationInfo, AppReviewDetailInfo, AppStoreLocalizationInfo, AppStoreVersionInfo,
     BetaAppLocalizationInfo, BetaAppReviewDetailInfo, BetaBuildLocalizationInfo, BetaGroupInfo,
     BetaTesterInfo, BuildDetailInfo, BuildInfo, BuildsPage, BundleIdCapabilityInfo, BundleIdInfo,
     CertificateInfo, CustomerReview, CustomerReviewsPage, DeviceInfo, PhasedReleaseInfo,
-    ProvisioningProfileInfo, ReviewResponse, ScreenshotSetInfo, TeamMemberInfo, UserInfo,
+    ProvisioningProfileInfo, ReviewResponse, ScreenshotInfo, ScreenshotSetInfo, TeamMemberInfo,
+    UserInfo,
 };
 use crate::error::StackError;
 use crate::ports::{BlobStore, CredentialStore, DebugLogger};
@@ -175,6 +177,202 @@ pub fn make_sync_service(provider: &FrbProvider, account_id: String) -> FrbSyncS
         account_id,
         log_buffer: provider.log_buffer.clone(),
     }
+}
+
+// ---------------------------------------------------------------------------
+// `.scexport` account export crypto (cross-compatible with the iOS app)
+// ---------------------------------------------------------------------------
+
+/// The provider discriminator the iOS export format uses for App Store Connect.
+const PROVIDER_APPLE: &str = "apple";
+
+/// iOS on-disk credential keys for an Apple account.
+const IOS_KEY_ISSUER_ID: &str = "issuerID";
+const IOS_KEY_PRIVATE_KEY_ID: &str = "privateKeyID";
+const IOS_KEY_PRIVATE_KEY: &str = "privateKey";
+
+/// Decrypts a `.scexport` byte buffer into an [`AccountExport`] the Dart host can
+/// connect with.
+///
+/// The byte format is identical to the iOS app's `AccountCrypto` (magic `SCEX`,
+/// versions v1/v2/v3, PBKDF2/HKDF key derivation, AES-256-GCM), so files are
+/// interchangeable between iOS and the Flutter apps. After decryption the Apple
+/// credential keys are remapped from the iOS on-disk keys
+/// (`issuerID`/`privateKeyID`/`privateKey`) to the App Store Connect *schema*
+/// keys (`issuerId`/`keyId`/`privateKeyP8`) so the result can be handed straight
+/// to the connect/add-account flow. For non-Apple providers the credential map
+/// is passed through unchanged (the Dart layer rejects non-Apple imports).
+///
+/// Synchronous: pure CPU work (key derivation + AES-GCM), no I/O.
+///
+/// # Errors
+/// - [`StackError::Auth`] when the password is wrong or the file is corrupted
+///   (AES-GCM authentication failure).
+/// - [`StackError::Decode`] for an invalid file format, an unsupported version,
+///   malformed JSON, or a missing required field (`name`/`providerType`/
+///   `credentials`).
+#[flutter_rust_bridge::frb(sync)]
+pub fn decrypt_scexport(bytes: Vec<u8>, password: String) -> Result<AccountExport, StackError> {
+    let payload = crypto::decrypt(&bytes, &password).map_err(map_crypto_error)?;
+
+    let credentials = if payload.provider_type == PROVIDER_APPLE {
+        remap_ios_to_schema(&payload.credentials)
+    } else {
+        // Non-Apple providers (Firebase / Google Play) keep their raw keys
+        // (e.g. `serviceAccountJSON`); the Dart layer rejects them on import.
+        payload.credentials.clone()
+    };
+
+    Ok(AccountExport {
+        name: payload.name,
+        provider_type: payload.provider_type,
+        credentials,
+    })
+}
+
+/// Encrypts an [`AccountExport`] into a v3 `.scexport` byte buffer, byte-for-byte
+/// compatible with the iOS app.
+///
+/// The Apple credential keys are remapped from the App Store Connect *schema*
+/// keys (`issuerId`/`keyId`/`privateKeyP8`) back to the iOS on-disk keys
+/// (`issuerID`/`privateKeyID`/`privateKey`) before serialization, so the file an
+/// exported account produces opens unchanged in the iOS app. A fresh account
+/// `id` (UUID v4) and `createdAt` (RFC3339-ish "now") are generated; `rules` and
+/// `role` are omitted (iOS treats both as optional). Non-Apple credential maps
+/// are passed through unchanged.
+///
+/// Synchronous: pure CPU work (key derivation + AES-GCM), no I/O.
+///
+/// # Errors
+/// - [`StackError::Decode`] when a required field (`name`/`providerType`/
+///   `credentials`) is missing, or on an internal serialization/encryption
+///   failure.
+#[flutter_rust_bridge::frb(sync)]
+pub fn encrypt_scexport(account: AccountExport, password: String) -> Result<Vec<u8>, StackError> {
+    let credentials = if account.provider_type == PROVIDER_APPLE {
+        remap_schema_to_ios(&account.credentials)
+    } else {
+        account.credentials.clone()
+    };
+
+    let payload = ScexportPayload {
+        id: Some(uuid::Uuid::new_v4().to_string()),
+        name: account.name,
+        provider_type: account.provider_type,
+        created_at: Some(now_iso8601()),
+        role: None,
+        expiration_date: None,
+        rules: None,
+        credentials,
+    };
+
+    crypto::encrypt(&payload, &password).map_err(map_crypto_error)
+}
+
+/// Maps a [`CryptoError`] onto the existing [`StackError`] surface (no new
+/// variant, to avoid churn in the Dart error enum): an AES-GCM auth failure is an
+/// `Auth` error; everything else (bad format, unsupported version, bad JSON,
+/// missing field) is a `Decode` error.
+fn map_crypto_error(err: CryptoError) -> StackError {
+    match err {
+        CryptoError::DecryptAuthFailure => StackError::auth(err.to_string()),
+        CryptoError::InvalidFormat(_)
+        | CryptoError::UnsupportedVersion(_)
+        | CryptoError::InvalidJson(_)
+        | CryptoError::MissingField(_) => StackError::decode(err.to_string()),
+    }
+}
+
+/// Remaps a decrypted iOS Apple credential map to the App Store Connect schema
+/// keys. Unknown keys are preserved verbatim so nothing is silently dropped.
+fn remap_ios_to_schema(
+    ios: &std::collections::HashMap<String, String>,
+) -> std::collections::HashMap<String, String> {
+    remap(
+        ios,
+        &[
+            (IOS_KEY_ISSUER_ID, crate::providers::appstore::KEY_ISSUER_ID),
+            (
+                IOS_KEY_PRIVATE_KEY_ID,
+                crate::providers::appstore::KEY_KEY_ID,
+            ),
+            (
+                IOS_KEY_PRIVATE_KEY,
+                crate::providers::appstore::KEY_PRIVATE_KEY_P8,
+            ),
+        ],
+    )
+}
+
+/// Remaps an App Store Connect schema credential map back to the iOS on-disk
+/// Apple keys. Inverse of [`remap_ios_to_schema`].
+fn remap_schema_to_ios(
+    schema: &std::collections::HashMap<String, String>,
+) -> std::collections::HashMap<String, String> {
+    remap(
+        schema,
+        &[
+            (crate::providers::appstore::KEY_ISSUER_ID, IOS_KEY_ISSUER_ID),
+            (
+                crate::providers::appstore::KEY_KEY_ID,
+                IOS_KEY_PRIVATE_KEY_ID,
+            ),
+            (
+                crate::providers::appstore::KEY_PRIVATE_KEY_P8,
+                IOS_KEY_PRIVATE_KEY,
+            ),
+        ],
+    )
+}
+
+/// Renames keys per `mapping` (`from` → `to`), preserving values; keys not in the
+/// mapping are copied through unchanged.
+fn remap(
+    source: &std::collections::HashMap<String, String>,
+    mapping: &[(&str, &str)],
+) -> std::collections::HashMap<String, String> {
+    let mut out = std::collections::HashMap::with_capacity(source.len());
+    for (key, value) in source {
+        let renamed = mapping
+            .iter()
+            .find(|(from, _)| *from == key.as_str())
+            .map(|(_, to)| (*to).to_string())
+            .unwrap_or_else(|| key.clone());
+        out.insert(renamed, value.clone());
+    }
+    out
+}
+
+/// Current UTC time as an ISO8601 / RFC3339 string (`YYYY-MM-DDTHH:MM:SSZ`),
+/// matching the iOS `ISO8601DateFormatter` default output. Computed from the Unix
+/// epoch without pulling in a date crate, since the core treats timestamps as
+/// opaque strings.
+fn now_iso8601() -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    let secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+
+    // Civil-date conversion from days since the Unix epoch (Howard Hinnant's
+    // algorithm), kept self-contained so the core takes no date dependency.
+    let days = (secs / 86_400) as i64;
+    let rem = secs % 86_400;
+    let (hour, minute, second) = (rem / 3600, (rem % 3600) / 60, rem % 60);
+
+    let z = days + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let year = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = if month <= 2 { year + 1 } else { year };
+
+    format!("{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}Z")
 }
 
 // ---------------------------------------------------------------------------
@@ -973,6 +1171,75 @@ impl FrbAppStoreVersions {
         localization_id: String,
     ) -> Result<Vec<ScreenshotSetInfo>, StackError> {
         let result = self.inner.fetch_screenshot_sets(localization_id).await;
+        self.flush_logs().await;
+        result
+    }
+
+    /// Creates a new (empty) screenshot set of `display_type` in the version
+    /// localization identified by `localization_id`, returning the created set.
+    /// `display_type` is the raw ASC `screenshotDisplayType` value (e.g.
+    /// `APP_IPHONE_67`), passed through verbatim.
+    ///
+    /// # Errors
+    /// [`StackError::PendingAgreements`] on a pending-agreements 403,
+    /// [`StackError::Http`] on any other non-2xx response, [`StackError::Decode`]
+    /// on malformed JSON, or [`StackError::Network`] on transport failure.
+    pub async fn create_screenshot_set(
+        &self,
+        localization_id: String,
+        display_type: String,
+    ) -> Result<ScreenshotSetInfo, StackError> {
+        let result = self
+            .inner
+            .create_screenshot_set(localization_id, display_type)
+            .await;
+        self.flush_logs().await;
+        result
+    }
+
+    /// Uploads the image `file_data` (named `file_name`) into the screenshot set
+    /// identified by `screenshot_set_id`, returning the committed screenshot.
+    /// Drives the App Store Connect reserve/upload/commit sequence.
+    ///
+    /// # Errors
+    /// [`StackError::PendingAgreements`] on a pending-agreements 403,
+    /// [`StackError::Http`] on any other non-2xx response (from any step),
+    /// [`StackError::Decode`] on malformed JSON, or [`StackError::Network`] on
+    /// transport failure.
+    pub async fn upload_screenshot(
+        &self,
+        screenshot_set_id: String,
+        file_name: String,
+        file_data: Vec<u8>,
+    ) -> Result<ScreenshotInfo, StackError> {
+        let result = self
+            .inner
+            .upload_screenshot(screenshot_set_id, file_name, file_data)
+            .await;
+        self.flush_logs().await;
+        result
+    }
+
+    /// Deletes the screenshot identified by `screenshot_id`.
+    ///
+    /// # Errors
+    /// [`StackError::PendingAgreements`] on a pending-agreements 403,
+    /// [`StackError::Http`] on any other non-2xx response, or
+    /// [`StackError::Network`] on transport failure.
+    pub async fn delete_screenshot(&self, screenshot_id: String) -> Result<(), StackError> {
+        let result = self.inner.delete_screenshot(screenshot_id).await;
+        self.flush_logs().await;
+        result
+    }
+
+    /// Deletes the screenshot set identified by `screenshot_set_id`.
+    ///
+    /// # Errors
+    /// [`StackError::PendingAgreements`] on a pending-agreements 403,
+    /// [`StackError::Http`] on any other non-2xx response, or
+    /// [`StackError::Network`] on transport failure.
+    pub async fn delete_screenshot_set(&self, screenshot_set_id: String) -> Result<(), StackError> {
+        let result = self.inner.delete_screenshot_set(screenshot_set_id).await;
         self.flush_logs().await;
         result
     }

@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use md5::{Digest, Md5};
 use serde::Deserialize;
 use serde_json::json;
 
@@ -1376,6 +1377,72 @@ impl AppScreenshotResource {
     }
 }
 
+/// A JSON:API single-resource document wrapping one `appScreenshotSets`, as
+/// returned by the create (POST) endpoint: `{ "data": { ... } }`.
+#[derive(Deserialize)]
+struct AppScreenshotSetDocument {
+    data: AppScreenshotSetResource,
+}
+
+/// A JSON:API single-resource document wrapping one `appScreenshots` as returned
+/// by the reserve (POST) endpoint: `{ "data": { ... } }`. Uses the reservation
+/// shape ([`AppScreenshotReservation`]) so the pre-signed `uploadOperations` are
+/// available to the caller.
+#[derive(Deserialize)]
+struct AppScreenshotDocument {
+    data: AppScreenshotReservation,
+}
+
+/// A JSON:API single-resource document wrapping one `appScreenshots` as returned
+/// by the commit (PATCH) endpoint: `{ "data": { ... } }`. Uses the read shape
+/// ([`AppScreenshotResource`]) so the committed screenshot can be mapped straight
+/// into a [`ScreenshotInfo`] via [`AppScreenshotResource::to_screenshot_info`].
+#[derive(Deserialize)]
+struct AppScreenshotDocumentResource {
+    data: AppScreenshotResource,
+}
+
+/// An `appScreenshots` resource as seen by the reserve step: alongside its `id`
+/// it carries the `uploadOperations` describing the pre-signed chunk uploads that
+/// must be performed before the commit. Distinct from [`AppScreenshotResource`]
+/// (the read/commit shape) because only the reserve response exposes upload
+/// operations.
+#[derive(Deserialize)]
+struct AppScreenshotReservation {
+    id: String,
+    #[serde(default)]
+    attributes: AppScreenshotReservationAttributes,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct AppScreenshotReservationAttributes {
+    #[serde(default)]
+    upload_operations: Vec<UploadOperation>,
+}
+
+/// A single pre-signed chunk upload instruction returned by the reserve step. The
+/// image is uploaded in `length`-byte slices at `offset` via `method` to `url`,
+/// applying every `request_headers` entry. These URLs are pre-signed, so the
+/// bearer token is NOT attached when performing them.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct UploadOperation {
+    method: String,
+    url: String,
+    length: i64,
+    offset: i64,
+    #[serde(default)]
+    request_headers: Vec<HttpHeader>,
+}
+
+/// A single HTTP header to apply to a pre-signed chunk upload request.
+#[derive(Deserialize)]
+struct HttpHeader {
+    name: String,
+    value: String,
+}
+
 // ---------------------------------------------------------------------------
 // App infos (JSON:API) — full App Info detail (categories + age rating)
 // ---------------------------------------------------------------------------
@@ -1621,7 +1688,7 @@ struct BetaAppReviewDetailAttributes {
     demo_account_name: Option<String>,
     #[serde(default)]
     demo_account_password: Option<String>,
-    #[serde(default)]
+    #[serde(default, rename = "demoAccountRequired")]
     is_demo_account_required: Option<bool>,
     #[serde(default)]
     notes: Option<String>,
@@ -1682,7 +1749,7 @@ struct AppReviewDetailAttributes {
     demo_account_name: Option<String>,
     #[serde(default)]
     demo_account_password: Option<String>,
-    #[serde(default)]
+    #[serde(default, rename = "demoAccountRequired")]
     is_demo_account_required: Option<bool>,
 }
 
@@ -5135,6 +5202,294 @@ impl AppStoreClient {
         Ok(sets)
     }
 
+    /// Creates a new (empty) screenshot set for the version localization
+    /// identified by `localization_id`, of the display type `display_type`.
+    ///
+    /// `POST /v1/appScreenshotSets` with a JSON:API body carrying the
+    /// `screenshotDisplayType` attribute (the raw ASC value, e.g. `APP_IPHONE_67`,
+    /// passed through verbatim) and the `appStoreVersionLocalization`
+    /// relationship. Success is any 2xx (`201 Created`); the returned
+    /// single-resource document is mapped into a [`ScreenshotSetInfo`] with an
+    /// empty `screenshots` list (a freshly created set has none).
+    ///
+    /// # Errors
+    /// [`StackError::PendingAgreements`] on a pending-agreements 403,
+    /// [`StackError::Http`] on any other non-2xx response, [`StackError::Decode`]
+    /// on malformed JSON, or [`StackError::Network`] on transport failure.
+    pub(crate) async fn create_screenshot_set(
+        &self,
+        localization_id: &str,
+        display_type: &str,
+    ) -> Result<ScreenshotSetInfo, StackError> {
+        let url = format!("{}/v1/appScreenshotSets", self.base_url);
+        let token = self.auth.bearer_token().await?;
+        let request_body = json!({
+            "data": {
+                "type": "appScreenshotSets",
+                "attributes": {
+                    "screenshotDisplayType": display_type
+                },
+                "relationships": {
+                    "appStoreVersionLocalization": {
+                        "data": {
+                            "type": "appStoreVersionLocalizations",
+                            "id": localization_id
+                        }
+                    }
+                }
+            }
+        });
+
+        let (status, response_body) = self
+            .send_and_read(self.http.post(&url).bearer_auth(token).json(&request_body))
+            .await?;
+        if !status.is_success() {
+            if let Some(err) = pending_agreements_error(status.as_u16(), &response_body) {
+                return Err(err);
+            }
+            return Err(StackError::Http {
+                status: status.as_u16(),
+                message: response_body,
+            });
+        }
+
+        let document: AppScreenshotSetDocument = serde_json::from_str(&response_body)
+            .map_err(|e| StackError::decode(format!("app screenshot set response: {e}")))?;
+        Ok(ScreenshotSetInfo {
+            id: document.data.id,
+            display_type: document.data.attributes.screenshot_display_type,
+            screenshots: Vec::new(),
+        })
+    }
+
+    /// Uploads a screenshot image into the screenshot set identified by
+    /// `set_id`, returning the committed [`ScreenshotInfo`].
+    ///
+    /// This orchestrates the three-step App Store Connect asset upload:
+    /// 1. **Reserve** — `POST /v1/appScreenshots` with the `fileName` /
+    ///    `fileSize` attributes and the `appScreenshotSet` relationship. The
+    ///    response yields the new screenshot's `id` and the pre-signed
+    ///    `uploadOperations` describing how to upload the bytes.
+    /// 2. **Upload** — each upload operation is performed via [`Self::send_upload`]
+    ///    against its pre-signed URL, sending the `data[offset..offset+length]`
+    ///    slice with the operation's `requestHeaders`. The bearer token is NOT
+    ///    attached, as these URLs are pre-signed.
+    /// 3. **Commit** — `PATCH /v1/appScreenshots/{id}` with `uploaded: true` and
+    ///    `sourceFileChecksum` set to the lowercase-hex MD5 of the whole `data`.
+    ///    The returned single-resource document is mapped into a
+    ///    [`ScreenshotInfo`].
+    ///
+    /// # Errors
+    /// [`StackError::PendingAgreements`] on a pending-agreements 403,
+    /// [`StackError::Http`] on any other non-2xx response (from any of the three
+    /// steps), [`StackError::Decode`] on malformed JSON, or
+    /// [`StackError::Network`] on transport failure.
+    pub(crate) async fn upload_screenshot(
+        &self,
+        set_id: &str,
+        file_name: &str,
+        data: &[u8],
+    ) -> Result<ScreenshotInfo, StackError> {
+        // 1. Reserve the screenshot, learning its id and upload operations.
+        let reserve_url = format!("{}/v1/appScreenshots", self.base_url);
+        let token = self.auth.bearer_token().await?;
+        let reserve_body = json!({
+            "data": {
+                "type": "appScreenshots",
+                "attributes": {
+                    "fileName": file_name,
+                    "fileSize": data.len()
+                },
+                "relationships": {
+                    "appScreenshotSet": {
+                        "data": {
+                            "type": "appScreenshotSets",
+                            "id": set_id
+                        }
+                    }
+                }
+            }
+        });
+
+        let (status, response_body) = self
+            .send_and_read(
+                self.http
+                    .post(&reserve_url)
+                    .bearer_auth(token)
+                    .json(&reserve_body),
+            )
+            .await?;
+        if !status.is_success() {
+            if let Some(err) = pending_agreements_error(status.as_u16(), &response_body) {
+                return Err(err);
+            }
+            return Err(StackError::Http {
+                status: status.as_u16(),
+                message: response_body,
+            });
+        }
+
+        let reservation: AppScreenshotDocument = serde_json::from_str(&response_body)
+            .map_err(|e| StackError::decode(format!("app screenshot reserve response: {e}")))?;
+        let screenshot_id = reservation.data.id;
+
+        // 2. Upload every chunk against its pre-signed URL (no bearer auth).
+        for op in reservation.data.attributes.upload_operations {
+            let start = op.offset as usize;
+            let end = (op.offset + op.length) as usize;
+            let chunk = &data[start..end];
+            self.send_upload(&op, chunk).await?;
+        }
+
+        // 3. Commit: mark uploaded with the whole-file MD5 as the checksum.
+        let checksum = md5_hex(data);
+        let commit_url = format!("{}/v1/appScreenshots/{screenshot_id}", self.base_url);
+        let token = self.auth.bearer_token().await?;
+        let commit_body = json!({
+            "data": {
+                "type": "appScreenshots",
+                "id": screenshot_id,
+                "attributes": {
+                    "uploaded": true,
+                    "sourceFileChecksum": checksum
+                }
+            }
+        });
+
+        let (status, response_body) = self
+            .send_and_read(
+                self.http
+                    .patch(&commit_url)
+                    .bearer_auth(token)
+                    .json(&commit_body),
+            )
+            .await?;
+        if !status.is_success() {
+            if let Some(err) = pending_agreements_error(status.as_u16(), &response_body) {
+                return Err(err);
+            }
+            return Err(StackError::Http {
+                status: status.as_u16(),
+                message: response_body,
+            });
+        }
+
+        let document: AppScreenshotDocumentResource = serde_json::from_str(&response_body)
+            .map_err(|e| StackError::decode(format!("app screenshot commit response: {e}")))?;
+        Ok(document.data.to_screenshot_info())
+    }
+
+    /// Deletes the screenshot identified by `id`.
+    ///
+    /// `DELETE /v1/appScreenshots/{id}` returns `204 No Content` (any 2xx is
+    /// accepted) with an empty body.
+    ///
+    /// # Errors
+    /// [`StackError::PendingAgreements`] on a pending-agreements 403,
+    /// [`StackError::Http`] on any other non-2xx response, or
+    /// [`StackError::Network`] on transport failure.
+    pub(crate) async fn delete_screenshot(&self, id: &str) -> Result<(), StackError> {
+        let url = format!("{}/v1/appScreenshots/{id}", self.base_url);
+        let token = self.auth.bearer_token().await?;
+        let (status, body) = self
+            .send_and_read(self.http.delete(&url).bearer_auth(token))
+            .await?;
+        if status.is_success() {
+            return Ok(());
+        }
+        if let Some(err) = pending_agreements_error(status.as_u16(), &body) {
+            return Err(err);
+        }
+        Err(StackError::Http {
+            status: status.as_u16(),
+            message: body,
+        })
+    }
+
+    /// Deletes the screenshot set identified by `id`.
+    ///
+    /// `DELETE /v1/appScreenshotSets/{id}` returns `204 No Content` (any 2xx is
+    /// accepted) with an empty body.
+    ///
+    /// # Errors
+    /// [`StackError::PendingAgreements`] on a pending-agreements 403,
+    /// [`StackError::Http`] on any other non-2xx response, or
+    /// [`StackError::Network`] on transport failure.
+    pub(crate) async fn delete_screenshot_set(&self, id: &str) -> Result<(), StackError> {
+        let url = format!("{}/v1/appScreenshotSets/{id}", self.base_url);
+        let token = self.auth.bearer_token().await?;
+        let (status, body) = self
+            .send_and_read(self.http.delete(&url).bearer_auth(token))
+            .await?;
+        if status.is_success() {
+            return Ok(());
+        }
+        if let Some(err) = pending_agreements_error(status.as_u16(), &body) {
+            return Err(err);
+        }
+        Err(StackError::Http {
+            status: status.as_u16(),
+            message: body,
+        })
+    }
+
+    /// Performs a single pre-signed chunk upload described by `op`, sending
+    /// `chunk` as the request body.
+    ///
+    /// Unlike [`Self::send_and_read`], this deliberately bypasses `render_curl`:
+    /// the body is raw binary image data, so routing it through the pretty-JSON
+    /// logger would dump megabytes of lossy UTF-8 into the debug log. Instead,
+    /// when a debug logger is present a single redacted line records the method,
+    /// URL, and chunk length, and the response is logged as a status line (via
+    /// [`render_response`] with an empty body). No bearer token is attached — the
+    /// `op.url` is already pre-signed — and every `op.request_headers` entry is
+    /// applied verbatim.
+    ///
+    /// # Errors
+    /// [`StackError::Http`] on a non-2xx response, or [`StackError::Network`] on
+    /// an invalid method, transport failure, or a body-read failure.
+    async fn send_upload(&self, op: &UploadOperation, chunk: &[u8]) -> Result<(), StackError> {
+        let method = reqwest::Method::from_bytes(op.method.as_bytes())
+            .map_err(|e| StackError::network(format!("invalid upload method: {e}")))?;
+
+        if let Some(logger) = &self.debug_logger {
+            logger.log(format!(
+                "[RustCore] → upload {} {} [{} bytes]",
+                method,
+                op.url,
+                chunk.len()
+            ));
+        }
+
+        let mut builder = self.http.request(method, &op.url).body(chunk.to_vec());
+        for header in &op.request_headers {
+            builder = builder.header(&header.name, &header.value);
+        }
+
+        let response = builder
+            .send()
+            .await
+            .map_err(|e| StackError::network(e.to_string()))?;
+        let status = response.status();
+        let body = response
+            .text()
+            .await
+            .map_err(|e| StackError::network(e.to_string()))?;
+
+        if let Some(logger) = &self.debug_logger {
+            // Status only — the upload response body is not JSON worth pretty-printing.
+            logger.log(render_response(status, ""));
+        }
+
+        if status.is_success() {
+            return Ok(());
+        }
+        Err(StackError::Http {
+            status: status.as_u16(),
+            message: body,
+        })
+    }
+
     /// Fetches the full App Info detail for `app_id` via two requests, merged
     /// into one [`AppInfoDetails`].
     ///
@@ -5539,7 +5894,7 @@ impl AppStoreClient {
             attributes.insert("demoAccountPassword".into(), json!(value));
         }
         if let Some(value) = is_demo_account_required {
-            attributes.insert("isDemoAccountRequired".into(), json!(value));
+            attributes.insert("demoAccountRequired".into(), json!(value));
         }
         if let Some(value) = notes {
             attributes.insert("notes".into(), json!(value));
@@ -5670,7 +6025,7 @@ impl AppStoreClient {
             attributes.insert("demoAccountPassword".into(), json!(value));
         }
         if let Some(value) = is_demo_account_required {
-            attributes.insert("isDemoAccountRequired".into(), json!(value));
+            attributes.insert("demoAccountRequired".into(), json!(value));
         }
 
         let request_body = json!({
@@ -6561,6 +6916,20 @@ fn render_response(status: reqwest::StatusCode, body: &str) -> String {
     format!("[RustCore] ← {status}\n{}", pretty_json(body.as_bytes()))
 }
 
+/// Computes the MD5 of `data`, returning it as a lowercase hex string. Used as
+/// the `sourceFileChecksum` when committing an uploaded screenshot. The 16-byte
+/// digest is hex-encoded inline (`{:02x}`) to avoid pulling in a hex crate.
+fn md5_hex(data: &[u8]) -> String {
+    let digest = Md5::digest(data);
+    let mut hex = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        use std::fmt::Write;
+        // Writing into a `String` is infallible, so the `Result` is discarded.
+        let _ = write!(hex, "{byte:02x}");
+    }
+    hex
+}
+
 /// Pretty-prints `bytes` as JSON; on any parse/serialize failure falls back to
 /// the lossy UTF-8 of the raw bytes. Never panics.
 fn pretty_json(bytes: &[u8]) -> String {
@@ -7410,6 +7779,269 @@ mod tests {
 
         let err = client(server.uri()).delete_version("V1").await.unwrap_err();
         assert!(matches!(err, StackError::Http { status: 403, .. }));
+    }
+
+    #[test]
+    fn md5_hex_matches_known_vector() {
+        // MD5("abc") = 900150983cd24fb0d6963f7d28e17f72 (RFC 1321 test vector).
+        assert_eq!(md5_hex(b"abc"), "900150983cd24fb0d6963f7d28e17f72");
+    }
+
+    #[tokio::test]
+    async fn create_screenshot_set_posts_and_maps() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/v1/appScreenshotSets"))
+            // Assert the request carries the display type and the localization
+            // relationship id, without over-constraining the envelope.
+            .and(wiremock::matchers::body_partial_json(serde_json::json!({
+                "data": {
+                    "type": "appScreenshotSets",
+                    "attributes": {
+                        "screenshotDisplayType": "APP_IPHONE_67"
+                    },
+                    "relationships": {
+                        "appStoreVersionLocalization": {
+                            "data": {
+                                "type": "appStoreVersionLocalizations",
+                                "id": "vloc-1"
+                            }
+                        }
+                    }
+                }
+            })))
+            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
+                "data": {
+                    "type": "appScreenshotSets",
+                    "id": "set-new",
+                    "attributes": { "screenshotDisplayType": "APP_IPHONE_67" }
+                }
+            })))
+            .mount(&server)
+            .await;
+
+        let set = client(server.uri())
+            .create_screenshot_set("vloc-1", "APP_IPHONE_67")
+            .await
+            .unwrap();
+
+        assert_eq!(set.id, "set-new");
+        assert_eq!(set.display_type.as_deref(), Some("APP_IPHONE_67"));
+        assert!(set.screenshots.is_empty());
+    }
+
+    #[tokio::test]
+    async fn create_screenshot_set_surfaces_http_error() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/appScreenshotSets"))
+            .respond_with(ResponseTemplate::new(409).set_body_string("conflict"))
+            .mount(&server)
+            .await;
+
+        let err = client(server.uri())
+            .create_screenshot_set("vloc-1", "APP_IPHONE_67")
+            .await
+            .unwrap_err();
+        assert!(matches!(err, StackError::Http { status: 409, .. }));
+    }
+
+    #[tokio::test]
+    async fn upload_screenshot_reserves_uploads_and_commits() {
+        let server = MockServer::start().await;
+        let image = b"the-raw-image-bytes".to_vec();
+        // The pre-signed upload URL points back at the same mock server so the
+        // PUT can be asserted; ASC returns absolute URLs, matching this shape.
+        let upload_url = format!("{}/upload/0", server.uri());
+        let expected_checksum = md5_hex(&image);
+
+        // 1. Reserve → returns the screenshot id and one full-file upload op.
+        Mock::given(method("POST"))
+            .and(path("/v1/appScreenshots"))
+            .and(wiremock::matchers::body_partial_json(serde_json::json!({
+                "data": {
+                    "type": "appScreenshots",
+                    "attributes": {
+                        "fileName": "shot.png",
+                        "fileSize": image.len()
+                    },
+                    "relationships": {
+                        "appScreenshotSet": {
+                            "data": { "type": "appScreenshotSets", "id": "set-1" }
+                        }
+                    }
+                }
+            })))
+            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
+                "data": {
+                    "type": "appScreenshots",
+                    "id": "shot-1",
+                    "attributes": {
+                        "uploadOperations": [{
+                            "method": "PUT",
+                            "url": upload_url,
+                            "length": image.len(),
+                            "offset": 0,
+                            "requestHeaders": [
+                                { "name": "Content-Type", "value": "image/png" }
+                            ]
+                        }]
+                    }
+                }
+            })))
+            .mount(&server)
+            .await;
+
+        // 2. Upload → the pre-signed PUT carrying the raw bytes.
+        Mock::given(method("PUT"))
+            .and(path("/upload/0"))
+            .respond_with(ResponseTemplate::new(200))
+            .mount(&server)
+            .await;
+
+        // 3. Commit → PATCH marking uploaded with the whole-file MD5 checksum.
+        Mock::given(method("PATCH"))
+            .and(path("/v1/appScreenshots/shot-1"))
+            .and(wiremock::matchers::body_partial_json(serde_json::json!({
+                "data": {
+                    "type": "appScreenshots",
+                    "id": "shot-1",
+                    "attributes": {
+                        "uploaded": true,
+                        "sourceFileChecksum": expected_checksum
+                    }
+                }
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": {
+                    "type": "appScreenshots",
+                    "id": "shot-1",
+                    "attributes": {
+                        "fileName": "shot.png",
+                        "fileSize": image.len(),
+                        "imageAsset": {
+                            "templateUrl": "https://cdn.example.com/{w}x{h}.{f}",
+                            "width": 1290,
+                            "height": 2796
+                        }
+                    }
+                }
+            })))
+            .mount(&server)
+            .await;
+
+        let info = client(server.uri())
+            .upload_screenshot("set-1", "shot.png", &image)
+            .await
+            .unwrap();
+
+        assert_eq!(info.id, "shot-1");
+        assert_eq!(info.file_name.as_deref(), Some("shot.png"));
+        assert_eq!(info.file_size, Some(image.len() as i32));
+        assert_eq!(info.width, Some(1290));
+        assert_eq!(info.height, Some(2796));
+        assert_eq!(
+            info.image_url.as_deref(),
+            Some("https://cdn.example.com/1290x2796.png")
+        );
+
+        // Inspect the recorded PUT: its body must equal the chunk, it must carry
+        // the provided request header, and it must NOT carry a bearer token
+        // (the URL is pre-signed).
+        let requests = server.received_requests().await.unwrap();
+        let put = requests
+            .iter()
+            .find(|r| r.url.path() == "/upload/0")
+            .expect("the pre-signed PUT must have been sent");
+        assert_eq!(put.body, image, "the PUT body must equal the image chunk");
+        assert_eq!(
+            put.headers.get("content-type").map(|v| v.to_str().unwrap()),
+            Some("image/png"),
+            "the provided requestHeaders must be applied to the upload"
+        );
+        assert!(
+            put.headers.get("authorization").is_none(),
+            "the pre-signed upload must not carry a bearer token"
+        );
+    }
+
+    #[tokio::test]
+    async fn upload_screenshot_surfaces_reserve_http_error() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/appScreenshots"))
+            .respond_with(ResponseTemplate::new(409).set_body_string("conflict"))
+            .mount(&server)
+            .await;
+
+        let err = client(server.uri())
+            .upload_screenshot("set-1", "shot.png", b"bytes")
+            .await
+            .unwrap_err();
+        assert!(matches!(err, StackError::Http { status: 409, .. }));
+    }
+
+    #[tokio::test]
+    async fn delete_screenshot_succeeds_on_204() {
+        let server = MockServer::start().await;
+        Mock::given(method("DELETE"))
+            .and(path("/v1/appScreenshots/shot-1"))
+            .respond_with(ResponseTemplate::new(204))
+            .mount(&server)
+            .await;
+
+        assert!(client(server.uri())
+            .delete_screenshot("shot-1")
+            .await
+            .is_ok());
+    }
+
+    #[tokio::test]
+    async fn delete_screenshot_surfaces_http_error() {
+        let server = MockServer::start().await;
+        Mock::given(method("DELETE"))
+            .and(path("/v1/appScreenshots/shot-1"))
+            .respond_with(ResponseTemplate::new(403).set_body_string("forbidden"))
+            .mount(&server)
+            .await;
+
+        let err = client(server.uri())
+            .delete_screenshot("shot-1")
+            .await
+            .unwrap_err();
+        assert!(matches!(err, StackError::Http { status: 403, .. }));
+    }
+
+    #[tokio::test]
+    async fn delete_screenshot_set_succeeds_on_204() {
+        let server = MockServer::start().await;
+        Mock::given(method("DELETE"))
+            .and(path("/v1/appScreenshotSets/set-1"))
+            .respond_with(ResponseTemplate::new(204))
+            .mount(&server)
+            .await;
+
+        assert!(client(server.uri())
+            .delete_screenshot_set("set-1")
+            .await
+            .is_ok());
+    }
+
+    #[tokio::test]
+    async fn delete_screenshot_set_surfaces_http_error() {
+        let server = MockServer::start().await;
+        Mock::given(method("DELETE"))
+            .and(path("/v1/appScreenshotSets/set-1"))
+            .respond_with(ResponseTemplate::new(409).set_body_string("conflict"))
+            .mount(&server)
+            .await;
+
+        let err = client(server.uri())
+            .delete_screenshot_set("set-1")
+            .await
+            .unwrap_err();
+        assert!(matches!(err, StackError::Http { status: 409, .. }));
     }
 
     #[tokio::test]
@@ -11576,7 +12208,7 @@ mod tests {
                         "contactPhone": "+15551234567",
                         "demoAccountName": "demo-user",
                         "demoAccountPassword": "s3cr3t",
-                        "isDemoAccountRequired": true,
+                        "demoAccountRequired": true,
                         "notes": "Use the demo account to reach the paywall."
                     }
                 }
@@ -11659,14 +12291,14 @@ mod tests {
         Mock::given(method("PATCH"))
             .and(path("/v1/betaAppReviewDetails/detail-1"))
             // Only the provided attributes should be present; no relationships.
-            // `isDemoAccountRequired` is sent as a bool.
+            // `demoAccountRequired` is sent as a bool.
             .and(wiremock::matchers::body_partial_json(serde_json::json!({
                 "data": {
                     "type": "betaAppReviewDetails",
                     "id": "detail-1",
                     "attributes": {
                         "contactEmail": "ada@example.com",
-                        "isDemoAccountRequired": false
+                        "demoAccountRequired": false
                     }
                 }
             })))
@@ -11681,7 +12313,7 @@ mod tests {
                         "contactPhone": "+15551234567",
                         "demoAccountName": "demo-user",
                         "demoAccountPassword": "s3cr3t",
-                        "isDemoAccountRequired": false,
+                        "demoAccountRequired": false,
                         "notes": "No demo account needed."
                     }
                 }
@@ -11781,7 +12413,7 @@ mod tests {
                         "notes": "Use the demo account to reach the paywall.",
                         "demoAccountName": "demo-user",
                         "demoAccountPassword": "s3cr3t",
-                        "isDemoAccountRequired": true
+                        "demoAccountRequired": true
                     }
                 }
             })))
@@ -11856,7 +12488,7 @@ mod tests {
             // relationship segment used by the fetch.
             .and(path("/v1/appStoreReviewDetails/detail-1"))
             // Only the provided attributes should be present; no relationships.
-            // `isDemoAccountRequired` is sent as a bool.
+            // `demoAccountRequired` is sent as a bool.
             .and(wiremock::matchers::body_partial_json(serde_json::json!({
                 "data": {
                     "type": "appStoreReviewDetails",
@@ -11864,7 +12496,7 @@ mod tests {
                     "attributes": {
                         "contactEmail": "ada@example.com",
                         "notes": "No demo account needed.",
-                        "isDemoAccountRequired": false
+                        "demoAccountRequired": false
                     }
                 }
             })))
@@ -11880,7 +12512,7 @@ mod tests {
                         "notes": "No demo account needed.",
                         "demoAccountName": "demo-user",
                         "demoAccountPassword": "s3cr3t",
-                        "isDemoAccountRequired": false
+                        "demoAccountRequired": false
                     }
                 }
             })))

@@ -20,6 +20,15 @@ time = { version = "0.3", features = ["serde", "parsing", "formatting"] }
 thiserror = "2"
 base64 = "0.22"
 async-trait = "0.1"
+# .scexport crypto (cross-compatible with the iOS AccountCrypto format).
+aes-gcm = { version = "0.10", features = ["aes"] }
+pbkdf2 = { version = "0.12", default-features = false, features = ["hmac"] }
+hkdf = "0.12"
+hmac = "0.12"
+sha2 = "0.10"
+# App Store screenshot upload commit checksum (sourceFileChecksum).
+md-5 = "0.10"
+uuid = { version = "1", features = ["v4"] }
 
 [profile.release]
 opt-level = "z"

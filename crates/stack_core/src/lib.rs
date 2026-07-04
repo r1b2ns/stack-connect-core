@@ -16,6 +16,13 @@ mod ports;
 mod providers;
 mod service;
 
+// `.scexport` account-export crypto (cross-compatible with iOS). Consumed by the
+// FRB facade; also compiled under `cargo test` so its unit tests run by default.
+// Kept out of the default iOS staticlib build (no consumer there) to avoid
+// pulling the crypto stack in unused.
+#[cfg(any(feature = "frb", test))]
+mod crypto;
+
 // Second binding: flutter_rust_bridge (Dart). Entirely behind the `frb` feature
 // (default OFF) so the iOS staticlib and the default test build are unaffected.
 // `frb_api` is the hand-written FRB facade; `frb_generated` is produced by
@@ -26,9 +33,10 @@ pub mod frb_api;
 mod frb_generated;
 
 pub use domain::{
-    AppInfo, AppReviewDetailInfo, AppStoreLocalizationInfo, AppStoreVersionInfo, BetaGroupInfo,
-    BetaTesterInfo, BuildDetailInfo, BuildInfo, BuildsPage, CustomerReview, CustomerReviewsPage,
-    PhasedReleaseInfo, ReviewResponse, ReviewSubmission, ScreenshotInfo, ScreenshotSetInfo,
+    AccountExport, AppInfo, AppReviewDetailInfo, AppStoreLocalizationInfo, AppStoreVersionInfo,
+    BetaGroupInfo, BetaTesterInfo, BuildDetailInfo, BuildInfo, BuildsPage, CustomerReview,
+    CustomerReviewsPage, PhasedReleaseInfo, ReviewResponse, ReviewSubmission, ScreenshotInfo,
+    ScreenshotSetInfo,
 };
 pub use error::StackError;
 pub use facade::{available_services, connect, credential_schema, make_sync_service};
