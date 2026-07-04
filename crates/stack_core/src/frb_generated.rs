@@ -39,7 +39,7 @@ flutter_rust_bridge::frb_generated_boilerplate!(
     default_rust_auto_opaque = RustAutoOpaqueMoi,
 );
 pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_VERSION: &str = "2.12.0";
-pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = -1124704399;
+pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = -1312422460;
 
 // Section: executor
 
@@ -1067,6 +1067,68 @@ fn wire__crate__frb_api__FrbAppStoreVersions_create_phased_release_impl(
         },
     )
 }
+fn wire__crate__frb_api__FrbAppStoreVersions_create_screenshot_set_impl(
+    port_: flutter_rust_bridge::for_generated::MessagePort,
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_async::<flutter_rust_bridge::for_generated::SseCodec, _, _, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "FrbAppStoreVersions_create_screenshot_set",
+            port: Some(port_),
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            let api_that = <RustOpaqueMoi<
+                flutter_rust_bridge::for_generated::RustAutoOpaqueInner<FrbAppStoreVersions>,
+            >>::sse_decode(&mut deserializer);
+            let api_localization_id = <String>::sse_decode(&mut deserializer);
+            let api_display_type = <String>::sse_decode(&mut deserializer);
+            deserializer.end();
+            move |context| async move {
+                transform_result_sse::<_, crate::error::StackError>(
+                    (move || async move {
+                        let mut api_that_guard = None;
+                        let decode_indices_ =
+                            flutter_rust_bridge::for_generated::lockable_compute_decode_order(
+                                vec![flutter_rust_bridge::for_generated::LockableOrderInfo::new(
+                                    &api_that, 0, false,
+                                )],
+                            );
+                        for i in decode_indices_ {
+                            match i {
+                                0 => {
+                                    api_that_guard =
+                                        Some(api_that.lockable_decode_async_ref().await)
+                                }
+                                _ => unreachable!(),
+                            }
+                        }
+                        let api_that_guard = api_that_guard.unwrap();
+                        let output_ok = crate::frb_api::FrbAppStoreVersions::create_screenshot_set(
+                            &*api_that_guard,
+                            api_localization_id,
+                            api_display_type,
+                        )
+                        .await?;
+                        Ok(output_ok)
+                    })()
+                    .await,
+                )
+            }
+        },
+    )
+}
 fn wire__crate__frb_api__FrbAppStoreVersions_create_version_impl(
     port_: flutter_rust_bridge::for_generated::MessagePort,
     ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
@@ -1181,6 +1243,126 @@ fn wire__crate__frb_api__FrbAppStoreVersions_delete_phased_release_impl(
                         let output_ok = crate::frb_api::FrbAppStoreVersions::delete_phased_release(
                             &*api_that_guard,
                             api_id,
+                        )
+                        .await?;
+                        Ok(output_ok)
+                    })()
+                    .await,
+                )
+            }
+        },
+    )
+}
+fn wire__crate__frb_api__FrbAppStoreVersions_delete_screenshot_impl(
+    port_: flutter_rust_bridge::for_generated::MessagePort,
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_async::<flutter_rust_bridge::for_generated::SseCodec, _, _, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "FrbAppStoreVersions_delete_screenshot",
+            port: Some(port_),
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            let api_that = <RustOpaqueMoi<
+                flutter_rust_bridge::for_generated::RustAutoOpaqueInner<FrbAppStoreVersions>,
+            >>::sse_decode(&mut deserializer);
+            let api_screenshot_id = <String>::sse_decode(&mut deserializer);
+            deserializer.end();
+            move |context| async move {
+                transform_result_sse::<_, crate::error::StackError>(
+                    (move || async move {
+                        let mut api_that_guard = None;
+                        let decode_indices_ =
+                            flutter_rust_bridge::for_generated::lockable_compute_decode_order(
+                                vec![flutter_rust_bridge::for_generated::LockableOrderInfo::new(
+                                    &api_that, 0, false,
+                                )],
+                            );
+                        for i in decode_indices_ {
+                            match i {
+                                0 => {
+                                    api_that_guard =
+                                        Some(api_that.lockable_decode_async_ref().await)
+                                }
+                                _ => unreachable!(),
+                            }
+                        }
+                        let api_that_guard = api_that_guard.unwrap();
+                        let output_ok = crate::frb_api::FrbAppStoreVersions::delete_screenshot(
+                            &*api_that_guard,
+                            api_screenshot_id,
+                        )
+                        .await?;
+                        Ok(output_ok)
+                    })()
+                    .await,
+                )
+            }
+        },
+    )
+}
+fn wire__crate__frb_api__FrbAppStoreVersions_delete_screenshot_set_impl(
+    port_: flutter_rust_bridge::for_generated::MessagePort,
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_async::<flutter_rust_bridge::for_generated::SseCodec, _, _, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "FrbAppStoreVersions_delete_screenshot_set",
+            port: Some(port_),
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            let api_that = <RustOpaqueMoi<
+                flutter_rust_bridge::for_generated::RustAutoOpaqueInner<FrbAppStoreVersions>,
+            >>::sse_decode(&mut deserializer);
+            let api_screenshot_set_id = <String>::sse_decode(&mut deserializer);
+            deserializer.end();
+            move |context| async move {
+                transform_result_sse::<_, crate::error::StackError>(
+                    (move || async move {
+                        let mut api_that_guard = None;
+                        let decode_indices_ =
+                            flutter_rust_bridge::for_generated::lockable_compute_decode_order(
+                                vec![flutter_rust_bridge::for_generated::LockableOrderInfo::new(
+                                    &api_that, 0, false,
+                                )],
+                            );
+                        for i in decode_indices_ {
+                            match i {
+                                0 => {
+                                    api_that_guard =
+                                        Some(api_that.lockable_decode_async_ref().await)
+                                }
+                                _ => unreachable!(),
+                            }
+                        }
+                        let api_that_guard = api_that_guard.unwrap();
+                        let output_ok = crate::frb_api::FrbAppStoreVersions::delete_screenshot_set(
+                            &*api_that_guard,
+                            api_screenshot_set_id,
                         )
                         .await?;
                         Ok(output_ok)
@@ -2008,6 +2190,70 @@ fn wire__crate__frb_api__FrbAppStoreVersions_update_version_impl(
                             api_copyright,
                             api_release_type,
                             api_earliest_release_date,
+                        )
+                        .await?;
+                        Ok(output_ok)
+                    })()
+                    .await,
+                )
+            }
+        },
+    )
+}
+fn wire__crate__frb_api__FrbAppStoreVersions_upload_screenshot_impl(
+    port_: flutter_rust_bridge::for_generated::MessagePort,
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_async::<flutter_rust_bridge::for_generated::SseCodec, _, _, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "FrbAppStoreVersions_upload_screenshot",
+            port: Some(port_),
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            let api_that = <RustOpaqueMoi<
+                flutter_rust_bridge::for_generated::RustAutoOpaqueInner<FrbAppStoreVersions>,
+            >>::sse_decode(&mut deserializer);
+            let api_screenshot_set_id = <String>::sse_decode(&mut deserializer);
+            let api_file_name = <String>::sse_decode(&mut deserializer);
+            let api_file_data = <Vec<u8>>::sse_decode(&mut deserializer);
+            deserializer.end();
+            move |context| async move {
+                transform_result_sse::<_, crate::error::StackError>(
+                    (move || async move {
+                        let mut api_that_guard = None;
+                        let decode_indices_ =
+                            flutter_rust_bridge::for_generated::lockable_compute_decode_order(
+                                vec![flutter_rust_bridge::for_generated::LockableOrderInfo::new(
+                                    &api_that, 0, false,
+                                )],
+                            );
+                        for i in decode_indices_ {
+                            match i {
+                                0 => {
+                                    api_that_guard =
+                                        Some(api_that.lockable_decode_async_ref().await)
+                                }
+                                _ => unreachable!(),
+                            }
+                        }
+                        let api_that_guard = api_that_guard.unwrap();
+                        let output_ok = crate::frb_api::FrbAppStoreVersions::upload_screenshot(
+                            &*api_that_guard,
+                            api_screenshot_set_id,
+                            api_file_name,
+                            api_file_data,
                         )
                         .await?;
                         Ok(output_ok)
@@ -8394,363 +8640,387 @@ fn pde_ffi_dispatcher_primary_impl(
             rust_vec_len,
             data_len,
         ),
-        19 => wire__crate__frb_api__FrbAppStoreVersions_create_version_impl(
+        19 => wire__crate__frb_api__FrbAppStoreVersions_create_screenshot_set_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        20 => wire__crate__frb_api__FrbAppStoreVersions_delete_phased_release_impl(
+        20 => wire__crate__frb_api__FrbAppStoreVersions_create_version_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        21 => wire__crate__frb_api__FrbAppStoreVersions_delete_version_impl(
+        21 => wire__crate__frb_api__FrbAppStoreVersions_delete_phased_release_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        22 => wire__crate__frb_api__FrbAppStoreVersions_fetch_app_review_detail_impl(
+        22 => wire__crate__frb_api__FrbAppStoreVersions_delete_screenshot_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        23 => wire__crate__frb_api__FrbAppStoreVersions_fetch_localizations_impl(
+        23 => wire__crate__frb_api__FrbAppStoreVersions_delete_screenshot_set_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        24 => wire__crate__frb_api__FrbAppStoreVersions_fetch_phased_release_impl(
+        24 => wire__crate__frb_api__FrbAppStoreVersions_delete_version_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        25 => wire__crate__frb_api__FrbAppStoreVersions_fetch_screenshot_sets_impl(
+        25 => wire__crate__frb_api__FrbAppStoreVersions_fetch_app_review_detail_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        26 => wire__crate__frb_api__FrbAppStoreVersions_fetch_versions_impl(
+        26 => wire__crate__frb_api__FrbAppStoreVersions_fetch_localizations_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        27 => wire__crate__frb_api__FrbAppStoreVersions_reject_version_impl(
+        27 => wire__crate__frb_api__FrbAppStoreVersions_fetch_phased_release_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        28 => wire__crate__frb_api__FrbAppStoreVersions_release_version_impl(
+        28 => wire__crate__frb_api__FrbAppStoreVersions_fetch_screenshot_sets_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        29 => wire__crate__frb_api__FrbAppStoreVersions_submit_for_review_impl(
+        29 => wire__crate__frb_api__FrbAppStoreVersions_fetch_versions_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        30 => wire__crate__frb_api__FrbAppStoreVersions_update_app_review_detail_impl(
+        30 => wire__crate__frb_api__FrbAppStoreVersions_reject_version_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        31 => wire__crate__frb_api__FrbAppStoreVersions_update_localization_impl(
+        31 => wire__crate__frb_api__FrbAppStoreVersions_release_version_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        32 => wire__crate__frb_api__FrbAppStoreVersions_update_phased_release_state_impl(
+        32 => wire__crate__frb_api__FrbAppStoreVersions_submit_for_review_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        33 => wire__crate__frb_api__FrbAppStoreVersions_update_version_impl(
+        33 => wire__crate__frb_api__FrbAppStoreVersions_update_app_review_detail_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        34 => wire__crate__frb_api__FrbBetaAppLocalizations_create_beta_app_localization_impl(
+        34 => wire__crate__frb_api__FrbAppStoreVersions_update_localization_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        35 => wire__crate__frb_api__FrbBetaAppLocalizations_fetch_beta_app_localizations_impl(
+        35 => wire__crate__frb_api__FrbAppStoreVersions_update_phased_release_state_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        36 => wire__crate__frb_api__FrbBetaAppLocalizations_update_beta_app_localization_impl(
+        36 => wire__crate__frb_api__FrbAppStoreVersions_update_version_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        37 => wire__crate__frb_api__FrbBetaAppReviewDetail_fetch_beta_app_review_detail_impl(
+        37 => wire__crate__frb_api__FrbAppStoreVersions_upload_screenshot_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        38 => wire__crate__frb_api__FrbBetaAppReviewDetail_update_beta_app_review_detail_impl(
+        38 => wire__crate__frb_api__FrbBetaAppLocalizations_create_beta_app_localization_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        39 => wire__crate__frb_api__FrbBetaBuildLocalizations_create_beta_build_localization_impl(
+        39 => wire__crate__frb_api__FrbBetaAppLocalizations_fetch_beta_app_localizations_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        40 => wire__crate__frb_api__FrbBetaBuildLocalizations_fetch_beta_build_localizations_impl(
+        40 => wire__crate__frb_api__FrbBetaAppLocalizations_update_beta_app_localization_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        41 => wire__crate__frb_api__FrbBetaBuildLocalizations_update_beta_build_localization_impl(
+        41 => wire__crate__frb_api__FrbBetaAppReviewDetail_fetch_beta_app_review_detail_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        42 => wire__crate__frb_api__FrbBetaGroups_add_beta_tester_impl(
+        42 => wire__crate__frb_api__FrbBetaAppReviewDetail_update_beta_app_review_detail_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        43 => wire__crate__frb_api__FrbBetaGroups_create_beta_group_impl(
+        43 => wire__crate__frb_api__FrbBetaBuildLocalizations_create_beta_build_localization_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        44 => wire__crate__frb_api__FrbBetaGroups_delete_beta_group_impl(
+        44 => wire__crate__frb_api__FrbBetaBuildLocalizations_fetch_beta_build_localizations_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        45 => wire__crate__frb_api__FrbBetaGroups_fetch_beta_groups_impl(
+        45 => wire__crate__frb_api__FrbBetaBuildLocalizations_update_beta_build_localization_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        46 => wire__crate__frb_api__FrbBetaGroups_fetch_beta_testers_impl(
+        46 => wire__crate__frb_api__FrbBetaGroups_add_beta_tester_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        47 => wire__crate__frb_api__FrbBetaGroups_fetch_tester_count_impl(
+        47 => wire__crate__frb_api__FrbBetaGroups_create_beta_group_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        48 => wire__crate__frb_api__FrbBetaGroups_remove_beta_tester_impl(
+        48 => wire__crate__frb_api__FrbBetaGroups_delete_beta_group_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        49 => wire__crate__frb_api__FrbBetaGroups_resend_invite_impl(
+        49 => wire__crate__frb_api__FrbBetaGroups_fetch_beta_groups_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        50 => wire__crate__frb_api__FrbBetaGroups_update_beta_group_impl(
+        50 => wire__crate__frb_api__FrbBetaGroups_fetch_beta_testers_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        51 => wire__crate__frb_api__FrbBuilds_add_build_to_groups_impl(
+        51 => wire__crate__frb_api__FrbBetaGroups_fetch_tester_count_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        52 => wire__crate__frb_api__FrbBuilds_attach_build_impl(port, ptr, rust_vec_len, data_len),
-        53 => wire__crate__frb_api__FrbBuilds_expire_build_impl(port, ptr, rust_vec_len, data_len),
-        54 => wire__crate__frb_api__FrbBuilds_fetch_build_detail_impl(
+        52 => wire__crate__frb_api__FrbBetaGroups_remove_beta_tester_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        55 => wire__crate__frb_api__FrbBuilds_fetch_builds_impl(port, ptr, rust_vec_len, data_len),
-        56 => wire__crate__frb_api__FrbBuilds_fetch_builds_for_group_impl(
+        53 => wire__crate__frb_api__FrbBetaGroups_resend_invite_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        57 => wire__crate__frb_api__FrbBuilds_fetch_builds_page_impl(
+        54 => wire__crate__frb_api__FrbBetaGroups_update_beta_group_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        58 => wire__crate__frb_api__FrbBuilds_fetch_current_build_impl(
+        55 => wire__crate__frb_api__FrbBuilds_add_build_to_groups_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        59 => wire__crate__frb_api__FrbBuilds_remove_build_from_group_impl(
+        56 => wire__crate__frb_api__FrbBuilds_attach_build_impl(port, ptr, rust_vec_len, data_len),
+        57 => wire__crate__frb_api__FrbBuilds_expire_build_impl(port, ptr, rust_vec_len, data_len),
+        58 => wire__crate__frb_api__FrbBuilds_fetch_build_detail_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        60 => wire__crate__frb_api__FrbBuilds_submit_build_for_beta_review_impl(
+        59 => wire__crate__frb_api__FrbBuilds_fetch_builds_impl(port, ptr, rust_vec_len, data_len),
+        60 => wire__crate__frb_api__FrbBuilds_fetch_builds_for_group_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        61 => wire__crate__frb_api__FrbBundleIds_create_bundle_id_impl(
+        61 => wire__crate__frb_api__FrbBuilds_fetch_builds_page_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        62 => wire__crate__frb_api__FrbBundleIds_delete_bundle_id_impl(
+        62 => wire__crate__frb_api__FrbBuilds_fetch_current_build_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        63 => wire__crate__frb_api__FrbBundleIds_disable_capability_impl(
+        63 => wire__crate__frb_api__FrbBuilds_remove_build_from_group_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        64 => wire__crate__frb_api__FrbBundleIds_enable_capability_impl(
+        64 => wire__crate__frb_api__FrbBuilds_submit_build_for_beta_review_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        65 => wire__crate__frb_api__FrbBundleIds_fetch_bundle_id_capabilities_impl(
+        65 => wire__crate__frb_api__FrbBundleIds_create_bundle_id_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        66 => wire__crate__frb_api__FrbBundleIds_fetch_bundle_ids_impl(
+        66 => wire__crate__frb_api__FrbBundleIds_delete_bundle_id_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        67 => wire__crate__frb_api__FrbBundleIds_update_bundle_id_impl(
+        67 => wire__crate__frb_api__FrbBundleIds_disable_capability_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        68 => wire__crate__frb_api__FrbCertificates_create_certificate_impl(
+        68 => wire__crate__frb_api__FrbBundleIds_enable_capability_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        69 => wire__crate__frb_api__FrbCertificates_fetch_certificate_content_impl(
+        69 => wire__crate__frb_api__FrbBundleIds_fetch_bundle_id_capabilities_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        70 => wire__crate__frb_api__FrbCertificates_fetch_certificates_impl(
+        70 => wire__crate__frb_api__FrbBundleIds_fetch_bundle_ids_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        71 => wire__crate__frb_api__FrbCertificates_revoke_certificate_impl(
+        71 => wire__crate__frb_api__FrbBundleIds_update_bundle_id_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        72 => {
+        72 => wire__crate__frb_api__FrbCertificates_create_certificate_impl(
+            port,
+            ptr,
+            rust_vec_len,
+            data_len,
+        ),
+        73 => wire__crate__frb_api__FrbCertificates_fetch_certificate_content_impl(
+            port,
+            ptr,
+            rust_vec_len,
+            data_len,
+        ),
+        74 => wire__crate__frb_api__FrbCertificates_fetch_certificates_impl(
+            port,
+            ptr,
+            rust_vec_len,
+            data_len,
+        ),
+        75 => wire__crate__frb_api__FrbCertificates_revoke_certificate_impl(
+            port,
+            ptr,
+            rust_vec_len,
+            data_len,
+        ),
+        76 => {
             wire__crate__frb_api__FrbDevices_create_device_impl(port, ptr, rust_vec_len, data_len)
         }
-        73 => {
+        77 => {
             wire__crate__frb_api__FrbDevices_fetch_devices_impl(port, ptr, rust_vec_len, data_len)
         }
-        74 => {
+        78 => {
             wire__crate__frb_api__FrbDevices_update_device_impl(port, ptr, rust_vec_len, data_len)
         }
-        75 => {
+        79 => {
             wire__crate__frb_api__FrbProfiles_create_profile_impl(port, ptr, rust_vec_len, data_len)
         }
-        76 => {
+        80 => {
             wire__crate__frb_api__FrbProfiles_delete_profile_impl(port, ptr, rust_vec_len, data_len)
         }
-        77 => wire__crate__frb_api__FrbProfiles_fetch_profile_content_impl(
+        81 => wire__crate__frb_api__FrbProfiles_fetch_profile_content_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        78 => {
+        82 => {
             wire__crate__frb_api__FrbProfiles_fetch_profiles_impl(port, ptr, rust_vec_len, data_len)
         }
-        91 => wire__crate__frb_api__FrbProvider_fetch_apps_impl(port, ptr, rust_vec_len, data_len),
-        96 => wire__crate__frb_api__FrbProvider_validate_impl(port, ptr, rust_vec_len, data_len),
-        97 => wire__crate__frb_api__FrbReviews_fetch_customer_reviews_impl(
+        95 => wire__crate__frb_api__FrbProvider_fetch_apps_impl(port, ptr, rust_vec_len, data_len),
+        100 => wire__crate__frb_api__FrbProvider_validate_impl(port, ptr, rust_vec_len, data_len),
+        101 => wire__crate__frb_api__FrbReviews_fetch_customer_reviews_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        98 => wire__crate__frb_api__FrbReviews_fetch_customer_reviews_page_impl(
+        102 => wire__crate__frb_api__FrbReviews_fetch_customer_reviews_page_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        99 => {
+        103 => {
             wire__crate__frb_api__FrbReviews_reply_to_review_impl(port, ptr, rust_vec_len, data_len)
         }
-        100 => {
+        104 => {
             wire__crate__frb_api__FrbSyncService_sync_apps_impl(port, ptr, rust_vec_len, data_len)
         }
-        101 => wire__crate__frb_api__FrbUsers_delete_user_impl(port, ptr, rust_vec_len, data_len),
-        102 => wire__crate__frb_api__FrbUsers_fetch_team_members_impl(
+        105 => wire__crate__frb_api__FrbUsers_delete_user_impl(port, ptr, rust_vec_len, data_len),
+        106 => wire__crate__frb_api__FrbUsers_fetch_team_members_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        103 => wire__crate__frb_api__FrbUsers_fetch_users_impl(port, ptr, rust_vec_len, data_len),
-        104 => wire__crate__frb_api__FrbUsers_invite_user_impl(port, ptr, rust_vec_len, data_len),
-        106 => wire__crate__frb_api__connect_impl(port, ptr, rust_vec_len, data_len),
+        107 => wire__crate__frb_api__FrbUsers_fetch_users_impl(port, ptr, rust_vec_len, data_len),
+        108 => wire__crate__frb_api__FrbUsers_invite_user_impl(port, ptr, rust_vec_len, data_len),
+        110 => wire__crate__frb_api__connect_impl(port, ptr, rust_vec_len, data_len),
         _ => unreachable!(),
     }
 }
@@ -8763,45 +9033,45 @@ fn pde_ffi_dispatcher_sync_impl(
 ) -> flutter_rust_bridge::for_generated::WireSyncRust2DartSse {
     // Codec=Pde (Serialization + dispatch), see doc to use other codecs
     match func_id {
-        79 => wire__crate__frb_api__FrbProvider_accessibility_declarations_impl(
+        83 => wire__crate__frb_api__FrbProvider_accessibility_declarations_impl(
             ptr,
             rust_vec_len,
             data_len,
         ),
-        80 => wire__crate__frb_api__FrbProvider_app_metadata_impl(ptr, rust_vec_len, data_len),
-        81 => {
+        84 => wire__crate__frb_api__FrbProvider_app_metadata_impl(ptr, rust_vec_len, data_len),
+        85 => {
             wire__crate__frb_api__FrbProvider_app_store_versions_impl(ptr, rust_vec_len, data_len)
         }
-        82 => wire__crate__frb_api__FrbProvider_beta_app_localizations_impl(
+        86 => wire__crate__frb_api__FrbProvider_beta_app_localizations_impl(
             ptr,
             rust_vec_len,
             data_len,
         ),
-        83 => wire__crate__frb_api__FrbProvider_beta_app_review_detail_impl(
+        87 => wire__crate__frb_api__FrbProvider_beta_app_review_detail_impl(
             ptr,
             rust_vec_len,
             data_len,
         ),
-        84 => wire__crate__frb_api__FrbProvider_beta_build_localizations_impl(
+        88 => wire__crate__frb_api__FrbProvider_beta_build_localizations_impl(
             ptr,
             rust_vec_len,
             data_len,
         ),
-        85 => wire__crate__frb_api__FrbProvider_beta_groups_impl(ptr, rust_vec_len, data_len),
-        86 => wire__crate__frb_api__FrbProvider_builds_impl(ptr, rust_vec_len, data_len),
-        87 => wire__crate__frb_api__FrbProvider_bundle_ids_impl(ptr, rust_vec_len, data_len),
-        88 => wire__crate__frb_api__FrbProvider_capabilities_impl(ptr, rust_vec_len, data_len),
-        89 => wire__crate__frb_api__FrbProvider_certificates_impl(ptr, rust_vec_len, data_len),
-        90 => wire__crate__frb_api__FrbProvider_devices_impl(ptr, rust_vec_len, data_len),
-        92 => wire__crate__frb_api__FrbProvider_kind_impl(ptr, rust_vec_len, data_len),
-        93 => wire__crate__frb_api__FrbProvider_profiles_impl(ptr, rust_vec_len, data_len),
-        94 => wire__crate__frb_api__FrbProvider_reviews_impl(ptr, rust_vec_len, data_len),
-        95 => wire__crate__frb_api__FrbProvider_users_impl(ptr, rust_vec_len, data_len),
-        105 => wire__crate__frb_api__available_services_impl(ptr, rust_vec_len, data_len),
-        107 => wire__crate__frb_api__credential_schema_impl(ptr, rust_vec_len, data_len),
-        108 => wire__crate__frb_api__decrypt_scexport_impl(ptr, rust_vec_len, data_len),
-        109 => wire__crate__frb_api__encrypt_scexport_impl(ptr, rust_vec_len, data_len),
-        110 => wire__crate__frb_api__make_sync_service_impl(ptr, rust_vec_len, data_len),
+        89 => wire__crate__frb_api__FrbProvider_beta_groups_impl(ptr, rust_vec_len, data_len),
+        90 => wire__crate__frb_api__FrbProvider_builds_impl(ptr, rust_vec_len, data_len),
+        91 => wire__crate__frb_api__FrbProvider_bundle_ids_impl(ptr, rust_vec_len, data_len),
+        92 => wire__crate__frb_api__FrbProvider_capabilities_impl(ptr, rust_vec_len, data_len),
+        93 => wire__crate__frb_api__FrbProvider_certificates_impl(ptr, rust_vec_len, data_len),
+        94 => wire__crate__frb_api__FrbProvider_devices_impl(ptr, rust_vec_len, data_len),
+        96 => wire__crate__frb_api__FrbProvider_kind_impl(ptr, rust_vec_len, data_len),
+        97 => wire__crate__frb_api__FrbProvider_profiles_impl(ptr, rust_vec_len, data_len),
+        98 => wire__crate__frb_api__FrbProvider_reviews_impl(ptr, rust_vec_len, data_len),
+        99 => wire__crate__frb_api__FrbProvider_users_impl(ptr, rust_vec_len, data_len),
+        109 => wire__crate__frb_api__available_services_impl(ptr, rust_vec_len, data_len),
+        111 => wire__crate__frb_api__credential_schema_impl(ptr, rust_vec_len, data_len),
+        112 => wire__crate__frb_api__decrypt_scexport_impl(ptr, rust_vec_len, data_len),
+        113 => wire__crate__frb_api__encrypt_scexport_impl(ptr, rust_vec_len, data_len),
+        114 => wire__crate__frb_api__make_sync_service_impl(ptr, rust_vec_len, data_len),
         _ => unreachable!(),
     }
 }
