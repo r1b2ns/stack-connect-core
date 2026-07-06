@@ -20,6 +20,15 @@ use crate::ports::DebugLogger;
 
 const DEFAULT_BASE_URL: &str = "https://api.appstoreconnect.apple.com";
 
+/// Actionable message for [`StackError::SubmissionNotRemovable`], surfaced when a
+/// `READY_FOR_REVIEW` review submission survives an item-removal discard because
+/// it never had any items — the `reviewSubmissions` resource has no API path to
+/// clear such an empty draft (no `DELETE`, `canceled: true` is rejected in this
+/// state, and there are no items to remove).
+const EMPTY_DRAFT_NOT_REMOVABLE_MESSAGE: &str =
+    "This review submission has no items and can't be removed through the App \
+     Store Connect API. Remove it from the App Store Connect website.";
+
 /// A JSON:API document page of `apps` resources.
 #[derive(Deserialize)]
 struct AppsResponse {
@@ -2789,19 +2798,28 @@ impl AppStoreClient {
 
     /// Submits the version `version_id` of `app_id` for App Store review.
     ///
-    /// This drives three sequential App Store Connect requests, each routed
-    /// through the shared pending-agreements 403 guard:
-    /// 1. `POST /v1/reviewSubmissions` creating a submission for the `app`
-    ///    relationship. When `platform` is `Some`, an `attributes.platform`
-    ///    object carries it; when `None`, no `attributes` object is sent. The
-    ///    created submission's `data.id` is parsed for the follow-ups.
-    /// 2. `POST /v1/reviewSubmissionItems` attaching the `appStoreVersion`
-    ///    (`version_id`) to the new submission.
-    /// 3. `PATCH /v1/reviewSubmissions/{id}` setting the `submitted` attribute
-    ///    to `true` to finalize the submission.
+    /// The review-submission flow attaches the version to a `reviewSubmission`
+    /// and then marks it `submitted`. Creating a *new* `reviewSubmission` is what
+    /// `409`s at Apple's concurrent-submission limit, and a partial failure there
+    /// leaves an empty `READY_FOR_REVIEW` draft that keeps consuming a slot. To
+    /// avoid piling up such drafts, this **prefers reuse**:
     ///
-    /// Any 2xx on each request advances to the next; success of the final PATCH
-    /// yields `Ok(())`.
+    /// 1. **Reuse (preferred):** look for an existing empty `READY_FOR_REVIEW`
+    ///    draft for this app (and `platform`, when given) via
+    ///    [`Self::find_reusable_empty_draft`]. If one exists, attach the version
+    ///    and submit it via [`Self::attach_and_submit`] — no new `reviewSubmission`
+    ///    is created. This both sidesteps the concurrency limit and drains a
+    ///    zombie draft.
+    /// 2. **Create (fallback):** if there is no reusable draft, `POST`
+    ///    `/v1/reviewSubmissions` to create one (carrying `attributes.platform`
+    ///    only when `platform` is `Some`), then attach + submit.
+    /// 3. **Self-healing:** if the reuse path fails at *any* step (the stale draft
+    ///    rejects the new item, submit errors, etc.), it is logged and the flow
+    ///    falls back to creating a fresh submission — so behaviour is never worse
+    ///    than the plain create-new flow. A create-new `409` at the concurrency
+    ///    limit is surfaced unchanged.
+    ///
+    /// Every request routes through the shared pending-agreements 403 guard.
     ///
     /// # Errors
     /// [`StackError::PendingAgreements`] on a pending-agreements 403,
@@ -2813,7 +2831,40 @@ impl AppStoreClient {
         version_id: &str,
         platform: Option<&str>,
     ) -> Result<(), StackError> {
-        // 1. Create the review submission.
+        // 1. Prefer reusing an existing empty READY_FOR_REVIEW draft: it avoids
+        //    hitting the concurrent-submission limit and drains a zombie draft.
+        //    Reuse is best-effort — a stale draft may reject the new item, so any
+        //    failure here falls back to the create-new flow below.
+        if let Some(submission_id) = self.find_reusable_empty_draft(app_id, platform).await? {
+            if let Some(logger) = &self.debug_logger {
+                logger.log(format!(
+                    "[RustCore] submit_for_review: reusing empty READY_FOR_REVIEW \
+                     draft {submission_id} for app {app_id}"
+                ));
+            }
+            match self.attach_and_submit(&submission_id, version_id).await {
+                Ok(()) => return Ok(()),
+                Err(err) => {
+                    if let Some(logger) = &self.debug_logger {
+                        logger.log(format!(
+                            "[RustCore] submit_for_review: reuse of draft \
+                             {submission_id} failed ({err}); falling back to \
+                             creating a new review submission"
+                        ));
+                    }
+                    // Fall through to create-new. Behaviour is never worse than
+                    // the plain create flow.
+                }
+            }
+        }
+
+        // 2. Create a fresh review submission (original flow).
+        if let Some(logger) = &self.debug_logger {
+            logger.log(format!(
+                "[RustCore] submit_for_review: creating a new review submission \
+                 for app {app_id}"
+            ));
+        }
         let mut submission_data = serde_json::Map::new();
         submission_data.insert("type".into(), json!("reviewSubmissions"));
         if let Some(platform) = platform {
@@ -2833,7 +2884,87 @@ impl AppStoreClient {
             .map_err(|e| StackError::decode(format!("review submission response: {e}")))?;
         let submission_id = document.data.id;
 
-        // 2. Attach the app store version as a submission item.
+        // 3. Attach the version and submit the freshly-created submission.
+        self.attach_and_submit(&submission_id, version_id).await
+    }
+
+    /// Finds an existing empty `READY_FOR_REVIEW` review submission for `app_id`
+    /// (and `platform`, when given) that can be reused instead of creating a new
+    /// one — an "empty shell" with **zero** `reviewSubmissionItems`.
+    ///
+    /// `GET /v1/reviewSubmissions?filter[app]={app_id}\
+    /// &filter[state]=READY_FOR_REVIEW[&filter[platform]={platform}]`, then for
+    /// each candidate `GET /v1/reviewSubmissions/{id}/items` and return the first
+    /// whose item list is empty. Returns `Ok(None)` when there is no empty draft
+    /// (the caller then creates a new submission).
+    ///
+    /// # Errors
+    /// [`StackError::PendingAgreements`] on a pending-agreements 403,
+    /// [`StackError::Http`] on any other non-2xx response, [`StackError::Decode`]
+    /// on malformed JSON, or [`StackError::Network`] on transport failure.
+    async fn find_reusable_empty_draft(
+        &self,
+        app_id: &str,
+        platform: Option<&str>,
+    ) -> Result<Option<String>, StackError> {
+        let mut url = format!(
+            "{}/v1/reviewSubmissions?filter[app]={app_id}&filter[state]=READY_FOR_REVIEW",
+            self.base_url
+        );
+        if let Some(platform) = platform {
+            url.push_str(&format!("&filter[platform]={platform}"));
+        }
+        let body = self.get_page(&url).await?;
+        let page: ReviewSubmissionsResponse = serde_json::from_str(&body)
+            .map_err(|e| StackError::decode(format!("review submissions response: {e}")))?;
+
+        for submission in page.data {
+            if self.submission_is_empty(&submission.id).await? {
+                return Ok(Some(submission.id));
+            }
+        }
+        Ok(None)
+    }
+
+    /// Reports whether the review submission `submission_id` has **zero**
+    /// `reviewSubmissionItems` (an empty draft, reusable for a new version).
+    ///
+    /// `GET /v1/reviewSubmissions/{submission_id}/items` and inspect `data`. Only
+    /// the first page is checked: a non-empty submission has at least one item on
+    /// page one, which is all this predicate needs.
+    ///
+    /// # Errors
+    /// [`StackError::PendingAgreements`] on a pending-agreements 403,
+    /// [`StackError::Http`] on any other non-2xx response, [`StackError::Decode`]
+    /// on malformed JSON, or [`StackError::Network`] on transport failure.
+    async fn submission_is_empty(&self, submission_id: &str) -> Result<bool, StackError> {
+        let url = format!(
+            "{}/v1/reviewSubmissions/{submission_id}/items",
+            self.base_url
+        );
+        let page = self.fetch_submission_items_page(&url).await?;
+        Ok(page.data.is_empty())
+    }
+
+    /// Attaches the `appStoreVersion` `version_id` to the existing review
+    /// submission `submission_id`, then marks the submission `submitted`.
+    ///
+    /// 1. `POST /v1/reviewSubmissionItems` linking `submission_id` ↔ `version_id`.
+    /// 2. `PATCH /v1/reviewSubmissions/{submission_id}` with `submitted: true`.
+    ///
+    /// Shared by both the reuse and create-new paths of [`Self::submit_for_review`].
+    /// Both requests route through the shared pending-agreements 403 guard.
+    ///
+    /// # Errors
+    /// [`StackError::PendingAgreements`] on a pending-agreements 403,
+    /// [`StackError::Http`] on any other non-2xx response, or
+    /// [`StackError::Network`] on transport failure.
+    async fn attach_and_submit(
+        &self,
+        submission_id: &str,
+        version_id: &str,
+    ) -> Result<(), StackError> {
+        // 1. Attach the app store version as a submission item.
         let item_url = format!("{}/v1/reviewSubmissionItems", self.base_url);
         let item_body = json!({
             "data": {
@@ -2850,7 +2981,7 @@ impl AppStoreClient {
         });
         self.post_json_2xx(&item_url, &item_body).await?;
 
-        // 3. Mark the submission submitted.
+        // 2. Mark the submission submitted.
         let patch_url = format!("{}/v1/reviewSubmissions/{submission_id}", self.base_url);
         let patch_body = json!({
             "data": {
@@ -2933,10 +3064,13 @@ impl AppStoreClient {
     ///      `DELETE` (Apple returns `403 FORBIDDEN_ERROR`) and does **not**
     ///      accept `canceled: true` in this state (Apple returns
     ///      `409 STATE_ERROR.ENTITY_STATE_INVALID`). Instead its items are
-    ///      listed via `GET /v1/reviewSubmissions/{id}/items` and each one is
-    ///      removed via `DELETE /v1/reviewSubmissionItems/{itemId}`. Emptying
-    ///      the submission of its items returns the `appStoreVersion` to
-    ///      `PREPARE_FOR_SUBMISSION`.
+    ///      removed and the outcome **verified** via
+    ///      [`Self::discard_ready_for_review_submission`]. Emptying a draft that
+    ///      HAS items returns the `appStoreVersion` to `PREPARE_FOR_SUBMISSION`.
+    ///      An EMPTY draft has no items to remove and cannot be cleared through
+    ///      the API; such a draft does not abort the loop (later submissions may
+    ///      still be clearable) but is remembered and surfaced as a
+    ///      [`StackError::SubmissionNotRemovable`] after the loop.
     ///    - any other state (or a missing `state`) → skipped, with no mutating
     ///      call. We never blindly PATCH an unknown state: a non-cancellable
     ///      submission would otherwise return `409 STATE_ERROR.ENTITY_STATE_INVALID`.
@@ -2944,9 +3078,11 @@ impl AppStoreClient {
     /// All requests route through the shared pending-agreements 403 guard.
     ///
     /// # Errors
-    /// [`StackError::PendingAgreements`] on a pending-agreements 403,
-    /// [`StackError::Http`] on any other non-2xx response, [`StackError::Decode`]
-    /// on malformed JSON, or [`StackError::Network`] on transport failure.
+    /// [`StackError::SubmissionNotRemovable`] when an empty `READY_FOR_REVIEW`
+    /// draft cannot be removed, [`StackError::PendingAgreements`] on a
+    /// pending-agreements 403, [`StackError::Http`] on any other non-2xx response,
+    /// [`StackError::Decode`] on malformed JSON, or [`StackError::Network`] on
+    /// transport failure.
     pub(crate) async fn cancel_submission(&self, app_id: &str) -> Result<(), StackError> {
         let url = format!(
             "{}/v1/reviewSubmissions?filter[app]={app_id}\
@@ -2961,6 +3097,12 @@ impl AppStoreClient {
         // been seen with several stale READY_FOR_REVIEW submissions, and the
         // version only unsticks once they are all cleared. An empty page leaves
         // the loop untouched and returns Ok(()) (host no-op behavior).
+        //
+        // A READY_FOR_REVIEW draft that turns out to be empty cannot be removed
+        // via the public API. We do NOT let that abort the loop (later
+        // submissions may still be clearable); instead we remember it and, if
+        // nothing else failed harder, surface the honest error after the loop.
+        let mut not_removable: Option<StackError> = None;
         for submission in page.data {
             match submission.attributes.state.as_deref() {
                 // Already sent to review: cancel the in-flight submission.
@@ -2981,15 +3123,30 @@ impl AppStoreClient {
                 // Created but not yet submitted: `reviewSubmissions` forbids
                 // DELETE and rejects `canceled: true` here, so drop the
                 // submission's items instead — emptying it returns the version
-                // to PREPARE_FOR_SUBMISSION.
+                // to PREPARE_FOR_SUBMISSION. The helper verifies the result and
+                // reports an empty (unremovable) draft honestly instead of
+                // silently succeeding.
                 Some("READY_FOR_REVIEW") => {
-                    self.delete_submission_items(&submission.id).await?;
+                    match self
+                        .discard_ready_for_review_submission(&submission.id)
+                        .await
+                    {
+                        Ok(()) => {}
+                        Err(err @ StackError::SubmissionNotRemovable { .. }) => {
+                            // Keep clearing the rest; remember the first such draft.
+                            not_removable.get_or_insert(err);
+                        }
+                        Err(other) => return Err(other),
+                    }
                 }
                 // Unknown / non-cancellable state: never blindly PATCH (would 409).
                 _ => {}
             }
         }
-        Ok(())
+        match not_removable {
+            Some(err) => Err(err),
+            None => Ok(()),
+        }
     }
 
     /// Resubmits a single draft review submission identified by `submission_id`.
@@ -3033,8 +3190,12 @@ impl AppStoreClient {
     ///    - `READY_FOR_REVIEW` → created but not yet submitted. The
     ///      `reviewSubmissions` resource forbids `DELETE` and rejects
     ///      `canceled: true` in this state, so its items are removed via
-    ///      [`Self::delete_submission_items`] (returning the version to
-    ///      `PREPARE_FOR_SUBMISSION` and clearing the draft).
+    ///      [`Self::discard_ready_for_review_submission`], which then
+    ///      **verifies** the outcome: if the draft is gone (or transitioned) the
+    ///      discard succeeded; if it was empty and still lingers in
+    ///      `READY_FOR_REVIEW`, there is no API path to clear it and a
+    ///      [`StackError::SubmissionNotRemovable`] is returned instead of a false
+    ///      success.
     ///    - any other state (e.g. `COMPLETE`, `CANCELING`, `COMPLETING`, or a
     ///      missing `state`) → skipped with no mutating call (a blind PATCH would
     ///      `409`).
@@ -3042,10 +3203,11 @@ impl AppStoreClient {
     /// All requests route through the shared pending-agreements 403 guard.
     ///
     /// # Errors
-    /// [`StackError::PendingAgreements`] on a pending-agreements 403,
-    /// [`StackError::Http`] on any other non-2xx response (other than the GET's
-    /// 404, which is absent), [`StackError::Decode`] on malformed JSON, or
-    /// [`StackError::Network`] on transport failure.
+    /// [`StackError::SubmissionNotRemovable`] when an empty `READY_FOR_REVIEW`
+    /// draft cannot be removed, [`StackError::PendingAgreements`] on a
+    /// pending-agreements 403, [`StackError::Http`] on any other non-2xx response
+    /// (other than the GET's 404, which is absent), [`StackError::Decode`] on
+    /// malformed JSON, or [`StackError::Network`] on transport failure.
     pub(crate) async fn discard_review_submission(
         &self,
         submission_id: &str,
@@ -3089,8 +3251,11 @@ impl AppStoreClient {
             // Created but not yet submitted: `reviewSubmissions` forbids DELETE
             // and rejects `canceled: true` here, so drop the submission's items
             // instead — emptying it returns the version to PREPARE_FOR_SUBMISSION.
+            // The helper verifies the result: an empty draft that cannot be
+            // removed surfaces `SubmissionNotRemovable` instead of a false success.
             Some("READY_FOR_REVIEW") => {
-                self.delete_submission_items(submission_id).await?;
+                self.discard_ready_for_review_submission(submission_id)
+                    .await?;
             }
             // Unknown / non-cancellable state: never blindly PATCH (would 409).
             _ => {}
@@ -3170,6 +3335,97 @@ impl AppStoreClient {
             status: status.as_u16(),
             message: body,
         })
+    }
+
+    /// Reads the current `state` of the review submission `submission_id`.
+    ///
+    /// `GET /v1/reviewSubmissions/{submission_id}`. A `404` (submission gone) maps
+    /// to `Ok(None)`; a 2xx maps to `Ok(Some(state))` where `state` is
+    /// `data.attributes.state` (itself possibly `None` when absent in the payload).
+    ///
+    /// # Errors
+    /// [`StackError::PendingAgreements`] on a pending-agreements 403,
+    /// [`StackError::Http`] on any other non-2xx response, [`StackError::Decode`]
+    /// on malformed JSON, or [`StackError::Network`] on transport failure.
+    async fn get_review_submission_state(
+        &self,
+        submission_id: &str,
+    ) -> Result<Option<Option<String>>, StackError> {
+        let get_url = format!("{}/v1/reviewSubmissions/{submission_id}", self.base_url);
+        let token = self.auth.bearer_token().await?;
+        let (status, body) = self
+            .send_and_read(self.http.get(&get_url).bearer_auth(token))
+            .await?;
+        // Submission already gone → ASC returns 404; report as absent.
+        if status.as_u16() == 404 {
+            return Ok(None);
+        }
+        if !status.is_success() {
+            if let Some(err) = pending_agreements_error(status.as_u16(), &body) {
+                return Err(err);
+            }
+            return Err(StackError::Http {
+                status: status.as_u16(),
+                message: body,
+            });
+        }
+        let document: ReviewSubmissionDocument = serde_json::from_str(&body)
+            .map_err(|e| StackError::decode(format!("review submission response: {e}")))?;
+        Ok(Some(document.data.attributes.state))
+    }
+
+    /// Discards a `READY_FOR_REVIEW` submission *honestly*, verifying the result
+    /// instead of assuming success.
+    ///
+    /// 1. Removes the submission's items via [`Self::delete_submission_items`].
+    ///    For a draft that HAS items this is the meaningful action: it returns the
+    ///    referenced `appStoreVersion` to `PREPARE_FOR_SUBMISSION`. For an EMPTY
+    ///    draft the loop deletes nothing.
+    /// 2. Re-`GET`s the submission via [`Self::get_review_submission_state`]:
+    ///    - gone (`404`) → the draft was removed → `Ok(())`.
+    ///    - still present in `READY_FOR_REVIEW` → the draft was empty and the
+    ///      public ASC API has no way to clear it, so this returns
+    ///      [`StackError::SubmissionNotRemovable`] rather than lying with `Ok(())`.
+    ///    - present in any other state → the item removal transitioned it (or a
+    ///      concurrent actor moved it); treat as done → `Ok(())`.
+    ///
+    /// # Errors
+    /// [`StackError::SubmissionNotRemovable`] when an empty draft survives,
+    /// [`StackError::PendingAgreements`] on a pending-agreements 403,
+    /// [`StackError::Http`] on any other non-2xx response, [`StackError::Decode`]
+    /// on malformed JSON, or [`StackError::Network`] on transport failure.
+    async fn discard_ready_for_review_submission(
+        &self,
+        submission_id: &str,
+    ) -> Result<(), StackError> {
+        // 1. Remove items if any. For a draft WITH items this frees the version;
+        //    for an EMPTY draft it is a no-op (nothing to delete).
+        self.delete_submission_items(submission_id).await?;
+
+        // 2. Verify: an empty draft cannot be removed via the public API, so a
+        //    still-present READY_FOR_REVIEW submission means the discard failed.
+        match self.get_review_submission_state(submission_id).await? {
+            // Gone: the draft was removed (had items, now emptied+released, or the
+            // API cleared it). This is the success path.
+            None => Ok(()),
+            // Still an un-submitted draft after removing items → it was empty and
+            // there is no API path to clear it. Report honestly.
+            Some(Some(state)) if state == "READY_FOR_REVIEW" => {
+                if let Some(logger) = &self.debug_logger {
+                    logger.log(format!(
+                        "[RustCore] review submission {submission_id} still \
+                         READY_FOR_REVIEW after item removal (empty draft, not \
+                         removable via the ASC API)"
+                    ));
+                }
+                Err(StackError::submission_not_removable(
+                    EMPTY_DRAFT_NOT_REMOVABLE_MESSAGE,
+                ))
+            }
+            // Transitioned to some other state (or state absent): removing items
+            // moved it out of READY_FOR_REVIEW, so the discard did take effect.
+            Some(_) => Ok(()),
+        }
     }
 
     /// Removes every `reviewSubmissionItem` belonging to the submission `id`,
@@ -8239,6 +8495,20 @@ mod tests {
     async fn submit_for_review_chains_three_calls_with_platform() {
         let server = MockServer::start().await;
 
+        // 0. Reuse lookup: no reusable READY_FOR_REVIEW draft exists, so the flow
+        //    falls through to creating a new submission below.
+        Mock::given(method("GET"))
+            .and(path("/v1/reviewSubmissions"))
+            .and(query_param("filter[app]", "APP1"))
+            .and(query_param("filter[state]", "READY_FOR_REVIEW"))
+            .and(query_param("filter[platform]", "IOS"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({ "data": [] })),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+
         // 1. Create submission — platform present, app relationship set.
         Mock::given(method("POST"))
             .and(path("/v1/reviewSubmissions"))
@@ -8309,6 +8579,22 @@ mod tests {
     async fn submit_for_review_omits_attributes_when_platform_absent() {
         let server = MockServer::start().await;
 
+        // 0. Reuse lookup: platform is None, so the lookup omits filter[platform];
+        //    no reusable draft exists → fall through to create.
+        Mock::given(method("GET"))
+            .and(path("/v1/reviewSubmissions"))
+            .and(query_param("filter[app]", "APP1"))
+            .and(query_param("filter[state]", "READY_FOR_REVIEW"))
+            .and(wiremock::matchers::query_param_is_missing(
+                "filter[platform]",
+            ))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({ "data": [] })),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+
         // The create body must omit `attributes` entirely when platform is None.
         Mock::given(method("POST"))
             .and(path("/v1/reviewSubmissions"))
@@ -8348,6 +8634,17 @@ mod tests {
     #[tokio::test]
     async fn submit_for_review_surfaces_pending_agreements_on_create() {
         let server = MockServer::start().await;
+
+        // Reuse lookup finds no reusable draft, so the flow creates a new
+        // submission — which is where the pending-agreements 403 surfaces.
+        Mock::given(method("GET"))
+            .and(path("/v1/reviewSubmissions"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({ "data": [] })),
+            )
+            .mount(&server)
+            .await;
+
         Mock::given(method("POST"))
             .and(path("/v1/reviewSubmissions"))
             .respond_with(ResponseTemplate::new(403).set_body_json(serde_json::json!({
@@ -8361,6 +8658,241 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(err, StackError::PendingAgreements { .. }));
+    }
+
+    #[tokio::test]
+    async fn submit_for_review_reuses_existing_empty_draft() {
+        // An empty READY_FOR_REVIEW draft exists → it is reused: no new
+        // reviewSubmission is created; the version is attached to the existing id
+        // and that submission is submitted.
+        let server = MockServer::start().await;
+
+        // Reuse lookup returns one candidate draft.
+        Mock::given(method("GET"))
+            .and(path("/v1/reviewSubmissions"))
+            .and(query_param("filter[app]", "APP1"))
+            .and(query_param("filter[state]", "READY_FOR_REVIEW"))
+            .and(query_param("filter[platform]", "IOS"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": [{
+                    "type": "reviewSubmissions",
+                    "id": "draft-reuse",
+                    "attributes": { "state": "READY_FOR_REVIEW" }
+                }]
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        // The candidate has ZERO items → it is an empty shell, reusable.
+        Mock::given(method("GET"))
+            .and(path("/v1/reviewSubmissions/draft-reuse/items"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({ "data": [] })),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        // The version is attached to the EXISTING draft id (not a new submission).
+        Mock::given(method("POST"))
+            .and(path("/v1/reviewSubmissionItems"))
+            .and(wiremock::matchers::body_partial_json(serde_json::json!({
+                "data": {
+                    "type": "reviewSubmissionItems",
+                    "relationships": {
+                        "reviewSubmission": {
+                            "data": { "type": "reviewSubmissions", "id": "draft-reuse" }
+                        },
+                        "appStoreVersion": {
+                            "data": { "type": "appStoreVersions", "id": "VER1" }
+                        }
+                    }
+                }
+            })))
+            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
+                "data": { "type": "reviewSubmissionItems", "id": "item-1" }
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        // The existing draft is submitted.
+        Mock::given(method("PATCH"))
+            .and(path("/v1/reviewSubmissions/draft-reuse"))
+            .and(wiremock::matchers::body_partial_json(serde_json::json!({
+                "data": {
+                    "type": "reviewSubmissions",
+                    "id": "draft-reuse",
+                    "attributes": { "submitted": true }
+                }
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": { "type": "reviewSubmissions", "id": "draft-reuse" }
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        // Crucially, NO `POST /v1/reviewSubmissions` mock is mounted: if the code
+        // tried to create a new submission it would 404 and fail this assertion.
+        assert!(client(server.uri())
+            .submit_for_review("APP1", "VER1", Some("IOS"))
+            .await
+            .is_ok());
+    }
+
+    #[tokio::test]
+    async fn submit_for_review_creates_new_when_only_non_empty_drafts() {
+        // A READY_FOR_REVIEW draft exists but it already HAS items, so it is not a
+        // reusable shell — the flow creates a fresh submission instead.
+        let server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/v1/reviewSubmissions"))
+            .and(query_param("filter[state]", "READY_FOR_REVIEW"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": [{
+                    "type": "reviewSubmissions",
+                    "id": "draft-nonempty",
+                    "attributes": { "state": "READY_FOR_REVIEW" }
+                }]
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        // The candidate is NOT empty → skipped for reuse.
+        Mock::given(method("GET"))
+            .and(path("/v1/reviewSubmissions/draft-nonempty/items"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": [{ "type": "reviewSubmissionItems", "id": "existing-item" }]
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        // A brand-new submission is created and driven to submitted.
+        Mock::given(method("POST"))
+            .and(path("/v1/reviewSubmissions"))
+            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
+                "data": { "type": "reviewSubmissions", "id": "sub-new" }
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/v1/reviewSubmissionItems"))
+            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
+                "data": { "type": "reviewSubmissionItems", "id": "item-new" }
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("PATCH"))
+            .and(path("/v1/reviewSubmissions/sub-new"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": { "type": "reviewSubmissions", "id": "sub-new" }
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        assert!(client(server.uri())
+            .submit_for_review("APP1", "VER1", Some("IOS"))
+            .await
+            .is_ok());
+    }
+
+    #[tokio::test]
+    async fn submit_for_review_falls_back_to_create_when_reuse_attach_fails() {
+        // Self-healing: the reuse path is chosen but attaching the item to the
+        // stale draft fails (e.g. the draft's stale version rejects the new item).
+        // The flow must fall back to creating a fresh submission rather than error.
+        let server = MockServer::start().await;
+
+        // Reuse lookup returns an empty draft.
+        Mock::given(method("GET"))
+            .and(path("/v1/reviewSubmissions"))
+            .and(query_param("filter[state]", "READY_FOR_REVIEW"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": [{
+                    "type": "reviewSubmissions",
+                    "id": "draft-bad",
+                    "attributes": { "state": "READY_FOR_REVIEW" }
+                }]
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/v1/reviewSubmissions/draft-bad/items"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({ "data": [] })),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        // Reuse attach to the stale draft fails (409 conflict). Attach targets the
+        // reuse id; the fallback attach (below) targets the newly-created id, so a
+        // single unbounded item mock cannot serve both — scope this one to the
+        // reuse draft by matching its reviewSubmission id in the body.
+        Mock::given(method("POST"))
+            .and(path("/v1/reviewSubmissionItems"))
+            .and(wiremock::matchers::body_partial_json(serde_json::json!({
+                "data": {
+                    "relationships": {
+                        "reviewSubmission": {
+                            "data": { "id": "draft-bad" }
+                        }
+                    }
+                }
+            })))
+            .respond_with(ResponseTemplate::new(409).set_body_string("conflict"))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        // Fallback: a fresh submission is created and driven to submitted.
+        Mock::given(method("POST"))
+            .and(path("/v1/reviewSubmissions"))
+            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
+                "data": { "type": "reviewSubmissions", "id": "sub-fallback" }
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/v1/reviewSubmissionItems"))
+            .and(wiremock::matchers::body_partial_json(serde_json::json!({
+                "data": {
+                    "relationships": {
+                        "reviewSubmission": {
+                            "data": { "id": "sub-fallback" }
+                        }
+                    }
+                }
+            })))
+            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
+                "data": { "type": "reviewSubmissionItems", "id": "item-fallback" }
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("PATCH"))
+            .and(path("/v1/reviewSubmissions/sub-fallback"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": { "type": "reviewSubmissions", "id": "sub-fallback" }
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        assert!(client(server.uri())
+            .submit_for_review("APP1", "VER1", Some("IOS"))
+            .await
+            .is_ok());
     }
 
     #[tokio::test]
@@ -8548,11 +9080,19 @@ mod tests {
             .mount(&server)
             .await;
 
+        // Verify-after: once emptied, the draft is gone (404) → honest success.
+        Mock::given(method("GET"))
+            .and(path("/v1/reviewSubmissions/sub-ready"))
+            .respond_with(ResponseTemplate::new(404).set_body_string("not found"))
+            .expect(1)
+            .mount(&server)
+            .await;
+
         // A DELETE on /v1/reviewSubmissions/* (forbidden by Apple) or a PATCH
         // would hit no mock, 404, and fail the `is_ok()` assertion below.
         assert!(client(server.uri()).cancel_submission("APP1").await.is_ok());
         // `.expect(1)` on each mock is verified on server drop: two item DELETEs,
-        // one items GET, and no other mutating request occurred.
+        // one items GET, one verify-after GET, and no other mutating request.
     }
 
     #[tokio::test]
@@ -8616,7 +9156,152 @@ mod tests {
             .mount(&server)
             .await;
 
+        // Verify-after on each: both drafts are gone (404) once emptied.
+        Mock::given(method("GET"))
+            .and(path("/v1/reviewSubmissions/sub-a"))
+            .respond_with(ResponseTemplate::new(404).set_body_string("not found"))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/v1/reviewSubmissions/sub-b"))
+            .respond_with(ResponseTemplate::new(404).set_body_string("not found"))
+            .expect(1)
+            .mount(&server)
+            .await;
+
         assert!(client(server.uri()).cancel_submission("APP1").await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn cancel_submission_empty_draft_reports_not_removable() {
+        // App-scoped Part A guard: an EMPTY READY_FOR_REVIEW draft (zero items)
+        // cannot be cleared, so cancel_submission must surface
+        // SubmissionNotRemovable instead of a false Ok(()).
+        let server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/v1/reviewSubmissions"))
+            .and(query_param("filter[app]", "APP1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": [{
+                    "type": "reviewSubmissions",
+                    "id": "sub-empty",
+                    "attributes": { "state": "READY_FOR_REVIEW" }
+                }]
+            })))
+            .mount(&server)
+            .await;
+
+        // Items list is empty — nothing to delete.
+        Mock::given(method("GET"))
+            .and(path("/v1/reviewSubmissions/sub-empty/items"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({ "data": [] })),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        // Verify-after: the empty draft still lingers in READY_FOR_REVIEW.
+        Mock::given(method("GET"))
+            .and(path("/v1/reviewSubmissions/sub-empty"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": {
+                    "type": "reviewSubmissions",
+                    "id": "sub-empty",
+                    "attributes": { "state": "READY_FOR_REVIEW" }
+                }
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let err = client(server.uri())
+            .cancel_submission("APP1")
+            .await
+            .unwrap_err();
+        assert!(matches!(err, StackError::SubmissionNotRemovable { .. }));
+    }
+
+    #[tokio::test]
+    async fn cancel_submission_clears_removable_drafts_before_reporting_not_removable() {
+        // Mixed page: one clearable draft (has an item) and one empty draft. The
+        // empty one must not abort the loop — the clearable draft is still emptied,
+        // and only afterwards is SubmissionNotRemovable surfaced.
+        let server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/v1/reviewSubmissions"))
+            .and(query_param("filter[app]", "APP1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": [
+                    {
+                        "type": "reviewSubmissions",
+                        "id": "sub-empty",
+                        "attributes": { "state": "READY_FOR_REVIEW" }
+                    },
+                    {
+                        "type": "reviewSubmissions",
+                        "id": "sub-has-item",
+                        "attributes": { "state": "READY_FOR_REVIEW" }
+                    }
+                ]
+            })))
+            .mount(&server)
+            .await;
+
+        // Empty draft: no items, lingers after removal → not removable.
+        Mock::given(method("GET"))
+            .and(path("/v1/reviewSubmissions/sub-empty/items"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({ "data": [] })),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/v1/reviewSubmissions/sub-empty"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": {
+                    "type": "reviewSubmissions",
+                    "id": "sub-empty",
+                    "attributes": { "state": "READY_FOR_REVIEW" }
+                }
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        // Clearable draft: has one item, which IS deleted, then it is gone (404).
+        Mock::given(method("GET"))
+            .and(path("/v1/reviewSubmissions/sub-has-item/items"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": [{ "type": "reviewSubmissionItems", "id": "item-x" }]
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("DELETE"))
+            .and(path("/v1/reviewSubmissionItems/item-x"))
+            .respond_with(ResponseTemplate::new(204))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/v1/reviewSubmissions/sub-has-item"))
+            .respond_with(ResponseTemplate::new(404).set_body_string("not found"))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let err = client(server.uri())
+            .cancel_submission("APP1")
+            .await
+            .unwrap_err();
+        // The clearable draft's item DELETE (.expect(1)) is verified on drop:
+        // proof the empty draft did not short-circuit the loop.
+        assert!(matches!(err, StackError::SubmissionNotRemovable { .. }));
     }
 
     #[tokio::test]
@@ -8893,7 +9578,9 @@ mod tests {
     async fn discard_review_submission_deletes_items_when_ready_for_review() {
         let server = MockServer::start().await;
 
-        // GET the single submission; it is a not-yet-submitted draft.
+        // The first GET on the submission resolves the branch: a not-yet-submitted
+        // draft. `up_to_n_times(1)` scopes this response to that first call so the
+        // later verify-after GET (below) can return a different (gone) response.
         Mock::given(method("GET"))
             .and(path("/v1/reviewSubmissions/sub-ready"))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
@@ -8903,6 +9590,8 @@ mod tests {
                     "attributes": { "state": "READY_FOR_REVIEW" }
                 }
             })))
+            .up_to_n_times(1)
+            .expect(1)
             .mount(&server)
             .await;
 
@@ -8924,12 +9613,110 @@ mod tests {
             .mount(&server)
             .await;
 
+        // Verify-after: the re-GET now finds the submission gone (404), so the
+        // discard is an honest success. This 404 mock is registered after the
+        // one-shot 200 above, so it only serves the second GET.
+        Mock::given(method("GET"))
+            .and(path("/v1/reviewSubmissions/sub-ready"))
+            .respond_with(ResponseTemplate::new(404).set_body_string("not found"))
+            .expect(1)
+            .mount(&server)
+            .await;
+
         // A DELETE on /v1/reviewSubmissions/* or a PATCH would hit no mock, 404,
         // and fail the `is_ok()` assertion below.
         assert!(client(server.uri())
             .discard_review_submission("sub-ready")
             .await
             .is_ok());
+    }
+
+    #[tokio::test]
+    async fn discard_review_submission_empty_draft_is_not_removable() {
+        // Regression guard for the silent-false-success bug: an EMPTY
+        // READY_FOR_REVIEW draft (zero items) survives item removal and cannot be
+        // cleared via the API, so the discard must return SubmissionNotRemovable
+        // rather than a false Ok(()). This test FAILS on the pre-fix code.
+        let server = MockServer::start().await;
+
+        // The submission is a not-yet-submitted draft, both on the branch GET and
+        // on the verify-after GET (it never goes away — there are no items to
+        // remove). A single unbounded mock serves both GETs identically.
+        Mock::given(method("GET"))
+            .and(path("/v1/reviewSubmissions/sub-empty"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": {
+                    "type": "reviewSubmissions",
+                    "id": "sub-empty",
+                    "attributes": { "state": "READY_FOR_REVIEW" }
+                }
+            })))
+            .expect(2)
+            .mount(&server)
+            .await;
+
+        // Its items list is EMPTY — nothing to delete.
+        Mock::given(method("GET"))
+            .and(path("/v1/reviewSubmissions/sub-empty/items"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": []
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        // No DELETE on reviewSubmissionItems and no PATCH are mounted: any such
+        // request would 404. The absence of an item DELETE proves the loop had
+        // nothing to remove.
+        let err = client(server.uri())
+            .discard_review_submission("sub-empty")
+            .await
+            .unwrap_err();
+        assert!(matches!(err, StackError::SubmissionNotRemovable { .. }));
+    }
+
+    #[tokio::test]
+    async fn discard_review_submission_ready_for_review_lingers_is_not_removable() {
+        // Variant of Part A: even a draft that HAD an item is reported honestly if
+        // the verify-after re-GET still finds it in READY_FOR_REVIEW (the empty
+        // parent lingered instead of disappearing).
+        let server = MockServer::start().await;
+
+        // Both the branch GET and the verify-after GET return READY_FOR_REVIEW.
+        Mock::given(method("GET"))
+            .and(path("/v1/reviewSubmissions/sub-linger"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": {
+                    "type": "reviewSubmissions",
+                    "id": "sub-linger",
+                    "attributes": { "state": "READY_FOR_REVIEW" }
+                }
+            })))
+            .expect(2)
+            .mount(&server)
+            .await;
+
+        // The items list returns one item, which is deleted.
+        Mock::given(method("GET"))
+            .and(path("/v1/reviewSubmissions/sub-linger/items"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": [{ "type": "reviewSubmissionItems", "id": "item-1" }]
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("DELETE"))
+            .and(path("/v1/reviewSubmissionItems/item-1"))
+            .respond_with(ResponseTemplate::new(204))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let err = client(server.uri())
+            .discard_review_submission("sub-linger")
+            .await
+            .unwrap_err();
+        assert!(matches!(err, StackError::SubmissionNotRemovable { .. }));
     }
 
     #[tokio::test]

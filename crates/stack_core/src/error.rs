@@ -24,6 +24,15 @@ pub enum StackError {
 
     #[error("unsupported capability: {message}")]
     Unsupported { message: String },
+
+    /// A review submission cannot be removed through the public App Store Connect
+    /// API. This happens for an empty `READY_FOR_REVIEW` draft (zero
+    /// `reviewSubmissionItems`): the `reviewSubmissions` resource forbids
+    /// `DELETE`, rejects `canceled: true` in this state, and has no items to
+    /// remove — so there is no API path to clear it. The host must surface this
+    /// honestly (e.g. point the user at the App Store Connect website).
+    #[error("submission not removable: {message}")]
+    SubmissionNotRemovable { message: String },
 }
 
 impl StackError {
@@ -60,6 +69,12 @@ impl StackError {
     #[allow(dead_code)] // exercised once a provider reports a missing capability
     pub(crate) fn unsupported(message: impl Into<String>) -> Self {
         Self::Unsupported {
+            message: message.into(),
+        }
+    }
+
+    pub(crate) fn submission_not_removable(message: impl Into<String>) -> Self {
+        Self::SubmissionNotRemovable {
             message: message.into(),
         }
     }
