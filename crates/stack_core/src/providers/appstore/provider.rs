@@ -1039,6 +1039,30 @@ impl UsersImpl for AppStoreUsers {
     async fn delete_user(&self, id: String, is_pending: bool) -> Result<(), StackError> {
         self.client.delete_user(&id, is_pending).await
     }
+
+    async fn update_user(
+        &self,
+        id: String,
+        roles: Vec<String>,
+        all_apps_visible: bool,
+        provisioning_allowed: bool,
+    ) -> Result<(), StackError> {
+        self.client
+            .update_user(&id, &roles, all_apps_visible, provisioning_allowed)
+            .await
+    }
+
+    async fn fetch_user_visible_apps(&self, id: String) -> Result<Vec<String>, StackError> {
+        self.client.fetch_user_visible_apps(&id).await
+    }
+
+    async fn update_user_visible_apps(
+        &self,
+        id: String,
+        app_ids: Vec<String>,
+    ) -> Result<(), StackError> {
+        self.client.update_user_visible_apps(&id, &app_ids).await
+    }
 }
 
 /// App Store Connect implementation of the [`DevicesImpl`] capability contract.

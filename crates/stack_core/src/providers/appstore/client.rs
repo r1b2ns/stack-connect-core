@@ -1899,6 +1899,23 @@ impl UserInvitationResource {
     }
 }
 
+/// A JSON:API page of the `visibleApps` relationship of a `users` resource:
+/// resource-identifier ("linkage") objects, each carrying only the app `id`.
+#[derive(Deserialize)]
+struct VisibleAppsLinkageResponse {
+    #[serde(default)]
+    data: Vec<Linkage>,
+    #[serde(default)]
+    links: Links,
+}
+
+/// A JSON:API resource-identifier object; only the `id` is meaningful here (the
+/// `type` is always `apps` for this relationship).
+#[derive(Deserialize)]
+struct Linkage {
+    id: String,
+}
+
 // ---------------------------------------------------------------------------
 // Devices (JSON:API)
 // ---------------------------------------------------------------------------
@@ -6474,6 +6491,101 @@ impl AppStoreClient {
             status: status.as_u16(),
             message: body,
         })
+    }
+
+    /// Updates the active member `id`: replaces their raw ASC `roles` and the
+    /// `all_apps_visible`/`provisioning_allowed` flags.
+    ///
+    /// `PATCH /v1/users/{id}` with a JSON:API body whose `attributes` carry the
+    /// `roles` strings verbatim (same convention as [`Self::invite_user`]) plus
+    /// `allAppsVisible`/`provisioningAllowed`. App Store Connect answers `200`
+    /// with the updated resource; the body is discarded (any 2xx is success).
+    ///
+    /// # Errors
+    /// [`StackError::PendingAgreements`] on a pending-agreements 403,
+    /// [`StackError::Http`] on any other non-2xx response, or
+    /// [`StackError::Network`] on transport failure.
+    pub(crate) async fn update_user(
+        &self,
+        id: &str,
+        roles: &[String],
+        all_apps_visible: bool,
+        provisioning_allowed: bool,
+    ) -> Result<(), StackError> {
+        let url = format!("{}/v1/users/{id}", self.base_url);
+        let request_body = json!({
+            "data": {
+                "type": "users",
+                "id": id,
+                "attributes": {
+                    "roles": roles,
+                    "allAppsVisible": all_apps_visible,
+                    "provisioningAllowed": provisioning_allowed,
+                }
+            }
+        });
+        let token = self.auth.bearer_token().await?;
+        self.patch_no_content(&url, &token, &request_body).await
+    }
+
+    /// Lists the ids of the apps visible to the member `id`.
+    ///
+    /// `GET /v1/users/{id}/relationships/visibleApps?limit=200`, following
+    /// `links.next` pagination until exhausted. The relationship endpoint returns
+    /// JSON:API resource-identifier ("linkage") objects; only each app's `id` is
+    /// collected. An empty relationship yields an empty vec.
+    ///
+    /// # Errors
+    /// [`StackError::PendingAgreements`] on a pending-agreements 403,
+    /// [`StackError::Http`] on any other non-2xx page, [`StackError::Decode`] on
+    /// malformed JSON, or [`StackError::Network`] on transport failure.
+    pub(crate) async fn fetch_user_visible_apps(
+        &self,
+        id: &str,
+    ) -> Result<Vec<String>, StackError> {
+        let mut app_ids = Vec::new();
+        let mut next_url = Some(format!(
+            "{}/v1/users/{id}/relationships/visibleApps?limit=200",
+            self.base_url
+        ));
+
+        while let Some(url) = next_url {
+            let body = self.get_page(&url).await?;
+            let page: VisibleAppsLinkageResponse = serde_json::from_str(&body)
+                .map_err(|e| StackError::decode(format!("visible apps response: {e}")))?;
+            app_ids.extend(page.data.into_iter().map(|linkage| linkage.id));
+
+            // `links.next` is an absolute URL; follow it verbatim until absent.
+            next_url = page.links.next.filter(|u| !u.is_empty());
+        }
+
+        Ok(app_ids)
+    }
+
+    /// Replaces the full set of apps visible to the member `id` with `app_ids`.
+    ///
+    /// `PATCH /v1/users/{id}/relationships/visibleApps` with a JSON:API body of
+    /// `apps` linkage objects — full-replace semantics, so an empty `app_ids`
+    /// clears the member's visible apps. App Store Connect answers `204`; the
+    /// (empty) body is discarded (any 2xx is success).
+    ///
+    /// # Errors
+    /// [`StackError::PendingAgreements`] on a pending-agreements 403,
+    /// [`StackError::Http`] on any other non-2xx response, or
+    /// [`StackError::Network`] on transport failure.
+    pub(crate) async fn update_user_visible_apps(
+        &self,
+        id: &str,
+        app_ids: &[String],
+    ) -> Result<(), StackError> {
+        let url = format!("{}/v1/users/{id}/relationships/visibleApps", self.base_url);
+        let data: Vec<serde_json::Value> = app_ids
+            .iter()
+            .map(|app_id| json!({ "type": "apps", "id": app_id }))
+            .collect();
+        let request_body = json!({ "data": data });
+        let token = self.auth.bearer_token().await?;
+        self.patch_no_content(&url, &token, &request_body).await
     }
 
     /// Lists every registered device of the connected account, sorted by name.
@@ -13593,6 +13705,186 @@ mod tests {
 
         let err = client(server.uri())
             .delete_user("user-1", false)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, StackError::Http { status: 404, .. }));
+    }
+
+    #[tokio::test]
+    async fn update_user_patches_expected_body() {
+        let server = MockServer::start().await;
+        Mock::given(method("PATCH"))
+            .and(path("/v1/users/user-1"))
+            .and(wiremock::matchers::body_partial_json(serde_json::json!({
+                "data": {
+                    "type": "users",
+                    "id": "user-1",
+                    "attributes": {
+                        "roles": ["APP_MANAGER", "DEVELOPER"],
+                        "allAppsVisible": false,
+                        "provisioningAllowed": true
+                    }
+                }
+            })))
+            // ASC answers 200 with the updated resource; any 2xx is success.
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": { "type": "users", "id": "user-1", "attributes": {} }
+            })))
+            .mount(&server)
+            .await;
+
+        let roles = vec!["APP_MANAGER".to_string(), "DEVELOPER".to_string()];
+        assert!(client(server.uri())
+            .update_user("user-1", &roles, false, true)
+            .await
+            .is_ok());
+    }
+
+    #[tokio::test]
+    async fn update_user_surfaces_http_error() {
+        let server = MockServer::start().await;
+        Mock::given(method("PATCH"))
+            .and(path("/v1/users/user-1"))
+            .respond_with(ResponseTemplate::new(409).set_body_string("conflict"))
+            .mount(&server)
+            .await;
+
+        let roles = vec!["DEVELOPER".to_string()];
+        let err = client(server.uri())
+            .update_user("user-1", &roles, true, false)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, StackError::Http { status: 409, .. }));
+    }
+
+    #[tokio::test]
+    async fn fetch_user_visible_apps_collects_ids_and_paginates() {
+        let server = MockServer::start().await;
+        let next = format!(
+            "{}/v1/users/user-1/relationships/visibleApps?cursor=PAGE2",
+            server.uri()
+        );
+
+        // Page 1: two linkage ids plus the `links.next` cursor.
+        Mock::given(method("GET"))
+            .and(path("/v1/users/user-1/relationships/visibleApps"))
+            .and(wiremock::matchers::query_param_is_missing("cursor"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": [
+                    { "type": "apps", "id": "app-1" },
+                    { "type": "apps", "id": "app-2" }
+                ],
+                "links": { "next": next }
+            })))
+            .mount(&server)
+            .await;
+
+        // Page 2: the cursor encoded in `links.next` is fetched verbatim.
+        Mock::given(method("GET"))
+            .and(path("/v1/users/user-1/relationships/visibleApps"))
+            .and(query_param("cursor", "PAGE2"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": [ { "type": "apps", "id": "app-3" } ],
+                "links": {}
+            })))
+            .mount(&server)
+            .await;
+
+        let app_ids = client(server.uri())
+            .fetch_user_visible_apps("user-1")
+            .await
+            .unwrap();
+        assert_eq!(app_ids, vec!["app-1", "app-2", "app-3"]);
+    }
+
+    #[tokio::test]
+    async fn fetch_user_visible_apps_returns_empty_when_none() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v1/users/user-1/relationships/visibleApps"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": [],
+                "links": {}
+            })))
+            .mount(&server)
+            .await;
+
+        let app_ids = client(server.uri())
+            .fetch_user_visible_apps("user-1")
+            .await
+            .unwrap();
+        assert!(app_ids.is_empty());
+    }
+
+    #[tokio::test]
+    async fn fetch_user_visible_apps_surfaces_http_error() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v1/users/user-1/relationships/visibleApps"))
+            .respond_with(ResponseTemplate::new(403).set_body_string("forbidden"))
+            .mount(&server)
+            .await;
+
+        let err = client(server.uri())
+            .fetch_user_visible_apps("user-1")
+            .await
+            .unwrap_err();
+        assert!(matches!(err, StackError::Http { status: 403, .. }));
+    }
+
+    #[tokio::test]
+    async fn update_user_visible_apps_patches_linkage_array() {
+        let server = MockServer::start().await;
+        Mock::given(method("PATCH"))
+            .and(path("/v1/users/user-1/relationships/visibleApps"))
+            .and(wiremock::matchers::body_partial_json(serde_json::json!({
+                "data": [
+                    { "type": "apps", "id": "app-1" },
+                    { "type": "apps", "id": "app-2" }
+                ]
+            })))
+            .respond_with(ResponseTemplate::new(204))
+            .mount(&server)
+            .await;
+
+        let app_ids = vec!["app-1".to_string(), "app-2".to_string()];
+        assert!(client(server.uri())
+            .update_user_visible_apps("user-1", &app_ids)
+            .await
+            .is_ok());
+    }
+
+    #[tokio::test]
+    async fn update_user_visible_apps_clears_with_empty_array() {
+        let server = MockServer::start().await;
+        // Full-replace with an empty `data` array clears the relationship.
+        Mock::given(method("PATCH"))
+            .and(path("/v1/users/user-1/relationships/visibleApps"))
+            .and(wiremock::matchers::body_partial_json(serde_json::json!({
+                "data": []
+            })))
+            .respond_with(ResponseTemplate::new(204))
+            .mount(&server)
+            .await;
+
+        assert!(client(server.uri())
+            .update_user_visible_apps("user-1", &[])
+            .await
+            .is_ok());
+    }
+
+    #[tokio::test]
+    async fn update_user_visible_apps_surfaces_http_error() {
+        let server = MockServer::start().await;
+        Mock::given(method("PATCH"))
+            .and(path("/v1/users/user-1/relationships/visibleApps"))
+            .respond_with(ResponseTemplate::new(404).set_body_string("not found"))
+            .mount(&server)
+            .await;
+
+        let app_ids = vec!["app-1".to_string()];
+        let err = client(server.uri())
+            .update_user_visible_apps("user-1", &app_ids)
             .await
             .unwrap_err();
         assert!(matches!(err, StackError::Http { status: 404, .. }));

@@ -41,6 +41,26 @@ pub(crate) trait UsersImpl: Send + Sync {
     /// Deletes the user `id`: cancels the invitation when `is_pending`, otherwise
     /// removes the active member.
     async fn delete_user(&self, id: String, is_pending: bool) -> Result<(), StackError>;
+
+    /// Updates the active member `id`: replaces their raw ASC `roles` and the
+    /// `all_apps_visible`/`provisioning_allowed` flags.
+    async fn update_user(
+        &self,
+        id: String,
+        roles: Vec<String>,
+        all_apps_visible: bool,
+        provisioning_allowed: bool,
+    ) -> Result<(), StackError>;
+
+    /// Lists the ids of the apps visible to the member `id`.
+    async fn fetch_user_visible_apps(&self, id: String) -> Result<Vec<String>, StackError>;
+
+    /// Replaces the full set of apps visible to the member `id` with `app_ids`.
+    async fn update_user_visible_apps(
+        &self,
+        id: String,
+        app_ids: Vec<String>,
+    ) -> Result<(), StackError>;
 }
 
 /// UniFFI-exported Users capability handle. A thin, binding-friendly wrapper
@@ -129,5 +149,56 @@ impl Users {
     /// [`StackError::Network`] on transport failure.
     pub async fn delete_user(&self, id: String, is_pending: bool) -> Result<(), StackError> {
         self.inner.delete_user(id, is_pending).await
+    }
+
+    /// Updates the active member `id`, replacing the raw ASC `roles` (e.g.
+    /// `"ADMIN"`, `"DEVELOPER"`, `"APP_MANAGER"`, passed through verbatim) and
+    /// setting the `all_apps_visible`/`provisioning_allowed` flags. App Store
+    /// Connect returns the updated resource; nothing meaningful is returned here.
+    ///
+    /// # Errors
+    /// [`StackError::PendingAgreements`] when App Store Connect reports pending
+    /// agreements, [`StackError::Http`] on any other non-2xx response, or
+    /// [`StackError::Network`] on transport failure.
+    pub async fn update_user(
+        &self,
+        id: String,
+        roles: Vec<String>,
+        all_apps_visible: bool,
+        provisioning_allowed: bool,
+    ) -> Result<(), StackError> {
+        self.inner
+            .update_user(id, roles, all_apps_visible, provisioning_allowed)
+            .await
+    }
+
+    /// Lists the ids of the apps visible to the member `id`. Intended to be
+    /// fetched lazily (e.g. when an editor opens) rather than eagerly alongside
+    /// the bulk user list. Returns an empty list when the member has no visible
+    /// apps (or when `all_apps_visible` makes the relationship moot).
+    ///
+    /// # Errors
+    /// [`StackError::PendingAgreements`] when App Store Connect reports pending
+    /// agreements, [`StackError::Http`] on any other non-2xx response,
+    /// [`StackError::Decode`] on malformed JSON, or [`StackError::Network`] on
+    /// transport failure.
+    pub async fn fetch_user_visible_apps(&self, id: String) -> Result<Vec<String>, StackError> {
+        self.inner.fetch_user_visible_apps(id).await
+    }
+
+    /// Replaces the full set of apps visible to the member `id` with `app_ids`
+    /// (full-replace semantics). An empty `app_ids` is valid and clears the
+    /// member's visible apps.
+    ///
+    /// # Errors
+    /// [`StackError::PendingAgreements`] when App Store Connect reports pending
+    /// agreements, [`StackError::Http`] on any other non-2xx response, or
+    /// [`StackError::Network`] on transport failure.
+    pub async fn update_user_visible_apps(
+        &self,
+        id: String,
+        app_ids: Vec<String>,
+    ) -> Result<(), StackError> {
+        self.inner.update_user_visible_apps(id, app_ids).await
     }
 }
