@@ -39,7 +39,7 @@ flutter_rust_bridge::frb_generated_boilerplate!(
     default_rust_auto_opaque = RustAutoOpaqueMoi,
 );
 pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_VERSION: &str = "2.12.0";
-pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = -1312422460;
+pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = 1461308508;
 
 // Section: executor
 
@@ -158,6 +158,396 @@ let decode_indices_ = flutter_rust_bridge::for_generated::lockable_compute_decod
  let output_ok = crate::frb_api::FrbAccessibilityDeclarations::update_accessibility_declaration(&*api_that_guard, api_id, api_publish, api_supports_audio_descriptions, api_supports_captions, api_supports_dark_interface, api_supports_differentiate_without_color, api_supports_larger_text, api_supports_reduced_motion, api_supports_sufficient_contrast, api_supports_voice_control, api_supports_voiceover).await?;   Ok(output_ok)
                     })().await)
                 } })
+}
+fn wire__crate__frb_api__FrbAnalytics_create_analytics_report_request_impl(
+    port_: flutter_rust_bridge::for_generated::MessagePort,
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_async::<flutter_rust_bridge::for_generated::SseCodec, _, _, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "FrbAnalytics_create_analytics_report_request",
+            port: Some(port_),
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            let api_that = <RustOpaqueMoi<
+                flutter_rust_bridge::for_generated::RustAutoOpaqueInner<FrbAnalytics>,
+            >>::sse_decode(&mut deserializer);
+            let api_app_id = <String>::sse_decode(&mut deserializer);
+            let api_access_type = <String>::sse_decode(&mut deserializer);
+            deserializer.end();
+            move |context| async move {
+                transform_result_sse::<_, crate::error::StackError>(
+                    (move || async move {
+                        let mut api_that_guard = None;
+                        let decode_indices_ =
+                            flutter_rust_bridge::for_generated::lockable_compute_decode_order(
+                                vec![flutter_rust_bridge::for_generated::LockableOrderInfo::new(
+                                    &api_that, 0, false,
+                                )],
+                            );
+                        for i in decode_indices_ {
+                            match i {
+                                0 => {
+                                    api_that_guard =
+                                        Some(api_that.lockable_decode_async_ref().await)
+                                }
+                                _ => unreachable!(),
+                            }
+                        }
+                        let api_that_guard = api_that_guard.unwrap();
+                        let output_ok =
+                            crate::frb_api::FrbAnalytics::create_analytics_report_request(
+                                &*api_that_guard,
+                                api_app_id,
+                                api_access_type,
+                            )
+                            .await?;
+                        Ok(output_ok)
+                    })()
+                    .await,
+                )
+            }
+        },
+    )
+}
+fn wire__crate__frb_api__FrbAnalytics_download_analytics_segment_impl(
+    port_: flutter_rust_bridge::for_generated::MessagePort,
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_async::<flutter_rust_bridge::for_generated::SseCodec, _, _, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "FrbAnalytics_download_analytics_segment",
+            port: Some(port_),
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            let api_that = <RustOpaqueMoi<
+                flutter_rust_bridge::for_generated::RustAutoOpaqueInner<FrbAnalytics>,
+            >>::sse_decode(&mut deserializer);
+            let api_url = <String>::sse_decode(&mut deserializer);
+            let api_max_bytes = <u64>::sse_decode(&mut deserializer);
+            deserializer.end();
+            move |context| async move {
+                transform_result_sse::<_, crate::error::StackError>(
+                    (move || async move {
+                        let mut api_that_guard = None;
+                        let decode_indices_ =
+                            flutter_rust_bridge::for_generated::lockable_compute_decode_order(
+                                vec![flutter_rust_bridge::for_generated::LockableOrderInfo::new(
+                                    &api_that, 0, false,
+                                )],
+                            );
+                        for i in decode_indices_ {
+                            match i {
+                                0 => {
+                                    api_that_guard =
+                                        Some(api_that.lockable_decode_async_ref().await)
+                                }
+                                _ => unreachable!(),
+                            }
+                        }
+                        let api_that_guard = api_that_guard.unwrap();
+                        let output_ok = crate::frb_api::FrbAnalytics::download_analytics_segment(
+                            &*api_that_guard,
+                            api_url,
+                            api_max_bytes,
+                        )
+                        .await?;
+                        Ok(output_ok)
+                    })()
+                    .await,
+                )
+            }
+        },
+    )
+}
+fn wire__crate__frb_api__FrbAnalytics_fetch_analytics_report_instances_page_impl(
+    port_: flutter_rust_bridge::for_generated::MessagePort,
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_async::<flutter_rust_bridge::for_generated::SseCodec, _, _, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "FrbAnalytics_fetch_analytics_report_instances_page",
+            port: Some(port_),
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            let api_that = <RustOpaqueMoi<
+                flutter_rust_bridge::for_generated::RustAutoOpaqueInner<FrbAnalytics>,
+            >>::sse_decode(&mut deserializer);
+            let api_report_id = <String>::sse_decode(&mut deserializer);
+            let api_filter_granularity = <Option<String>>::sse_decode(&mut deserializer);
+            let api_limit = <u32>::sse_decode(&mut deserializer);
+            let api_page_token = <Option<String>>::sse_decode(&mut deserializer);
+            deserializer.end();
+            move |context| async move {
+                transform_result_sse::<_, crate::error::StackError>(
+                    (move || async move {
+                        let mut api_that_guard = None;
+                        let decode_indices_ =
+                            flutter_rust_bridge::for_generated::lockable_compute_decode_order(
+                                vec![flutter_rust_bridge::for_generated::LockableOrderInfo::new(
+                                    &api_that, 0, false,
+                                )],
+                            );
+                        for i in decode_indices_ {
+                            match i {
+                                0 => {
+                                    api_that_guard =
+                                        Some(api_that.lockable_decode_async_ref().await)
+                                }
+                                _ => unreachable!(),
+                            }
+                        }
+                        let api_that_guard = api_that_guard.unwrap();
+                        let output_ok =
+                            crate::frb_api::FrbAnalytics::fetch_analytics_report_instances_page(
+                                &*api_that_guard,
+                                api_report_id,
+                                api_filter_granularity,
+                                api_limit,
+                                api_page_token,
+                            )
+                            .await?;
+                        Ok(output_ok)
+                    })()
+                    .await,
+                )
+            }
+        },
+    )
+}
+fn wire__crate__frb_api__FrbAnalytics_fetch_analytics_report_requests_page_impl(
+    port_: flutter_rust_bridge::for_generated::MessagePort,
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_async::<flutter_rust_bridge::for_generated::SseCodec, _, _, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "FrbAnalytics_fetch_analytics_report_requests_page",
+            port: Some(port_),
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            let api_that = <RustOpaqueMoi<
+                flutter_rust_bridge::for_generated::RustAutoOpaqueInner<FrbAnalytics>,
+            >>::sse_decode(&mut deserializer);
+            let api_app_id = <String>::sse_decode(&mut deserializer);
+            let api_filter_access_type = <Option<String>>::sse_decode(&mut deserializer);
+            let api_limit = <u32>::sse_decode(&mut deserializer);
+            let api_page_token = <Option<String>>::sse_decode(&mut deserializer);
+            deserializer.end();
+            move |context| async move {
+                transform_result_sse::<_, crate::error::StackError>(
+                    (move || async move {
+                        let mut api_that_guard = None;
+                        let decode_indices_ =
+                            flutter_rust_bridge::for_generated::lockable_compute_decode_order(
+                                vec![flutter_rust_bridge::for_generated::LockableOrderInfo::new(
+                                    &api_that, 0, false,
+                                )],
+                            );
+                        for i in decode_indices_ {
+                            match i {
+                                0 => {
+                                    api_that_guard =
+                                        Some(api_that.lockable_decode_async_ref().await)
+                                }
+                                _ => unreachable!(),
+                            }
+                        }
+                        let api_that_guard = api_that_guard.unwrap();
+                        let output_ok =
+                            crate::frb_api::FrbAnalytics::fetch_analytics_report_requests_page(
+                                &*api_that_guard,
+                                api_app_id,
+                                api_filter_access_type,
+                                api_limit,
+                                api_page_token,
+                            )
+                            .await?;
+                        Ok(output_ok)
+                    })()
+                    .await,
+                )
+            }
+        },
+    )
+}
+fn wire__crate__frb_api__FrbAnalytics_fetch_analytics_report_segments_page_impl(
+    port_: flutter_rust_bridge::for_generated::MessagePort,
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_async::<flutter_rust_bridge::for_generated::SseCodec, _, _, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "FrbAnalytics_fetch_analytics_report_segments_page",
+            port: Some(port_),
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            let api_that = <RustOpaqueMoi<
+                flutter_rust_bridge::for_generated::RustAutoOpaqueInner<FrbAnalytics>,
+            >>::sse_decode(&mut deserializer);
+            let api_instance_id = <String>::sse_decode(&mut deserializer);
+            let api_limit = <u32>::sse_decode(&mut deserializer);
+            let api_page_token = <Option<String>>::sse_decode(&mut deserializer);
+            deserializer.end();
+            move |context| async move {
+                transform_result_sse::<_, crate::error::StackError>(
+                    (move || async move {
+                        let mut api_that_guard = None;
+                        let decode_indices_ =
+                            flutter_rust_bridge::for_generated::lockable_compute_decode_order(
+                                vec![flutter_rust_bridge::for_generated::LockableOrderInfo::new(
+                                    &api_that, 0, false,
+                                )],
+                            );
+                        for i in decode_indices_ {
+                            match i {
+                                0 => {
+                                    api_that_guard =
+                                        Some(api_that.lockable_decode_async_ref().await)
+                                }
+                                _ => unreachable!(),
+                            }
+                        }
+                        let api_that_guard = api_that_guard.unwrap();
+                        let output_ok =
+                            crate::frb_api::FrbAnalytics::fetch_analytics_report_segments_page(
+                                &*api_that_guard,
+                                api_instance_id,
+                                api_limit,
+                                api_page_token,
+                            )
+                            .await?;
+                        Ok(output_ok)
+                    })()
+                    .await,
+                )
+            }
+        },
+    )
+}
+fn wire__crate__frb_api__FrbAnalytics_fetch_analytics_reports_page_impl(
+    port_: flutter_rust_bridge::for_generated::MessagePort,
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_async::<flutter_rust_bridge::for_generated::SseCodec, _, _, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "FrbAnalytics_fetch_analytics_reports_page",
+            port: Some(port_),
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            let api_that = <RustOpaqueMoi<
+                flutter_rust_bridge::for_generated::RustAutoOpaqueInner<FrbAnalytics>,
+            >>::sse_decode(&mut deserializer);
+            let api_request_id = <String>::sse_decode(&mut deserializer);
+            let api_filter_category = <Option<String>>::sse_decode(&mut deserializer);
+            let api_limit = <u32>::sse_decode(&mut deserializer);
+            let api_page_token = <Option<String>>::sse_decode(&mut deserializer);
+            deserializer.end();
+            move |context| async move {
+                transform_result_sse::<_, crate::error::StackError>(
+                    (move || async move {
+                        let mut api_that_guard = None;
+                        let decode_indices_ =
+                            flutter_rust_bridge::for_generated::lockable_compute_decode_order(
+                                vec![flutter_rust_bridge::for_generated::LockableOrderInfo::new(
+                                    &api_that, 0, false,
+                                )],
+                            );
+                        for i in decode_indices_ {
+                            match i {
+                                0 => {
+                                    api_that_guard =
+                                        Some(api_that.lockable_decode_async_ref().await)
+                                }
+                                _ => unreachable!(),
+                            }
+                        }
+                        let api_that_guard = api_that_guard.unwrap();
+                        let output_ok = crate::frb_api::FrbAnalytics::fetch_analytics_reports_page(
+                            &*api_that_guard,
+                            api_request_id,
+                            api_filter_category,
+                            api_limit,
+                            api_page_token,
+                        )
+                        .await?;
+                        Ok(output_ok)
+                    })()
+                    .await,
+                )
+            }
+        },
+    )
 }
 fn wire__crate__frb_api__FrbAppMetadata_create_app_info_localization_impl(
     port_: flutter_rust_bridge::for_generated::MessagePort,
@@ -5004,6 +5394,53 @@ fn wire__crate__frb_api__FrbProvider_accessibility_declarations_impl(
         },
     )
 }
+fn wire__crate__frb_api__FrbProvider_analytics_impl(
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) -> flutter_rust_bridge::for_generated::WireSyncRust2DartSse {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_sync::<flutter_rust_bridge::for_generated::SseCodec, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "FrbProvider_analytics",
+            port: None,
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Sync,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            let api_that = <RustOpaqueMoi<
+                flutter_rust_bridge::for_generated::RustAutoOpaqueInner<FrbProvider>,
+            >>::sse_decode(&mut deserializer);
+            deserializer.end();
+            transform_result_sse::<_, ()>((move || {
+                let mut api_that_guard = None;
+                let decode_indices_ =
+                    flutter_rust_bridge::for_generated::lockable_compute_decode_order(vec![
+                        flutter_rust_bridge::for_generated::LockableOrderInfo::new(
+                            &api_that, 0, false,
+                        ),
+                    ]);
+                for i in decode_indices_ {
+                    match i {
+                        0 => api_that_guard = Some(api_that.lockable_decode_sync_ref()),
+                        _ => unreachable!(),
+                    }
+                }
+                let api_that_guard = api_that_guard.unwrap();
+                let output_ok =
+                    Result::<_, ()>::Ok(crate::frb_api::FrbProvider::analytics(&*api_that_guard))?;
+                Ok(output_ok)
+            })())
+        },
+    )
+}
 fn wire__crate__frb_api__FrbProvider_app_metadata_impl(
     ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
     rust_vec_len_: i32,
@@ -6626,6 +7063,9 @@ flutter_rust_bridge::frb_generated_moi_arc_impl_value!(
     flutter_rust_bridge::for_generated::RustAutoOpaqueInner<FrbAccessibilityDeclarations>
 );
 flutter_rust_bridge::frb_generated_moi_arc_impl_value!(
+    flutter_rust_bridge::for_generated::RustAutoOpaqueInner<FrbAnalytics>
+);
+flutter_rust_bridge::frb_generated_moi_arc_impl_value!(
     flutter_rust_bridge::for_generated::RustAutoOpaqueInner<FrbAppMetadata>
 );
 flutter_rust_bridge::frb_generated_moi_arc_impl_value!(
@@ -6686,6 +7126,16 @@ impl SseDecode for FrbAccessibilityDeclarations {
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
         let mut inner = <RustOpaqueMoi<
             flutter_rust_bridge::for_generated::RustAutoOpaqueInner<FrbAccessibilityDeclarations>,
+        >>::sse_decode(deserializer);
+        return flutter_rust_bridge::for_generated::rust_auto_opaque_decode_owned(inner);
+    }
+}
+
+impl SseDecode for FrbAnalytics {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut inner = <RustOpaqueMoi<
+            flutter_rust_bridge::for_generated::RustAutoOpaqueInner<FrbAnalytics>,
         >>::sse_decode(deserializer);
         return flutter_rust_bridge::for_generated::rust_auto_opaque_decode_owned(inner);
     }
@@ -6861,6 +7311,16 @@ impl SseDecode
     for RustOpaqueMoi<
         flutter_rust_bridge::for_generated::RustAutoOpaqueInner<FrbAccessibilityDeclarations>,
     >
+{
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut inner = <usize>::sse_decode(deserializer);
+        return decode_rust_opaque_moi(inner);
+    }
+}
+
+impl SseDecode
+    for RustOpaqueMoi<flutter_rust_bridge::for_generated::RustAutoOpaqueInner<FrbAnalytics>>
 {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
@@ -7127,6 +7587,129 @@ impl SseDecode for crate::domain::AgeRatingDeclarationInfo {
             is_unrestricted_web_access: var_isUnrestrictedWebAccess,
             is_user_generated_content: var_isUserGeneratedContent,
             age_rating_override_v2: var_ageRatingOverrideV2,
+        };
+    }
+}
+
+impl SseDecode for crate::domain::AnalyticsReport {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut var_id = <String>::sse_decode(deserializer);
+        let mut var_name = <String>::sse_decode(deserializer);
+        let mut var_category = <String>::sse_decode(deserializer);
+        return crate::domain::AnalyticsReport {
+            id: var_id,
+            name: var_name,
+            category: var_category,
+        };
+    }
+}
+
+impl SseDecode for crate::domain::AnalyticsReportData {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut var_headers = <Vec<String>>::sse_decode(deserializer);
+        let mut var_rows = <Vec<Vec<String>>>::sse_decode(deserializer);
+        let mut var_rowCount = <u32>::sse_decode(deserializer);
+        return crate::domain::AnalyticsReportData {
+            headers: var_headers,
+            rows: var_rows,
+            row_count: var_rowCount,
+        };
+    }
+}
+
+impl SseDecode for crate::domain::AnalyticsReportInstance {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut var_id = <String>::sse_decode(deserializer);
+        let mut var_granularity = <String>::sse_decode(deserializer);
+        let mut var_processingDate = <Option<String>>::sse_decode(deserializer);
+        return crate::domain::AnalyticsReportInstance {
+            id: var_id,
+            granularity: var_granularity,
+            processing_date: var_processingDate,
+        };
+    }
+}
+
+impl SseDecode for crate::domain::AnalyticsReportInstancesPage {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut var_instances =
+            <Vec<crate::domain::AnalyticsReportInstance>>::sse_decode(deserializer);
+        let mut var_nextToken = <Option<String>>::sse_decode(deserializer);
+        return crate::domain::AnalyticsReportInstancesPage {
+            instances: var_instances,
+            next_token: var_nextToken,
+        };
+    }
+}
+
+impl SseDecode for crate::domain::AnalyticsReportRequest {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut var_id = <String>::sse_decode(deserializer);
+        let mut var_accessType = <String>::sse_decode(deserializer);
+        let mut var_stoppedDueToInactivity = <bool>::sse_decode(deserializer);
+        return crate::domain::AnalyticsReportRequest {
+            id: var_id,
+            access_type: var_accessType,
+            stopped_due_to_inactivity: var_stoppedDueToInactivity,
+        };
+    }
+}
+
+impl SseDecode for crate::domain::AnalyticsReportRequestsPage {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut var_requests =
+            <Vec<crate::domain::AnalyticsReportRequest>>::sse_decode(deserializer);
+        let mut var_nextToken = <Option<String>>::sse_decode(deserializer);
+        return crate::domain::AnalyticsReportRequestsPage {
+            requests: var_requests,
+            next_token: var_nextToken,
+        };
+    }
+}
+
+impl SseDecode for crate::domain::AnalyticsReportSegment {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut var_id = <String>::sse_decode(deserializer);
+        let mut var_url = <String>::sse_decode(deserializer);
+        let mut var_checksum = <Option<String>>::sse_decode(deserializer);
+        let mut var_sizeInBytes = <Option<i64>>::sse_decode(deserializer);
+        return crate::domain::AnalyticsReportSegment {
+            id: var_id,
+            url: var_url,
+            checksum: var_checksum,
+            size_in_bytes: var_sizeInBytes,
+        };
+    }
+}
+
+impl SseDecode for crate::domain::AnalyticsReportSegmentsPage {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut var_segments =
+            <Vec<crate::domain::AnalyticsReportSegment>>::sse_decode(deserializer);
+        let mut var_nextToken = <Option<String>>::sse_decode(deserializer);
+        return crate::domain::AnalyticsReportSegmentsPage {
+            segments: var_segments,
+            next_token: var_nextToken,
+        };
+    }
+}
+
+impl SseDecode for crate::domain::AnalyticsReportsPage {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut var_reports = <Vec<crate::domain::AnalyticsReport>>::sse_decode(deserializer);
+        let mut var_nextToken = <Option<String>>::sse_decode(deserializer);
+        return crate::domain::AnalyticsReportsPage {
+            reports: var_reports,
+            next_token: var_nextToken,
         };
     }
 }
@@ -7527,6 +8110,7 @@ impl SseDecode for crate::service::provider::Capability {
             12 => crate::service::provider::Capability::BundleIds,
             13 => crate::service::provider::Capability::Certificates,
             14 => crate::service::provider::Capability::Profiles,
+            15 => crate::service::provider::Capability::Analytics,
             _ => unreachable!("Invalid variant for Capability: {}", inner),
         };
     }
@@ -7686,6 +8270,60 @@ impl SseDecode for Vec<crate::domain::AccessibilityDeclarationInfo> {
         let mut ans_ = Vec::with_capacity(len_ as usize);
         for idx_ in 0..len_ {
             ans_.push(<crate::domain::AccessibilityDeclarationInfo>::sse_decode(
+                deserializer,
+            ));
+        }
+        return ans_;
+    }
+}
+
+impl SseDecode for Vec<crate::domain::AnalyticsReport> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut len_ = <i32>::sse_decode(deserializer);
+        let mut ans_ = Vec::with_capacity(len_ as usize);
+        for idx_ in 0..len_ {
+            ans_.push(<crate::domain::AnalyticsReport>::sse_decode(deserializer));
+        }
+        return ans_;
+    }
+}
+
+impl SseDecode for Vec<crate::domain::AnalyticsReportInstance> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut len_ = <i32>::sse_decode(deserializer);
+        let mut ans_ = Vec::with_capacity(len_ as usize);
+        for idx_ in 0..len_ {
+            ans_.push(<crate::domain::AnalyticsReportInstance>::sse_decode(
+                deserializer,
+            ));
+        }
+        return ans_;
+    }
+}
+
+impl SseDecode for Vec<crate::domain::AnalyticsReportRequest> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut len_ = <i32>::sse_decode(deserializer);
+        let mut ans_ = Vec::with_capacity(len_ as usize);
+        for idx_ in 0..len_ {
+            ans_.push(<crate::domain::AnalyticsReportRequest>::sse_decode(
+                deserializer,
+            ));
+        }
+        return ans_;
+    }
+}
+
+impl SseDecode for Vec<crate::domain::AnalyticsReportSegment> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut len_ = <i32>::sse_decode(deserializer);
+        let mut ans_ = Vec::with_capacity(len_ as usize);
+        for idx_ in 0..len_ {
+            ans_.push(<crate::domain::AnalyticsReportSegment>::sse_decode(
                 deserializer,
             ));
         }
@@ -7925,6 +8563,18 @@ impl SseDecode for Vec<crate::frb_api::FrbCredential> {
     }
 }
 
+impl SseDecode for Vec<Vec<String>> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut len_ = <i32>::sse_decode(deserializer);
+        let mut ans_ = Vec::with_capacity(len_ as usize);
+        for idx_ in 0..len_ {
+            ans_.push(<Vec<String>>::sse_decode(deserializer));
+        }
+        return ans_;
+    }
+}
+
 impl SseDecode for Vec<u8> {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
@@ -8041,6 +8691,17 @@ impl SseDecode for Option<FrbAccessibilityDeclarations> {
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
         if (<bool>::sse_decode(deserializer)) {
             return Some(<FrbAccessibilityDeclarations>::sse_decode(deserializer));
+        } else {
+            return None;
+        }
+    }
+}
+
+impl SseDecode for Option<FrbAnalytics> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        if (<bool>::sse_decode(deserializer)) {
+            return Some(<FrbAnalytics>::sse_decode(deserializer));
         } else {
             return None;
         }
@@ -8243,6 +8904,17 @@ impl SseDecode for Option<i32> {
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
         if (<bool>::sse_decode(deserializer)) {
             return Some(<i32>::sse_decode(deserializer));
+        } else {
+            return None;
+        }
+    }
+}
+
+impl SseDecode for Option<i64> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        if (<bool>::sse_decode(deserializer)) {
+            return Some(<i64>::sse_decode(deserializer));
         } else {
             return None;
         }
@@ -8492,6 +9164,13 @@ impl SseDecode for u32 {
     }
 }
 
+impl SseDecode for u64 {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        deserializer.cursor.read_u64::<NativeEndian>().unwrap()
+    }
+}
+
 impl SseDecode for u8 {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
@@ -8578,468 +9257,504 @@ fn pde_ffi_dispatcher_primary_impl(
                 data_len,
             )
         }
-        5 => wire__crate__frb_api__FrbAppMetadata_create_app_info_localization_impl(
+        5 => wire__crate__frb_api__FrbAnalytics_create_analytics_report_request_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        6 => wire__crate__frb_api__FrbAppMetadata_delete_app_info_localization_impl(
+        6 => wire__crate__frb_api__FrbAnalytics_download_analytics_segment_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        7 => wire__crate__frb_api__FrbAppMetadata_fetch_app_categories_impl(
+        7 => wire__crate__frb_api__FrbAnalytics_fetch_analytics_report_instances_page_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        8 => wire__crate__frb_api__FrbAppMetadata_fetch_app_info_impl(
+        8 => wire__crate__frb_api__FrbAnalytics_fetch_analytics_report_requests_page_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        9 => wire__crate__frb_api__FrbAppMetadata_fetch_app_info_localizations_impl(
+        9 => wire__crate__frb_api__FrbAnalytics_fetch_analytics_report_segments_page_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        10 => wire__crate__frb_api__FrbAppMetadata_fetch_icon_url_impl(
+        10 => wire__crate__frb_api__FrbAnalytics_fetch_analytics_reports_page_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        11 => wire__crate__frb_api__FrbAppMetadata_update_age_rating_impl(
+        11 => wire__crate__frb_api__FrbAppMetadata_create_app_info_localization_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        12 => {
+        12 => wire__crate__frb_api__FrbAppMetadata_delete_app_info_localization_impl(
+            port,
+            ptr,
+            rust_vec_len,
+            data_len,
+        ),
+        13 => wire__crate__frb_api__FrbAppMetadata_fetch_app_categories_impl(
+            port,
+            ptr,
+            rust_vec_len,
+            data_len,
+        ),
+        14 => wire__crate__frb_api__FrbAppMetadata_fetch_app_info_impl(
+            port,
+            ptr,
+            rust_vec_len,
+            data_len,
+        ),
+        15 => wire__crate__frb_api__FrbAppMetadata_fetch_app_info_localizations_impl(
+            port,
+            ptr,
+            rust_vec_len,
+            data_len,
+        ),
+        16 => wire__crate__frb_api__FrbAppMetadata_fetch_icon_url_impl(
+            port,
+            ptr,
+            rust_vec_len,
+            data_len,
+        ),
+        17 => wire__crate__frb_api__FrbAppMetadata_update_age_rating_impl(
+            port,
+            ptr,
+            rust_vec_len,
+            data_len,
+        ),
+        18 => {
             wire__crate__frb_api__FrbAppMetadata_update_app_impl(port, ptr, rust_vec_len, data_len)
         }
-        13 => wire__crate__frb_api__FrbAppMetadata_update_app_info_category_impl(
+        19 => wire__crate__frb_api__FrbAppMetadata_update_app_info_category_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        14 => wire__crate__frb_api__FrbAppMetadata_update_app_info_localization_impl(
+        20 => wire__crate__frb_api__FrbAppMetadata_update_app_info_localization_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        15 => wire__crate__frb_api__FrbAppMetadata_update_app_info_localization_privacy_impl(
+        21 => wire__crate__frb_api__FrbAppMetadata_update_app_info_localization_privacy_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        16 => wire__crate__frb_api__FrbAppStoreVersions_cancel_review_impl(
+        22 => wire__crate__frb_api__FrbAppStoreVersions_cancel_review_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        17 => wire__crate__frb_api__FrbAppStoreVersions_cancel_submission_impl(
+        23 => wire__crate__frb_api__FrbAppStoreVersions_cancel_submission_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        18 => wire__crate__frb_api__FrbAppStoreVersions_create_phased_release_impl(
+        24 => wire__crate__frb_api__FrbAppStoreVersions_create_phased_release_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        19 => wire__crate__frb_api__FrbAppStoreVersions_create_screenshot_set_impl(
+        25 => wire__crate__frb_api__FrbAppStoreVersions_create_screenshot_set_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        20 => wire__crate__frb_api__FrbAppStoreVersions_create_version_impl(
+        26 => wire__crate__frb_api__FrbAppStoreVersions_create_version_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        21 => wire__crate__frb_api__FrbAppStoreVersions_delete_phased_release_impl(
+        27 => wire__crate__frb_api__FrbAppStoreVersions_delete_phased_release_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        22 => wire__crate__frb_api__FrbAppStoreVersions_delete_screenshot_impl(
+        28 => wire__crate__frb_api__FrbAppStoreVersions_delete_screenshot_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        23 => wire__crate__frb_api__FrbAppStoreVersions_delete_screenshot_set_impl(
+        29 => wire__crate__frb_api__FrbAppStoreVersions_delete_screenshot_set_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        24 => wire__crate__frb_api__FrbAppStoreVersions_delete_version_impl(
+        30 => wire__crate__frb_api__FrbAppStoreVersions_delete_version_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        25 => wire__crate__frb_api__FrbAppStoreVersions_fetch_app_review_detail_impl(
+        31 => wire__crate__frb_api__FrbAppStoreVersions_fetch_app_review_detail_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        26 => wire__crate__frb_api__FrbAppStoreVersions_fetch_localizations_impl(
+        32 => wire__crate__frb_api__FrbAppStoreVersions_fetch_localizations_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        27 => wire__crate__frb_api__FrbAppStoreVersions_fetch_phased_release_impl(
+        33 => wire__crate__frb_api__FrbAppStoreVersions_fetch_phased_release_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        28 => wire__crate__frb_api__FrbAppStoreVersions_fetch_screenshot_sets_impl(
+        34 => wire__crate__frb_api__FrbAppStoreVersions_fetch_screenshot_sets_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        29 => wire__crate__frb_api__FrbAppStoreVersions_fetch_versions_impl(
+        35 => wire__crate__frb_api__FrbAppStoreVersions_fetch_versions_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        30 => wire__crate__frb_api__FrbAppStoreVersions_reject_version_impl(
+        36 => wire__crate__frb_api__FrbAppStoreVersions_reject_version_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        31 => wire__crate__frb_api__FrbAppStoreVersions_release_version_impl(
+        37 => wire__crate__frb_api__FrbAppStoreVersions_release_version_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        32 => wire__crate__frb_api__FrbAppStoreVersions_submit_for_review_impl(
+        38 => wire__crate__frb_api__FrbAppStoreVersions_submit_for_review_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        33 => wire__crate__frb_api__FrbAppStoreVersions_update_app_review_detail_impl(
+        39 => wire__crate__frb_api__FrbAppStoreVersions_update_app_review_detail_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        34 => wire__crate__frb_api__FrbAppStoreVersions_update_localization_impl(
+        40 => wire__crate__frb_api__FrbAppStoreVersions_update_localization_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        35 => wire__crate__frb_api__FrbAppStoreVersions_update_phased_release_state_impl(
+        41 => wire__crate__frb_api__FrbAppStoreVersions_update_phased_release_state_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        36 => wire__crate__frb_api__FrbAppStoreVersions_update_version_impl(
+        42 => wire__crate__frb_api__FrbAppStoreVersions_update_version_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        37 => wire__crate__frb_api__FrbAppStoreVersions_upload_screenshot_impl(
+        43 => wire__crate__frb_api__FrbAppStoreVersions_upload_screenshot_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        38 => wire__crate__frb_api__FrbBetaAppLocalizations_create_beta_app_localization_impl(
+        44 => wire__crate__frb_api__FrbBetaAppLocalizations_create_beta_app_localization_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        39 => wire__crate__frb_api__FrbBetaAppLocalizations_fetch_beta_app_localizations_impl(
+        45 => wire__crate__frb_api__FrbBetaAppLocalizations_fetch_beta_app_localizations_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        40 => wire__crate__frb_api__FrbBetaAppLocalizations_update_beta_app_localization_impl(
+        46 => wire__crate__frb_api__FrbBetaAppLocalizations_update_beta_app_localization_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        41 => wire__crate__frb_api__FrbBetaAppReviewDetail_fetch_beta_app_review_detail_impl(
+        47 => wire__crate__frb_api__FrbBetaAppReviewDetail_fetch_beta_app_review_detail_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        42 => wire__crate__frb_api__FrbBetaAppReviewDetail_update_beta_app_review_detail_impl(
+        48 => wire__crate__frb_api__FrbBetaAppReviewDetail_update_beta_app_review_detail_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        43 => wire__crate__frb_api__FrbBetaBuildLocalizations_create_beta_build_localization_impl(
+        49 => wire__crate__frb_api__FrbBetaBuildLocalizations_create_beta_build_localization_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        44 => wire__crate__frb_api__FrbBetaBuildLocalizations_fetch_beta_build_localizations_impl(
+        50 => wire__crate__frb_api__FrbBetaBuildLocalizations_fetch_beta_build_localizations_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        45 => wire__crate__frb_api__FrbBetaBuildLocalizations_update_beta_build_localization_impl(
+        51 => wire__crate__frb_api__FrbBetaBuildLocalizations_update_beta_build_localization_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        46 => wire__crate__frb_api__FrbBetaGroups_add_beta_tester_impl(
+        52 => wire__crate__frb_api__FrbBetaGroups_add_beta_tester_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        47 => wire__crate__frb_api__FrbBetaGroups_create_beta_group_impl(
+        53 => wire__crate__frb_api__FrbBetaGroups_create_beta_group_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        48 => wire__crate__frb_api__FrbBetaGroups_delete_beta_group_impl(
+        54 => wire__crate__frb_api__FrbBetaGroups_delete_beta_group_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        49 => wire__crate__frb_api__FrbBetaGroups_fetch_beta_groups_impl(
+        55 => wire__crate__frb_api__FrbBetaGroups_fetch_beta_groups_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        50 => wire__crate__frb_api__FrbBetaGroups_fetch_beta_testers_impl(
+        56 => wire__crate__frb_api__FrbBetaGroups_fetch_beta_testers_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        51 => wire__crate__frb_api__FrbBetaGroups_fetch_tester_count_impl(
+        57 => wire__crate__frb_api__FrbBetaGroups_fetch_tester_count_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        52 => wire__crate__frb_api__FrbBetaGroups_remove_beta_tester_impl(
+        58 => wire__crate__frb_api__FrbBetaGroups_remove_beta_tester_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        53 => wire__crate__frb_api__FrbBetaGroups_resend_invite_impl(
+        59 => wire__crate__frb_api__FrbBetaGroups_resend_invite_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        54 => wire__crate__frb_api__FrbBetaGroups_update_beta_group_impl(
+        60 => wire__crate__frb_api__FrbBetaGroups_update_beta_group_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        55 => wire__crate__frb_api__FrbBuilds_add_build_to_groups_impl(
+        61 => wire__crate__frb_api__FrbBuilds_add_build_to_groups_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        56 => wire__crate__frb_api__FrbBuilds_attach_build_impl(port, ptr, rust_vec_len, data_len),
-        57 => wire__crate__frb_api__FrbBuilds_expire_build_impl(port, ptr, rust_vec_len, data_len),
-        58 => wire__crate__frb_api__FrbBuilds_fetch_build_detail_impl(
+        62 => wire__crate__frb_api__FrbBuilds_attach_build_impl(port, ptr, rust_vec_len, data_len),
+        63 => wire__crate__frb_api__FrbBuilds_expire_build_impl(port, ptr, rust_vec_len, data_len),
+        64 => wire__crate__frb_api__FrbBuilds_fetch_build_detail_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        59 => wire__crate__frb_api__FrbBuilds_fetch_builds_impl(port, ptr, rust_vec_len, data_len),
-        60 => wire__crate__frb_api__FrbBuilds_fetch_builds_for_group_impl(
+        65 => wire__crate__frb_api__FrbBuilds_fetch_builds_impl(port, ptr, rust_vec_len, data_len),
+        66 => wire__crate__frb_api__FrbBuilds_fetch_builds_for_group_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        61 => wire__crate__frb_api__FrbBuilds_fetch_builds_page_impl(
+        67 => wire__crate__frb_api__FrbBuilds_fetch_builds_page_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        62 => wire__crate__frb_api__FrbBuilds_fetch_current_build_impl(
+        68 => wire__crate__frb_api__FrbBuilds_fetch_current_build_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        63 => wire__crate__frb_api__FrbBuilds_remove_build_from_group_impl(
+        69 => wire__crate__frb_api__FrbBuilds_remove_build_from_group_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        64 => wire__crate__frb_api__FrbBuilds_submit_build_for_beta_review_impl(
+        70 => wire__crate__frb_api__FrbBuilds_submit_build_for_beta_review_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        65 => wire__crate__frb_api__FrbBundleIds_create_bundle_id_impl(
+        71 => wire__crate__frb_api__FrbBundleIds_create_bundle_id_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        66 => wire__crate__frb_api__FrbBundleIds_delete_bundle_id_impl(
+        72 => wire__crate__frb_api__FrbBundleIds_delete_bundle_id_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        67 => wire__crate__frb_api__FrbBundleIds_disable_capability_impl(
+        73 => wire__crate__frb_api__FrbBundleIds_disable_capability_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        68 => wire__crate__frb_api__FrbBundleIds_enable_capability_impl(
+        74 => wire__crate__frb_api__FrbBundleIds_enable_capability_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        69 => wire__crate__frb_api__FrbBundleIds_fetch_bundle_id_capabilities_impl(
+        75 => wire__crate__frb_api__FrbBundleIds_fetch_bundle_id_capabilities_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        70 => wire__crate__frb_api__FrbBundleIds_fetch_bundle_ids_impl(
+        76 => wire__crate__frb_api__FrbBundleIds_fetch_bundle_ids_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        71 => wire__crate__frb_api__FrbBundleIds_update_bundle_id_impl(
+        77 => wire__crate__frb_api__FrbBundleIds_update_bundle_id_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        72 => wire__crate__frb_api__FrbCertificates_create_certificate_impl(
+        78 => wire__crate__frb_api__FrbCertificates_create_certificate_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        73 => wire__crate__frb_api__FrbCertificates_fetch_certificate_content_impl(
+        79 => wire__crate__frb_api__FrbCertificates_fetch_certificate_content_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        74 => wire__crate__frb_api__FrbCertificates_fetch_certificates_impl(
+        80 => wire__crate__frb_api__FrbCertificates_fetch_certificates_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        75 => wire__crate__frb_api__FrbCertificates_revoke_certificate_impl(
-            port,
-            ptr,
-            rust_vec_len,
-            data_len,
-        ),
-        76 => {
-            wire__crate__frb_api__FrbDevices_create_device_impl(port, ptr, rust_vec_len, data_len)
-        }
-        77 => {
-            wire__crate__frb_api__FrbDevices_fetch_devices_impl(port, ptr, rust_vec_len, data_len)
-        }
-        78 => {
-            wire__crate__frb_api__FrbDevices_update_device_impl(port, ptr, rust_vec_len, data_len)
-        }
-        79 => {
-            wire__crate__frb_api__FrbProfiles_create_profile_impl(port, ptr, rust_vec_len, data_len)
-        }
-        80 => {
-            wire__crate__frb_api__FrbProfiles_delete_profile_impl(port, ptr, rust_vec_len, data_len)
-        }
-        81 => wire__crate__frb_api__FrbProfiles_fetch_profile_content_impl(
+        81 => wire__crate__frb_api__FrbCertificates_revoke_certificate_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
         82 => {
+            wire__crate__frb_api__FrbDevices_create_device_impl(port, ptr, rust_vec_len, data_len)
+        }
+        83 => {
+            wire__crate__frb_api__FrbDevices_fetch_devices_impl(port, ptr, rust_vec_len, data_len)
+        }
+        84 => {
+            wire__crate__frb_api__FrbDevices_update_device_impl(port, ptr, rust_vec_len, data_len)
+        }
+        85 => {
+            wire__crate__frb_api__FrbProfiles_create_profile_impl(port, ptr, rust_vec_len, data_len)
+        }
+        86 => {
+            wire__crate__frb_api__FrbProfiles_delete_profile_impl(port, ptr, rust_vec_len, data_len)
+        }
+        87 => wire__crate__frb_api__FrbProfiles_fetch_profile_content_impl(
+            port,
+            ptr,
+            rust_vec_len,
+            data_len,
+        ),
+        88 => {
             wire__crate__frb_api__FrbProfiles_fetch_profiles_impl(port, ptr, rust_vec_len, data_len)
         }
-        95 => wire__crate__frb_api__FrbProvider_fetch_apps_impl(port, ptr, rust_vec_len, data_len),
-        100 => wire__crate__frb_api__FrbProvider_validate_impl(port, ptr, rust_vec_len, data_len),
-        101 => wire__crate__frb_api__FrbReviews_fetch_customer_reviews_impl(
+        102 => wire__crate__frb_api__FrbProvider_fetch_apps_impl(port, ptr, rust_vec_len, data_len),
+        107 => wire__crate__frb_api__FrbProvider_validate_impl(port, ptr, rust_vec_len, data_len),
+        108 => wire__crate__frb_api__FrbReviews_fetch_customer_reviews_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        102 => wire__crate__frb_api__FrbReviews_fetch_customer_reviews_page_impl(
+        109 => wire__crate__frb_api__FrbReviews_fetch_customer_reviews_page_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        103 => {
+        110 => {
             wire__crate__frb_api__FrbReviews_reply_to_review_impl(port, ptr, rust_vec_len, data_len)
         }
-        104 => {
+        111 => {
             wire__crate__frb_api__FrbSyncService_sync_apps_impl(port, ptr, rust_vec_len, data_len)
         }
-        105 => wire__crate__frb_api__FrbUsers_delete_user_impl(port, ptr, rust_vec_len, data_len),
-        106 => wire__crate__frb_api__FrbUsers_fetch_team_members_impl(
+        112 => wire__crate__frb_api__FrbUsers_delete_user_impl(port, ptr, rust_vec_len, data_len),
+        113 => wire__crate__frb_api__FrbUsers_fetch_team_members_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        107 => wire__crate__frb_api__FrbUsers_fetch_users_impl(port, ptr, rust_vec_len, data_len),
-        108 => wire__crate__frb_api__FrbUsers_invite_user_impl(port, ptr, rust_vec_len, data_len),
-        110 => wire__crate__frb_api__connect_impl(port, ptr, rust_vec_len, data_len),
+        114 => wire__crate__frb_api__FrbUsers_fetch_users_impl(port, ptr, rust_vec_len, data_len),
+        115 => wire__crate__frb_api__FrbUsers_invite_user_impl(port, ptr, rust_vec_len, data_len),
+        117 => wire__crate__frb_api__connect_impl(port, ptr, rust_vec_len, data_len),
         _ => unreachable!(),
     }
 }
@@ -9052,45 +9767,46 @@ fn pde_ffi_dispatcher_sync_impl(
 ) -> flutter_rust_bridge::for_generated::WireSyncRust2DartSse {
     // Codec=Pde (Serialization + dispatch), see doc to use other codecs
     match func_id {
-        83 => wire__crate__frb_api__FrbProvider_accessibility_declarations_impl(
+        89 => wire__crate__frb_api__FrbProvider_accessibility_declarations_impl(
             ptr,
             rust_vec_len,
             data_len,
         ),
-        84 => wire__crate__frb_api__FrbProvider_app_metadata_impl(ptr, rust_vec_len, data_len),
-        85 => {
+        90 => wire__crate__frb_api__FrbProvider_analytics_impl(ptr, rust_vec_len, data_len),
+        91 => wire__crate__frb_api__FrbProvider_app_metadata_impl(ptr, rust_vec_len, data_len),
+        92 => {
             wire__crate__frb_api__FrbProvider_app_store_versions_impl(ptr, rust_vec_len, data_len)
         }
-        86 => wire__crate__frb_api__FrbProvider_beta_app_localizations_impl(
+        93 => wire__crate__frb_api__FrbProvider_beta_app_localizations_impl(
             ptr,
             rust_vec_len,
             data_len,
         ),
-        87 => wire__crate__frb_api__FrbProvider_beta_app_review_detail_impl(
+        94 => wire__crate__frb_api__FrbProvider_beta_app_review_detail_impl(
             ptr,
             rust_vec_len,
             data_len,
         ),
-        88 => wire__crate__frb_api__FrbProvider_beta_build_localizations_impl(
+        95 => wire__crate__frb_api__FrbProvider_beta_build_localizations_impl(
             ptr,
             rust_vec_len,
             data_len,
         ),
-        89 => wire__crate__frb_api__FrbProvider_beta_groups_impl(ptr, rust_vec_len, data_len),
-        90 => wire__crate__frb_api__FrbProvider_builds_impl(ptr, rust_vec_len, data_len),
-        91 => wire__crate__frb_api__FrbProvider_bundle_ids_impl(ptr, rust_vec_len, data_len),
-        92 => wire__crate__frb_api__FrbProvider_capabilities_impl(ptr, rust_vec_len, data_len),
-        93 => wire__crate__frb_api__FrbProvider_certificates_impl(ptr, rust_vec_len, data_len),
-        94 => wire__crate__frb_api__FrbProvider_devices_impl(ptr, rust_vec_len, data_len),
-        96 => wire__crate__frb_api__FrbProvider_kind_impl(ptr, rust_vec_len, data_len),
-        97 => wire__crate__frb_api__FrbProvider_profiles_impl(ptr, rust_vec_len, data_len),
-        98 => wire__crate__frb_api__FrbProvider_reviews_impl(ptr, rust_vec_len, data_len),
-        99 => wire__crate__frb_api__FrbProvider_users_impl(ptr, rust_vec_len, data_len),
-        109 => wire__crate__frb_api__available_services_impl(ptr, rust_vec_len, data_len),
-        111 => wire__crate__frb_api__credential_schema_impl(ptr, rust_vec_len, data_len),
-        112 => wire__crate__frb_api__decrypt_scexport_impl(ptr, rust_vec_len, data_len),
-        113 => wire__crate__frb_api__encrypt_scexport_impl(ptr, rust_vec_len, data_len),
-        114 => wire__crate__frb_api__make_sync_service_impl(ptr, rust_vec_len, data_len),
+        96 => wire__crate__frb_api__FrbProvider_beta_groups_impl(ptr, rust_vec_len, data_len),
+        97 => wire__crate__frb_api__FrbProvider_builds_impl(ptr, rust_vec_len, data_len),
+        98 => wire__crate__frb_api__FrbProvider_bundle_ids_impl(ptr, rust_vec_len, data_len),
+        99 => wire__crate__frb_api__FrbProvider_capabilities_impl(ptr, rust_vec_len, data_len),
+        100 => wire__crate__frb_api__FrbProvider_certificates_impl(ptr, rust_vec_len, data_len),
+        101 => wire__crate__frb_api__FrbProvider_devices_impl(ptr, rust_vec_len, data_len),
+        103 => wire__crate__frb_api__FrbProvider_kind_impl(ptr, rust_vec_len, data_len),
+        104 => wire__crate__frb_api__FrbProvider_profiles_impl(ptr, rust_vec_len, data_len),
+        105 => wire__crate__frb_api__FrbProvider_reviews_impl(ptr, rust_vec_len, data_len),
+        106 => wire__crate__frb_api__FrbProvider_users_impl(ptr, rust_vec_len, data_len),
+        116 => wire__crate__frb_api__available_services_impl(ptr, rust_vec_len, data_len),
+        118 => wire__crate__frb_api__credential_schema_impl(ptr, rust_vec_len, data_len),
+        119 => wire__crate__frb_api__decrypt_scexport_impl(ptr, rust_vec_len, data_len),
+        120 => wire__crate__frb_api__encrypt_scexport_impl(ptr, rust_vec_len, data_len),
+        121 => wire__crate__frb_api__make_sync_service_impl(ptr, rust_vec_len, data_len),
         _ => unreachable!(),
     }
 }
@@ -9113,6 +9829,21 @@ impl flutter_rust_bridge::IntoIntoDart<FrbWrapper<FrbAccessibilityDeclarations>>
     for FrbAccessibilityDeclarations
 {
     fn into_into_dart(self) -> FrbWrapper<FrbAccessibilityDeclarations> {
+        self.into()
+    }
+}
+
+// Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for FrbWrapper<FrbAnalytics> {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        flutter_rust_bridge::for_generated::rust_auto_opaque_encode::<_, MoiArc<_>>(self.0)
+            .into_dart()
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive for FrbWrapper<FrbAnalytics> {}
+
+impl flutter_rust_bridge::IntoIntoDart<FrbWrapper<FrbAnalytics>> for FrbAnalytics {
+    fn into_into_dart(self) -> FrbWrapper<FrbAnalytics> {
         self.into()
     }
 }
@@ -9464,6 +10195,201 @@ impl flutter_rust_bridge::IntoIntoDart<crate::domain::AgeRatingDeclarationInfo>
     for crate::domain::AgeRatingDeclarationInfo
 {
     fn into_into_dart(self) -> crate::domain::AgeRatingDeclarationInfo {
+        self
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for crate::domain::AnalyticsReport {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        [
+            self.id.into_into_dart().into_dart(),
+            self.name.into_into_dart().into_dart(),
+            self.category.into_into_dart().into_dart(),
+        ]
+        .into_dart()
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
+    for crate::domain::AnalyticsReport
+{
+}
+impl flutter_rust_bridge::IntoIntoDart<crate::domain::AnalyticsReport>
+    for crate::domain::AnalyticsReport
+{
+    fn into_into_dart(self) -> crate::domain::AnalyticsReport {
+        self
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for crate::domain::AnalyticsReportData {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        [
+            self.headers.into_into_dart().into_dart(),
+            self.rows.into_into_dart().into_dart(),
+            self.row_count.into_into_dart().into_dart(),
+        ]
+        .into_dart()
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
+    for crate::domain::AnalyticsReportData
+{
+}
+impl flutter_rust_bridge::IntoIntoDart<crate::domain::AnalyticsReportData>
+    for crate::domain::AnalyticsReportData
+{
+    fn into_into_dart(self) -> crate::domain::AnalyticsReportData {
+        self
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for crate::domain::AnalyticsReportInstance {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        [
+            self.id.into_into_dart().into_dart(),
+            self.granularity.into_into_dart().into_dart(),
+            self.processing_date.into_into_dart().into_dart(),
+        ]
+        .into_dart()
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
+    for crate::domain::AnalyticsReportInstance
+{
+}
+impl flutter_rust_bridge::IntoIntoDart<crate::domain::AnalyticsReportInstance>
+    for crate::domain::AnalyticsReportInstance
+{
+    fn into_into_dart(self) -> crate::domain::AnalyticsReportInstance {
+        self
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for crate::domain::AnalyticsReportInstancesPage {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        [
+            self.instances.into_into_dart().into_dart(),
+            self.next_token.into_into_dart().into_dart(),
+        ]
+        .into_dart()
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
+    for crate::domain::AnalyticsReportInstancesPage
+{
+}
+impl flutter_rust_bridge::IntoIntoDart<crate::domain::AnalyticsReportInstancesPage>
+    for crate::domain::AnalyticsReportInstancesPage
+{
+    fn into_into_dart(self) -> crate::domain::AnalyticsReportInstancesPage {
+        self
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for crate::domain::AnalyticsReportRequest {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        [
+            self.id.into_into_dart().into_dart(),
+            self.access_type.into_into_dart().into_dart(),
+            self.stopped_due_to_inactivity.into_into_dart().into_dart(),
+        ]
+        .into_dart()
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
+    for crate::domain::AnalyticsReportRequest
+{
+}
+impl flutter_rust_bridge::IntoIntoDart<crate::domain::AnalyticsReportRequest>
+    for crate::domain::AnalyticsReportRequest
+{
+    fn into_into_dart(self) -> crate::domain::AnalyticsReportRequest {
+        self
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for crate::domain::AnalyticsReportRequestsPage {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        [
+            self.requests.into_into_dart().into_dart(),
+            self.next_token.into_into_dart().into_dart(),
+        ]
+        .into_dart()
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
+    for crate::domain::AnalyticsReportRequestsPage
+{
+}
+impl flutter_rust_bridge::IntoIntoDart<crate::domain::AnalyticsReportRequestsPage>
+    for crate::domain::AnalyticsReportRequestsPage
+{
+    fn into_into_dart(self) -> crate::domain::AnalyticsReportRequestsPage {
+        self
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for crate::domain::AnalyticsReportSegment {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        [
+            self.id.into_into_dart().into_dart(),
+            self.url.into_into_dart().into_dart(),
+            self.checksum.into_into_dart().into_dart(),
+            self.size_in_bytes.into_into_dart().into_dart(),
+        ]
+        .into_dart()
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
+    for crate::domain::AnalyticsReportSegment
+{
+}
+impl flutter_rust_bridge::IntoIntoDart<crate::domain::AnalyticsReportSegment>
+    for crate::domain::AnalyticsReportSegment
+{
+    fn into_into_dart(self) -> crate::domain::AnalyticsReportSegment {
+        self
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for crate::domain::AnalyticsReportSegmentsPage {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        [
+            self.segments.into_into_dart().into_dart(),
+            self.next_token.into_into_dart().into_dart(),
+        ]
+        .into_dart()
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
+    for crate::domain::AnalyticsReportSegmentsPage
+{
+}
+impl flutter_rust_bridge::IntoIntoDart<crate::domain::AnalyticsReportSegmentsPage>
+    for crate::domain::AnalyticsReportSegmentsPage
+{
+    fn into_into_dart(self) -> crate::domain::AnalyticsReportSegmentsPage {
+        self
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for crate::domain::AnalyticsReportsPage {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        [
+            self.reports.into_into_dart().into_dart(),
+            self.next_token.into_into_dart().into_dart(),
+        ]
+        .into_dart()
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
+    for crate::domain::AnalyticsReportsPage
+{
+}
+impl flutter_rust_bridge::IntoIntoDart<crate::domain::AnalyticsReportsPage>
+    for crate::domain::AnalyticsReportsPage
+{
+    fn into_into_dart(self) -> crate::domain::AnalyticsReportsPage {
         self
     }
 }
@@ -9903,6 +10829,7 @@ impl flutter_rust_bridge::IntoDart for crate::service::provider::Capability {
             Self::BundleIds => 12.into_dart(),
             Self::Certificates => 13.into_dart(),
             Self::Profiles => 14.into_dart(),
+            Self::Analytics => 15.into_dart(),
             _ => unreachable!(),
         }
     }
@@ -10298,6 +11225,13 @@ impl SseEncode for FrbAccessibilityDeclarations {
     }
 }
 
+impl SseEncode for FrbAnalytics {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <RustOpaqueMoi<flutter_rust_bridge::for_generated::RustAutoOpaqueInner<FrbAnalytics>>>::sse_encode(flutter_rust_bridge::for_generated::rust_auto_opaque_encode::<_, MoiArc<_>>(self), serializer);
+    }
+}
+
 impl SseEncode for FrbAppMetadata {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
@@ -10436,6 +11370,17 @@ impl SseEncode
     for RustOpaqueMoi<
         flutter_rust_bridge::for_generated::RustAutoOpaqueInner<FrbAccessibilityDeclarations>,
     >
+{
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        let (ptr, size) = self.sse_encode_raw();
+        <usize>::sse_encode(ptr, serializer);
+        <i32>::sse_encode(size, serializer);
+    }
+}
+
+impl SseEncode
+    for RustOpaqueMoi<flutter_rust_bridge::for_generated::RustAutoOpaqueInner<FrbAnalytics>>
 {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
@@ -10676,6 +11621,84 @@ impl SseEncode for crate::domain::AgeRatingDeclarationInfo {
         <Option<bool>>::sse_encode(self.is_unrestricted_web_access, serializer);
         <Option<bool>>::sse_encode(self.is_user_generated_content, serializer);
         <Option<String>>::sse_encode(self.age_rating_override_v2, serializer);
+    }
+}
+
+impl SseEncode for crate::domain::AnalyticsReport {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <String>::sse_encode(self.id, serializer);
+        <String>::sse_encode(self.name, serializer);
+        <String>::sse_encode(self.category, serializer);
+    }
+}
+
+impl SseEncode for crate::domain::AnalyticsReportData {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <Vec<String>>::sse_encode(self.headers, serializer);
+        <Vec<Vec<String>>>::sse_encode(self.rows, serializer);
+        <u32>::sse_encode(self.row_count, serializer);
+    }
+}
+
+impl SseEncode for crate::domain::AnalyticsReportInstance {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <String>::sse_encode(self.id, serializer);
+        <String>::sse_encode(self.granularity, serializer);
+        <Option<String>>::sse_encode(self.processing_date, serializer);
+    }
+}
+
+impl SseEncode for crate::domain::AnalyticsReportInstancesPage {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <Vec<crate::domain::AnalyticsReportInstance>>::sse_encode(self.instances, serializer);
+        <Option<String>>::sse_encode(self.next_token, serializer);
+    }
+}
+
+impl SseEncode for crate::domain::AnalyticsReportRequest {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <String>::sse_encode(self.id, serializer);
+        <String>::sse_encode(self.access_type, serializer);
+        <bool>::sse_encode(self.stopped_due_to_inactivity, serializer);
+    }
+}
+
+impl SseEncode for crate::domain::AnalyticsReportRequestsPage {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <Vec<crate::domain::AnalyticsReportRequest>>::sse_encode(self.requests, serializer);
+        <Option<String>>::sse_encode(self.next_token, serializer);
+    }
+}
+
+impl SseEncode for crate::domain::AnalyticsReportSegment {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <String>::sse_encode(self.id, serializer);
+        <String>::sse_encode(self.url, serializer);
+        <Option<String>>::sse_encode(self.checksum, serializer);
+        <Option<i64>>::sse_encode(self.size_in_bytes, serializer);
+    }
+}
+
+impl SseEncode for crate::domain::AnalyticsReportSegmentsPage {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <Vec<crate::domain::AnalyticsReportSegment>>::sse_encode(self.segments, serializer);
+        <Option<String>>::sse_encode(self.next_token, serializer);
+    }
+}
+
+impl SseEncode for crate::domain::AnalyticsReportsPage {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <Vec<crate::domain::AnalyticsReport>>::sse_encode(self.reports, serializer);
+        <Option<String>>::sse_encode(self.next_token, serializer);
     }
 }
 
@@ -10923,6 +11946,7 @@ impl SseEncode for crate::service::provider::Capability {
                 crate::service::provider::Capability::BundleIds => 12,
                 crate::service::provider::Capability::Certificates => 13,
                 crate::service::provider::Capability::Profiles => 14,
+                crate::service::provider::Capability::Analytics => 15,
                 _ => {
                     unimplemented!("");
                 }
@@ -11041,6 +12065,46 @@ impl SseEncode for Vec<crate::domain::AccessibilityDeclarationInfo> {
         <i32>::sse_encode(self.len() as _, serializer);
         for item in self {
             <crate::domain::AccessibilityDeclarationInfo>::sse_encode(item, serializer);
+        }
+    }
+}
+
+impl SseEncode for Vec<crate::domain::AnalyticsReport> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <i32>::sse_encode(self.len() as _, serializer);
+        for item in self {
+            <crate::domain::AnalyticsReport>::sse_encode(item, serializer);
+        }
+    }
+}
+
+impl SseEncode for Vec<crate::domain::AnalyticsReportInstance> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <i32>::sse_encode(self.len() as _, serializer);
+        for item in self {
+            <crate::domain::AnalyticsReportInstance>::sse_encode(item, serializer);
+        }
+    }
+}
+
+impl SseEncode for Vec<crate::domain::AnalyticsReportRequest> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <i32>::sse_encode(self.len() as _, serializer);
+        for item in self {
+            <crate::domain::AnalyticsReportRequest>::sse_encode(item, serializer);
+        }
+    }
+}
+
+impl SseEncode for Vec<crate::domain::AnalyticsReportSegment> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <i32>::sse_encode(self.len() as _, serializer);
+        for item in self {
+            <crate::domain::AnalyticsReportSegment>::sse_encode(item, serializer);
         }
     }
 }
@@ -11225,6 +12289,16 @@ impl SseEncode for Vec<crate::frb_api::FrbCredential> {
     }
 }
 
+impl SseEncode for Vec<Vec<String>> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <i32>::sse_encode(self.len() as _, serializer);
+        for item in self {
+            <Vec<String>>::sse_encode(item, serializer);
+        }
+    }
+}
+
 impl SseEncode for Vec<u8> {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
@@ -11321,6 +12395,16 @@ impl SseEncode for Option<FrbAccessibilityDeclarations> {
         <bool>::sse_encode(self.is_some(), serializer);
         if let Some(value) = self {
             <FrbAccessibilityDeclarations>::sse_encode(value, serializer);
+        }
+    }
+}
+
+impl SseEncode for Option<FrbAnalytics> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <bool>::sse_encode(self.is_some(), serializer);
+        if let Some(value) = self {
+            <FrbAnalytics>::sse_encode(value, serializer);
         }
     }
 }
@@ -11505,6 +12589,16 @@ impl SseEncode for Option<i32> {
     }
 }
 
+impl SseEncode for Option<i64> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <bool>::sse_encode(self.is_some(), serializer);
+        if let Some(value) = self {
+            <i64>::sse_encode(value, serializer);
+        }
+    }
+}
+
 impl SseEncode for Option<crate::domain::PhasedReleaseInfo> {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
@@ -11685,6 +12779,13 @@ impl SseEncode for u32 {
     }
 }
 
+impl SseEncode for u64 {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        serializer.cursor.write_u64::<NativeEndian>(self).unwrap();
+    }
+}
+
 impl SseEncode for u8 {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
@@ -11757,6 +12858,20 @@ mod io {
         MoiArc::<
             flutter_rust_bridge::for_generated::RustAutoOpaqueInner<FrbAccessibilityDeclarations>,
         >::decrement_strong_count(ptr as _);
+    }
+
+    #[unsafe(no_mangle)]
+    pub extern "C" fn frbgen_stack_core_rust_rust_arc_increment_strong_count_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerFrbAnalytics(
+        ptr: *const std::ffi::c_void,
+    ) {
+        MoiArc::<flutter_rust_bridge::for_generated::RustAutoOpaqueInner<FrbAnalytics>>::increment_strong_count(ptr as _);
+    }
+
+    #[unsafe(no_mangle)]
+    pub extern "C" fn frbgen_stack_core_rust_rust_arc_decrement_strong_count_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerFrbAnalytics(
+        ptr: *const std::ffi::c_void,
+    ) {
+        MoiArc::<flutter_rust_bridge::for_generated::RustAutoOpaqueInner<FrbAnalytics>>::decrement_strong_count(ptr as _);
     }
 
     #[unsafe(no_mangle)]
@@ -12010,6 +13125,20 @@ mod web {
         MoiArc::<
             flutter_rust_bridge::for_generated::RustAutoOpaqueInner<FrbAccessibilityDeclarations>,
         >::decrement_strong_count(ptr as _);
+    }
+
+    #[wasm_bindgen]
+    pub fn rust_arc_increment_strong_count_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerFrbAnalytics(
+        ptr: *const std::ffi::c_void,
+    ) {
+        MoiArc::<flutter_rust_bridge::for_generated::RustAutoOpaqueInner<FrbAnalytics>>::increment_strong_count(ptr as _);
+    }
+
+    #[wasm_bindgen]
+    pub fn rust_arc_decrement_strong_count_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerFrbAnalytics(
+        ptr: *const std::ffi::c_void,
+    ) {
+        MoiArc::<flutter_rust_bridge::for_generated::RustAutoOpaqueInner<FrbAnalytics>>::decrement_strong_count(ptr as _);
     }
 
     #[wasm_bindgen]

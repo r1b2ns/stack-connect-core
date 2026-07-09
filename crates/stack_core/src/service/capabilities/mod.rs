@@ -9,6 +9,7 @@
 //! whose async methods run on the tokio runtime and delegate to the inner impl.
 
 pub(crate) mod accessibility_declarations;
+pub(crate) mod analytics;
 pub(crate) mod app_metadata;
 pub(crate) mod app_store_versions;
 pub(crate) mod beta_app_localizations;

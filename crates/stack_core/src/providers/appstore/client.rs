@@ -1,19 +1,23 @@
 use std::collections::HashMap;
+use std::io::Read;
 use std::sync::Arc;
 
+use flate2::read::GzDecoder;
 use md5::{Digest, Md5};
 use serde::Deserialize;
 use serde_json::json;
 
 use crate::auth::es256::AppStoreAuthenticator;
 use crate::domain::{
-    AccessibilityDeclarationInfo, AgeRatingDeclarationInfo, AppCategoryInfo, AppInfo,
-    AppInfoDetails, AppInfoLocalizationInfo, AppReviewDetailInfo, AppStoreLocalizationInfo,
-    AppStoreVersionInfo, BetaAppLocalizationInfo, BetaAppReviewDetailInfo,
-    BetaBuildLocalizationInfo, BetaGroupInfo, BetaTesterInfo, BuildDetailInfo, BuildInfo,
-    BuildsPage, BundleIdCapabilityInfo, BundleIdInfo, CertificateInfo, CustomerReview,
-    CustomerReviewsPage, DeviceInfo, PhasedReleaseInfo, ProvisioningProfileInfo, ReviewResponse,
-    ReviewSubmission, ScreenshotInfo, ScreenshotSetInfo, TeamMemberInfo, UserInfo,
+    AccessibilityDeclarationInfo, AgeRatingDeclarationInfo, AnalyticsReport, AnalyticsReportData,
+    AnalyticsReportInstance, AnalyticsReportInstancesPage, AnalyticsReportRequest,
+    AnalyticsReportRequestsPage, AnalyticsReportSegment, AnalyticsReportSegmentsPage,
+    AnalyticsReportsPage, AppCategoryInfo, AppInfo, AppInfoDetails, AppInfoLocalizationInfo,
+    AppReviewDetailInfo, AppStoreLocalizationInfo, AppStoreVersionInfo, BetaAppLocalizationInfo,
+    BetaAppReviewDetailInfo, BetaBuildLocalizationInfo, BetaGroupInfo, BetaTesterInfo,
+    BuildDetailInfo, BuildInfo, BuildsPage, BundleIdCapabilityInfo, BundleIdInfo, CertificateInfo,
+    CustomerReview, CustomerReviewsPage, DeviceInfo, PhasedReleaseInfo, ProvisioningProfileInfo,
+    ReviewResponse, ReviewSubmission, ScreenshotInfo, ScreenshotSetInfo, TeamMemberInfo, UserInfo,
 };
 use crate::error::StackError;
 use crate::ports::DebugLogger;
@@ -2281,6 +2285,163 @@ impl ProfileResource {
             created_date: self.attributes.created_date,
             expiration_date: self.attributes.expiration_date,
             profile_content: self.attributes.profile_content,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Analytics reports (JSON:API)
+// ---------------------------------------------------------------------------
+
+/// A JSON:API document page of `analyticsReportRequests` resources.
+#[derive(Deserialize)]
+struct AnalyticsReportRequestsResponse {
+    #[serde(default)]
+    data: Vec<AnalyticsReportRequestResource>,
+    #[serde(default)]
+    links: Links,
+}
+
+/// A JSON:API single-resource document wrapping one `analyticsReportRequests`,
+/// as returned by the create (POST) endpoint: `{ "data": { ... } }`.
+#[derive(Deserialize)]
+struct AnalyticsReportRequestDocument {
+    data: AnalyticsReportRequestResource,
+}
+
+#[derive(Deserialize)]
+struct AnalyticsReportRequestResource {
+    id: String,
+    #[serde(default)]
+    attributes: AnalyticsReportRequestAttributes,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct AnalyticsReportRequestAttributes {
+    #[serde(default)]
+    access_type: Option<String>,
+    #[serde(default)]
+    stopped_due_to_inactivity: Option<bool>,
+}
+
+impl AnalyticsReportRequestResource {
+    fn into_request_info(self) -> AnalyticsReportRequest {
+        AnalyticsReportRequest {
+            id: self.id,
+            access_type: self.attributes.access_type.unwrap_or_default(),
+            stopped_due_to_inactivity: self
+                .attributes
+                .stopped_due_to_inactivity
+                .unwrap_or_default(),
+        }
+    }
+}
+
+/// A JSON:API document page of `analyticsReports` resources.
+#[derive(Deserialize)]
+struct AnalyticsReportsResponse {
+    #[serde(default)]
+    data: Vec<AnalyticsReportResource>,
+    #[serde(default)]
+    links: Links,
+}
+
+#[derive(Deserialize)]
+struct AnalyticsReportResource {
+    id: String,
+    #[serde(default)]
+    attributes: AnalyticsReportAttributes,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct AnalyticsReportAttributes {
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    category: Option<String>,
+}
+
+impl AnalyticsReportResource {
+    fn into_report_info(self) -> AnalyticsReport {
+        AnalyticsReport {
+            id: self.id,
+            name: self.attributes.name.unwrap_or_default(),
+            category: self.attributes.category.unwrap_or_default(),
+        }
+    }
+}
+
+/// A JSON:API document page of `analyticsReportInstances` resources.
+#[derive(Deserialize)]
+struct AnalyticsReportInstancesResponse {
+    #[serde(default)]
+    data: Vec<AnalyticsReportInstanceResource>,
+    #[serde(default)]
+    links: Links,
+}
+
+#[derive(Deserialize)]
+struct AnalyticsReportInstanceResource {
+    id: String,
+    #[serde(default)]
+    attributes: AnalyticsReportInstanceAttributes,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct AnalyticsReportInstanceAttributes {
+    #[serde(default)]
+    granularity: Option<String>,
+    #[serde(default)]
+    processing_date: Option<String>,
+}
+
+impl AnalyticsReportInstanceResource {
+    fn into_instance_info(self) -> AnalyticsReportInstance {
+        AnalyticsReportInstance {
+            id: self.id,
+            granularity: self.attributes.granularity.unwrap_or_default(),
+            processing_date: self.attributes.processing_date,
+        }
+    }
+}
+
+/// A JSON:API document page of `analyticsReportSegments` resources.
+#[derive(Deserialize)]
+struct AnalyticsReportSegmentsResponse {
+    #[serde(default)]
+    data: Vec<AnalyticsReportSegmentResource>,
+    #[serde(default)]
+    links: Links,
+}
+
+#[derive(Deserialize)]
+struct AnalyticsReportSegmentResource {
+    id: String,
+    #[serde(default)]
+    attributes: AnalyticsReportSegmentAttributes,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct AnalyticsReportSegmentAttributes {
+    #[serde(default)]
+    url: Option<String>,
+    #[serde(default)]
+    checksum: Option<String>,
+    #[serde(default)]
+    size_in_bytes: Option<i64>,
+}
+
+impl AnalyticsReportSegmentResource {
+    fn into_segment_info(self) -> AnalyticsReportSegment {
+        AnalyticsReportSegment {
+            id: self.id,
+            url: self.attributes.url.unwrap_or_default(),
+            checksum: self.attributes.checksum,
+            size_in_bytes: self.attributes.size_in_bytes,
         }
     }
 }
@@ -7235,6 +7396,348 @@ impl AppStoreClient {
 
     /// Authenticated `GET` of one JSON:API page, returning the raw body or mapping
     /// the failure: non-2xx → [`StackError::Http`], transport → [`StackError::Network`].
+    /// Creates an analytics report request for `app_id` with the given
+    /// `access_type` (the raw ASC value — `ONGOING` / `ONE_TIME_SNAPSHOT` —
+    /// passed through verbatim).
+    ///
+    /// `POST /v1/analyticsReportRequests` with a JSON:API body carrying
+    /// `accessType` and the `app` relationship. Success is any 2xx (`201
+    /// Created`); the returned single-resource document is mapped into an
+    /// [`AnalyticsReportRequest`].
+    ///
+    /// # Errors
+    /// [`StackError::PendingAgreements`] when App Store Connect reports pending
+    /// agreements, [`StackError::Http`] on any other non-2xx response,
+    /// [`StackError::Decode`] on malformed JSON, or [`StackError::Network`] on
+    /// transport failure.
+    pub(crate) async fn create_analytics_report_request(
+        &self,
+        app_id: &str,
+        access_type: &str,
+    ) -> Result<AnalyticsReportRequest, StackError> {
+        let url = format!("{}/v1/analyticsReportRequests", self.base_url);
+        let request_body = json!({
+            "data": {
+                "type": "analyticsReportRequests",
+                "attributes": { "accessType": access_type },
+                "relationships": {
+                    "app": {
+                        "data": { "type": "apps", "id": app_id }
+                    }
+                }
+            }
+        });
+
+        let response_body = self.post_json_2xx(&url, &request_body).await?;
+        let document: AnalyticsReportRequestDocument = serde_json::from_str(&response_body)
+            .map_err(|e| StackError::decode(format!("analytics report request response: {e}")))?;
+        Ok(document.data.into_request_info())
+    }
+
+    /// Fetches a SINGLE page of analytics report requests for `app_id`, returning
+    /// the mapped requests plus an opaque `next_token`.
+    ///
+    /// When `page_token` is `Some(url)` the URL — a prior call's `next_token`,
+    /// itself the JSON:API `links.next` (absolute, already encoding the cursor) —
+    /// is fetched verbatim. Otherwise the first page is built from `app_id`,
+    /// `limit`, and, when `filter_access_type` is `Some`, a `filter[accessType]`.
+    /// `links.next` is NOT followed — its value is returned as `next_token`
+    /// (`None` on the last page) for the caller to pass back.
+    ///
+    /// `GET /v1/apps/{app_id}/analyticsReportRequests`.
+    ///
+    /// # Errors
+    /// [`StackError::PendingAgreements`] when App Store Connect reports pending
+    /// agreements, [`StackError::Http`] on any other non-2xx page,
+    /// [`StackError::Decode`] on malformed JSON, or [`StackError::Network`] on
+    /// transport failure.
+    pub(crate) async fn fetch_analytics_report_requests_page(
+        &self,
+        app_id: &str,
+        filter_access_type: Option<&str>,
+        limit: u32,
+        page_token: Option<&str>,
+    ) -> Result<AnalyticsReportRequestsPage, StackError> {
+        let url = match page_token {
+            Some(token) => token.to_string(),
+            None => {
+                let mut url = format!(
+                    "{}/v1/apps/{app_id}/analyticsReportRequests?limit={limit}",
+                    self.base_url
+                );
+                if let Some(access_type) = filter_access_type {
+                    url.push_str("&filter[accessType]=");
+                    url.push_str(access_type);
+                }
+                url
+            }
+        };
+
+        let body = self.get_page(&url).await?;
+        let page: AnalyticsReportRequestsResponse = serde_json::from_str(&body)
+            .map_err(|e| StackError::decode(format!("analytics report requests response: {e}")))?;
+        let requests = page
+            .data
+            .into_iter()
+            .map(AnalyticsReportRequestResource::into_request_info)
+            .collect();
+
+        // `links.next` is the opaque token for the next page; `None` when absent.
+        let next_token = page.links.next.filter(|u| !u.is_empty());
+        Ok(AnalyticsReportRequestsPage {
+            requests,
+            next_token,
+        })
+    }
+
+    /// Fetches a SINGLE page of the reports available under the report request
+    /// `request_id`, returning the mapped reports plus an opaque `next_token`.
+    ///
+    /// The `page_token` / first-page / `next_token` semantics match
+    /// [`Self::fetch_analytics_report_requests_page`]. When `filter_category` is
+    /// `Some`, a `filter[category]` is applied to the first page.
+    ///
+    /// `GET /v1/analyticsReportRequests/{request_id}/reports`.
+    ///
+    /// # Errors
+    /// [`StackError::PendingAgreements`] when App Store Connect reports pending
+    /// agreements, [`StackError::Http`] on any other non-2xx page,
+    /// [`StackError::Decode`] on malformed JSON, or [`StackError::Network`] on
+    /// transport failure.
+    pub(crate) async fn fetch_analytics_reports_page(
+        &self,
+        request_id: &str,
+        filter_category: Option<&str>,
+        limit: u32,
+        page_token: Option<&str>,
+    ) -> Result<AnalyticsReportsPage, StackError> {
+        let url = match page_token {
+            Some(token) => token.to_string(),
+            None => {
+                let mut url = format!(
+                    "{}/v1/analyticsReportRequests/{request_id}/reports?limit={limit}",
+                    self.base_url
+                );
+                if let Some(category) = filter_category {
+                    url.push_str("&filter[category]=");
+                    url.push_str(category);
+                }
+                url
+            }
+        };
+
+        let body = self.get_page(&url).await?;
+        let page: AnalyticsReportsResponse = serde_json::from_str(&body)
+            .map_err(|e| StackError::decode(format!("analytics reports response: {e}")))?;
+        let reports = page
+            .data
+            .into_iter()
+            .map(AnalyticsReportResource::into_report_info)
+            .collect();
+
+        // `links.next` is the opaque token for the next page; `None` when absent.
+        let next_token = page.links.next.filter(|u| !u.is_empty());
+        Ok(AnalyticsReportsPage {
+            reports,
+            next_token,
+        })
+    }
+
+    /// Fetches a SINGLE page of the instances of the report `report_id`, returning
+    /// the mapped instances plus an opaque `next_token`.
+    ///
+    /// The `page_token` / first-page / `next_token` semantics match
+    /// [`Self::fetch_analytics_report_requests_page`]. When `filter_granularity`
+    /// is `Some`, a `filter[granularity]` is applied to the first page.
+    ///
+    /// `GET /v1/analyticsReports/{report_id}/instances`.
+    ///
+    /// # Errors
+    /// [`StackError::PendingAgreements`] when App Store Connect reports pending
+    /// agreements, [`StackError::Http`] on any other non-2xx page,
+    /// [`StackError::Decode`] on malformed JSON, or [`StackError::Network`] on
+    /// transport failure.
+    pub(crate) async fn fetch_analytics_report_instances_page(
+        &self,
+        report_id: &str,
+        filter_granularity: Option<&str>,
+        limit: u32,
+        page_token: Option<&str>,
+    ) -> Result<AnalyticsReportInstancesPage, StackError> {
+        let url = match page_token {
+            Some(token) => token.to_string(),
+            None => {
+                let mut url = format!(
+                    "{}/v1/analyticsReports/{report_id}/instances?limit={limit}",
+                    self.base_url
+                );
+                if let Some(granularity) = filter_granularity {
+                    url.push_str("&filter[granularity]=");
+                    url.push_str(granularity);
+                }
+                url
+            }
+        };
+
+        let body = self.get_page(&url).await?;
+        let page: AnalyticsReportInstancesResponse = serde_json::from_str(&body)
+            .map_err(|e| StackError::decode(format!("analytics report instances response: {e}")))?;
+        let instances = page
+            .data
+            .into_iter()
+            .map(AnalyticsReportInstanceResource::into_instance_info)
+            .collect();
+
+        // `links.next` is the opaque token for the next page; `None` when absent.
+        let next_token = page.links.next.filter(|u| !u.is_empty());
+        Ok(AnalyticsReportInstancesPage {
+            instances,
+            next_token,
+        })
+    }
+
+    /// Fetches a SINGLE page of the segments of the report instance
+    /// `instance_id`, returning the mapped segments plus an opaque `next_token`.
+    ///
+    /// The `page_token` / first-page / `next_token` semantics match
+    /// [`Self::fetch_analytics_report_requests_page`] (there is no filter here).
+    ///
+    /// `GET /v1/analyticsReportInstances/{instance_id}/segments`.
+    ///
+    /// # Errors
+    /// [`StackError::PendingAgreements`] when App Store Connect reports pending
+    /// agreements, [`StackError::Http`] on any other non-2xx page,
+    /// [`StackError::Decode`] on malformed JSON, or [`StackError::Network`] on
+    /// transport failure.
+    pub(crate) async fn fetch_analytics_report_segments_page(
+        &self,
+        instance_id: &str,
+        limit: u32,
+        page_token: Option<&str>,
+    ) -> Result<AnalyticsReportSegmentsPage, StackError> {
+        let url = match page_token {
+            Some(token) => token.to_string(),
+            None => format!(
+                "{}/v1/analyticsReportInstances/{instance_id}/segments?limit={limit}",
+                self.base_url
+            ),
+        };
+
+        let body = self.get_page(&url).await?;
+        let page: AnalyticsReportSegmentsResponse = serde_json::from_str(&body)
+            .map_err(|e| StackError::decode(format!("analytics report segments response: {e}")))?;
+        let segments = page
+            .data
+            .into_iter()
+            .map(AnalyticsReportSegmentResource::into_segment_info)
+            .collect();
+
+        // `links.next` is the opaque token for the next page; `None` when absent.
+        let next_token = page.links.next.filter(|u| !u.is_empty());
+        Ok(AnalyticsReportSegmentsPage {
+            segments,
+            next_token,
+        })
+    }
+
+    /// Downloads the analytics segment at the pre-signed `url`, gunzips it, and
+    /// parses the tab-delimited (TSV) payload into generic headers + rows.
+    ///
+    /// Special-cased vs. the JSON:API reads: `url` is a pre-signed download URL
+    /// (Apple returns it on `analyticsReportSegments.attributes.url`), so NO
+    /// bearer token is attached — sending an `Authorization` header can break the
+    /// signature (mirrors the pre-signed upload in [`Self::send_upload`]).
+    /// `max_bytes` bounds the transfer: if the response advertises a
+    /// `Content-Length` over `max_bytes`, or the body grows past it while being
+    /// read, the download is refused with [`StackError::Unsupported`] so the host
+    /// can fetch such large segments via the URL directly. The gzip payload is
+    /// inflated with [`flate2::read::GzDecoder`]; parsing is delegated to
+    /// [`parse_analytics_tsv`].
+    ///
+    /// # Errors
+    /// [`StackError::Unsupported`] when the segment exceeds `max_bytes`,
+    /// [`StackError::PendingAgreements`] on a pending-agreements 403,
+    /// [`StackError::Http`] on any other non-2xx response, [`StackError::Decode`]
+    /// when the gzip payload cannot be inflated or is not valid UTF-8, or
+    /// [`StackError::Network`] on transport failure.
+    pub(crate) async fn download_analytics_segment(
+        &self,
+        url: &str,
+        max_bytes: u64,
+    ) -> Result<AnalyticsReportData, StackError> {
+        if let Some(logger) = &self.debug_logger {
+            // Redacted line only — the body is gzip-compressed binary, so routing
+            // it through the pretty-JSON logger would dump garbage (see
+            // `send_upload`).
+            logger.log(format!(
+                "[RustCore] → download {url} [max {max_bytes} bytes]"
+            ));
+        }
+
+        // Pre-signed URL: deliberately NO `bearer_auth`.
+        let mut response = self
+            .http
+            .get(url)
+            .send()
+            .await
+            .map_err(|e| StackError::network(e.to_string()))?;
+        let status = response.status();
+
+        if let Some(logger) = &self.debug_logger {
+            // Status only — the compressed body is not worth printing.
+            logger.log(render_response(status, ""));
+        }
+
+        // Refuse early when the server advertises a size over the cap.
+        if let Some(len) = response.content_length() {
+            if len > max_bytes {
+                return Err(StackError::unsupported(
+                    "analytics segment exceeds max_bytes; download via URL directly",
+                ));
+            }
+        }
+
+        if !status.is_success() {
+            let body = response
+                .text()
+                .await
+                .map_err(|e| StackError::network(e.to_string()))?;
+            if let Some(err) = pending_agreements_error(status.as_u16(), &body) {
+                return Err(err);
+            }
+            return Err(StackError::Http {
+                status: status.as_u16(),
+                message: body,
+            });
+        }
+
+        // Stream the body, enforcing `max_bytes` as we go so a missing/under-
+        // reported `Content-Length` cannot make us buffer an unbounded response.
+        let mut compressed: Vec<u8> = Vec::new();
+        while let Some(chunk) = response
+            .chunk()
+            .await
+            .map_err(|e| StackError::network(e.to_string()))?
+        {
+            if compressed.len() as u64 + chunk.len() as u64 > max_bytes {
+                return Err(StackError::unsupported(
+                    "analytics segment exceeds max_bytes; download via URL directly",
+                ));
+            }
+            compressed.extend_from_slice(&chunk);
+        }
+
+        // Gunzip → UTF-8 text. A corrupt gzip stream or non-UTF-8 payload is a
+        // decode error, not a transport error.
+        let mut decoder = GzDecoder::new(&compressed[..]);
+        let mut text = String::new();
+        decoder
+            .read_to_string(&mut text)
+            .map_err(|e| StackError::decode(format!("analytics segment gunzip: {e}")))?;
+
+        Ok(parse_analytics_tsv(&text))
+    }
+
     async fn get_page(&self, url: &str) -> Result<String, StackError> {
         let token = self.auth.bearer_token().await?;
         let (status, body) = self
@@ -7332,6 +7835,29 @@ fn map_error_response(status: u16, body: &str) -> StackError {
         return err;
     }
     StackError::auth(format!("validation failed ({status}): {body}"))
+}
+
+/// Parses the tab-delimited (TSV) body of a downloaded analytics segment into a
+/// generic [`AnalyticsReportData`]: the first non-empty line is the header row
+/// (split on `\t`), and every subsequent non-empty line is a data row (also split
+/// on `\t`). Blank lines are skipped so a trailing newline does not yield an
+/// empty row; `\r` is already stripped by [`str::lines`]. The core does no typed
+/// per-report parsing — the host interprets the columns.
+fn parse_analytics_tsv(text: &str) -> AnalyticsReportData {
+    let mut lines = text.lines().filter(|line| !line.is_empty());
+    let headers = lines
+        .next()
+        .map(|line| line.split('\t').map(str::to_string).collect())
+        .unwrap_or_default();
+    let rows: Vec<Vec<String>> = lines
+        .map(|line| line.split('\t').map(str::to_string).collect())
+        .collect();
+    let row_count = rows.len() as u32;
+    AnalyticsReportData {
+        headers,
+        rows,
+        row_count,
+    }
 }
 
 #[cfg(test)]
@@ -15372,5 +15898,286 @@ mod tests {
             .await
             .unwrap();
         assert!(content.is_none());
+    }
+
+    // -- Analytics reports ---------------------------------------------------
+
+    #[tokio::test]
+    async fn create_analytics_report_request_posts_and_maps_response() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/v1/analyticsReportRequests"))
+            // Assert the JSON:API envelope carries the access type and the app
+            // relationship, without over-constraining the rest.
+            .and(wiremock::matchers::body_partial_json(serde_json::json!({
+                "data": {
+                    "type": "analyticsReportRequests",
+                    "attributes": { "accessType": "ONGOING" },
+                    "relationships": {
+                        "app": { "data": { "type": "apps", "id": "APP1" } }
+                    }
+                }
+            })))
+            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
+                "data": {
+                    "type": "analyticsReportRequests",
+                    "id": "req-1",
+                    "attributes": {
+                        "accessType": "ONGOING",
+                        "stoppedDueToInactivity": false
+                    }
+                }
+            })))
+            .mount(&server)
+            .await;
+
+        let request = client(server.uri())
+            .create_analytics_report_request("APP1", "ONGOING")
+            .await
+            .unwrap();
+
+        assert_eq!(request.id, "req-1");
+        assert_eq!(request.access_type, "ONGOING");
+        assert!(!request.stopped_due_to_inactivity);
+    }
+
+    #[tokio::test]
+    async fn create_analytics_report_request_surfaces_http_error() {
+        let server = MockServer::start().await;
+        // A 403 whose body does NOT mention agreements stays a plain HTTP error.
+        Mock::given(method("POST"))
+            .and(path("/v1/analyticsReportRequests"))
+            .respond_with(ResponseTemplate::new(403).set_body_string("forbidden"))
+            .mount(&server)
+            .await;
+
+        let err = client(server.uri())
+            .create_analytics_report_request("APP1", "ONGOING")
+            .await
+            .unwrap_err();
+        assert!(matches!(err, StackError::Http { status: 403, .. }));
+    }
+
+    #[tokio::test]
+    async fn create_analytics_report_request_surfaces_pending_agreements() {
+        let server = MockServer::start().await;
+        // A 403 mentioning a pending agreement is surfaced as PendingAgreements
+        // (the create path routes through `post_json_2xx`, keeping the guard wired).
+        Mock::given(method("POST"))
+            .and(path("/v1/analyticsReportRequests"))
+            .respond_with(ResponseTemplate::new(403).set_body_json(serde_json::json!({
+                "errors": [{ "detail": "The agreement is pending." }]
+            })))
+            .mount(&server)
+            .await;
+
+        let err = client(server.uri())
+            .create_analytics_report_request("APP1", "ONGOING")
+            .await
+            .unwrap_err();
+        match err {
+            StackError::PendingAgreements { message } => {
+                assert!(message.contains("pending agreements"))
+            }
+            other => panic!("expected PendingAgreements, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn fetch_analytics_report_requests_page_returns_next_token_without_following() {
+        let server = MockServer::start().await;
+        let next = format!(
+            "{}/v1/apps/APP1/analyticsReportRequests?cursor=PAGE2",
+            server.uri()
+        );
+
+        // Only the first page is mounted: the returned `next_token` must be
+        // surfaced verbatim and NOT followed (no second request is issued).
+        Mock::given(method("GET"))
+            .and(path("/v1/apps/APP1/analyticsReportRequests"))
+            .and(wiremock::matchers::query_param_is_missing("cursor"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": [{
+                    "type": "analyticsReportRequests",
+                    "id": "req-1",
+                    "attributes": { "accessType": "ONGOING", "stoppedDueToInactivity": false }
+                }],
+                "links": { "next": next.clone() }
+            })))
+            .mount(&server)
+            .await;
+
+        let page = client(server.uri())
+            .fetch_analytics_report_requests_page("APP1", None, 50, None)
+            .await
+            .unwrap();
+
+        assert_eq!(page.requests.len(), 1);
+        assert_eq!(page.requests[0].id, "req-1");
+        assert_eq!(page.requests[0].access_type, "ONGOING");
+        // `next_token` is the opaque `links.next` cursor URL, returned verbatim.
+        assert_eq!(page.next_token, Some(next));
+    }
+
+    #[tokio::test]
+    async fn fetch_analytics_reports_page_applies_category_filter() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/v1/analyticsReportRequests/req-1/reports"))
+            .and(query_param("filter[category]", "APP_USAGE"))
+            .and(query_param("limit", "50"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": [{
+                    "type": "analyticsReports",
+                    "id": "rep-1",
+                    "attributes": { "name": "App Sessions", "category": "APP_USAGE" }
+                }],
+                "links": {}
+            })))
+            .mount(&server)
+            .await;
+
+        let page = client(server.uri())
+            .fetch_analytics_reports_page("req-1", Some("APP_USAGE"), 50, None)
+            .await
+            .unwrap();
+
+        assert_eq!(page.reports.len(), 1);
+        assert_eq!(page.reports[0].id, "rep-1");
+        assert_eq!(page.reports[0].name, "App Sessions");
+        assert_eq!(page.reports[0].category, "APP_USAGE");
+        assert_eq!(page.next_token, None);
+    }
+
+    #[tokio::test]
+    async fn fetch_analytics_report_instances_page_applies_granularity_filter() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/v1/analyticsReports/rep-1/instances"))
+            .and(query_param("filter[granularity]", "DAILY"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": [{
+                    "type": "analyticsReportInstances",
+                    "id": "inst-1",
+                    "attributes": { "granularity": "DAILY", "processingDate": "2026-07-01" }
+                }],
+                "links": {}
+            })))
+            .mount(&server)
+            .await;
+
+        let page = client(server.uri())
+            .fetch_analytics_report_instances_page("rep-1", Some("DAILY"), 50, None)
+            .await
+            .unwrap();
+
+        assert_eq!(page.instances.len(), 1);
+        assert_eq!(page.instances[0].id, "inst-1");
+        assert_eq!(page.instances[0].granularity, "DAILY");
+        assert_eq!(
+            page.instances[0].processing_date.as_deref(),
+            Some("2026-07-01")
+        );
+    }
+
+    #[tokio::test]
+    async fn fetch_analytics_report_segments_page_maps_segments() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/v1/analyticsReportInstances/inst-1/segments"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": [{
+                    "type": "analyticsReportSegments",
+                    "id": "seg-1",
+                    "attributes": {
+                        "url": "https://apple-analytics.example.com/seg-1.gz",
+                        "checksum": "abc123",
+                        "sizeInBytes": 2048
+                    }
+                }],
+                "links": {}
+            })))
+            .mount(&server)
+            .await;
+
+        let page = client(server.uri())
+            .fetch_analytics_report_segments_page("inst-1", 50, None)
+            .await
+            .unwrap();
+
+        assert_eq!(page.segments.len(), 1);
+        let seg = &page.segments[0];
+        assert_eq!(seg.id, "seg-1");
+        assert_eq!(seg.url, "https://apple-analytics.example.com/seg-1.gz");
+        assert_eq!(seg.checksum.as_deref(), Some("abc123"));
+        assert_eq!(seg.size_in_bytes, Some(2048));
+        assert_eq!(page.next_token, None);
+    }
+
+    #[tokio::test]
+    async fn download_analytics_segment_gunzips_and_parses_tsv() {
+        use flate2::write::GzEncoder;
+        use flate2::Compression;
+        use std::io::Write as _;
+
+        let server = MockServer::start().await;
+
+        // gzip a small TSV: one header row + one data row, with a trailing newline.
+        let tsv = "col_a\tcol_b\n1\t2\n";
+        let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+        encoder.write_all(tsv.as_bytes()).unwrap();
+        let gzipped = encoder.finish().unwrap();
+
+        Mock::given(method("GET"))
+            .and(path("/segments/0"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(gzipped))
+            .mount(&server)
+            .await;
+
+        let url = format!("{}/segments/0", server.uri());
+        let data = client(server.uri())
+            .download_analytics_segment(&url, 1_000_000)
+            .await
+            .unwrap();
+
+        assert_eq!(data.headers, vec!["col_a".to_string(), "col_b".to_string()]);
+        assert_eq!(data.rows, vec![vec!["1".to_string(), "2".to_string()]]);
+        assert_eq!(data.row_count, 1);
+
+        // The pre-signed download must NOT carry a bearer token.
+        let requests = server.received_requests().await.unwrap();
+        let get = requests
+            .iter()
+            .find(|r| r.url.path() == "/segments/0")
+            .expect("the segment GET must have been sent");
+        assert!(
+            get.headers.get("authorization").is_none(),
+            "the pre-signed download must not carry a bearer token"
+        );
+    }
+
+    #[tokio::test]
+    async fn download_analytics_segment_rejects_oversized() {
+        let server = MockServer::start().await;
+
+        // A body larger than the tiny cap we pass. wiremock sets `Content-Length`
+        // to the body size, so the early guard rejects before any download.
+        let big = vec![0u8; 1024];
+        Mock::given(method("GET"))
+            .and(path("/segments/big"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(big))
+            .mount(&server)
+            .await;
+
+        let url = format!("{}/segments/big", server.uri());
+        let err = client(server.uri())
+            .download_analytics_segment(&url, 16)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, StackError::Unsupported { .. }));
     }
 }

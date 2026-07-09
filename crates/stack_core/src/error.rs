@@ -66,7 +66,6 @@ impl StackError {
         }
     }
 
-    #[allow(dead_code)] // exercised once a provider reports a missing capability
     pub(crate) fn unsupported(message: impl Into<String>) -> Self {
         Self::Unsupported {
             message: message.into(),

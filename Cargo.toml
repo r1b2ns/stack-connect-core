@@ -29,6 +29,8 @@ sha2 = "0.10"
 # App Store screenshot upload commit checksum (sourceFileChecksum).
 md-5 = "0.10"
 uuid = { version = "1", features = ["v4"] }
+# Gunzip for downloaded analytics report segments (Apple serves gzip TSV).
+flate2 = "1"
 
 [profile.release]
 opt-level = "z"

@@ -5,6 +5,7 @@ use async_trait::async_trait;
 use crate::domain::AppInfo;
 use crate::error::StackError;
 use crate::service::capabilities::accessibility_declarations::AccessibilityDeclarations;
+use crate::service::capabilities::analytics::Analytics;
 use crate::service::capabilities::app_metadata::AppMetadata;
 use crate::service::capabilities::app_store_versions::AppStoreVersions;
 use crate::service::capabilities::beta_app_localizations::BetaAppLocalizations;
@@ -41,6 +42,7 @@ pub enum Capability {
     BundleIds,
     Certificates,
     Profiles,
+    Analytics,
 }
 
 /// Internal, non-exported contract every concrete plugin implements. Kept off the
@@ -151,6 +153,12 @@ pub(crate) trait ProviderImpl: Send + Sync {
     /// The Profiles capability handle, or `None` if this provider lacks
     /// [`Capability::Profiles`]. Default `None` so providers opt in explicitly.
     fn profiles(&self) -> Option<Arc<Profiles>> {
+        None
+    }
+
+    /// The Analytics capability handle, or `None` if this provider lacks
+    /// [`Capability::Analytics`]. Default `None` so providers opt in explicitly.
+    fn analytics(&self) -> Option<Arc<Analytics>> {
         None
     }
 }
@@ -292,6 +300,14 @@ impl Provider {
     /// management is unsupported.
     pub fn profiles(&self) -> Option<Arc<Profiles>> {
         self.inner.profiles()
+    }
+
+    /// The Analytics capability handle, or `None` when this provider does not
+    /// expose [`Capability::Analytics`]. This is the discovery mechanism: the host
+    /// calls `provider.analytics()` and gets `None` when analytics reports are
+    /// unsupported.
+    pub fn analytics(&self) -> Option<Arc<Analytics>> {
+        self.inner.analytics()
     }
 }
 

@@ -606,3 +606,103 @@ pub struct UserInfo {
     pub is_pending: bool,
     pub expiration_date: Option<String>,
 }
+
+/// An analytics report request: the container an app opens to start receiving a
+/// family of analytics reports. `access_type` is the raw ASC value (`ONGOING` /
+/// `ONE_TIME_SNAPSHOT`) passed through verbatim; `stopped_due_to_inactivity` is
+/// `true` when Apple stopped an `ONGOING` request because the reports went
+/// unread.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, uniffi::Record)]
+#[serde(rename_all = "camelCase")]
+pub struct AnalyticsReportRequest {
+    pub id: String,
+    pub access_type: String,
+    pub stopped_due_to_inactivity: bool,
+}
+
+/// A single analytics report available under a report request. `category` is the
+/// raw ASC `category` value (e.g. `APP_USAGE`, `APP_STORE_ENGAGEMENT`) passed
+/// through verbatim; `name` is the report's display name.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, uniffi::Record)]
+#[serde(rename_all = "camelCase")]
+pub struct AnalyticsReport {
+    pub id: String,
+    pub name: String,
+    pub category: String,
+}
+
+/// A generated instance of a report at a given granularity. `granularity` is the
+/// raw ASC value (`DAILY` / `WEEKLY` / `MONTHLY`); `processing_date` is the raw
+/// ISO8601 date the instance covers (host owns parsing), `None` when absent.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, uniffi::Record)]
+#[serde(rename_all = "camelCase")]
+pub struct AnalyticsReportInstance {
+    pub id: String,
+    pub granularity: String,
+    pub processing_date: Option<String>,
+}
+
+/// A downloadable segment of a report instance. `url` is a pre-signed download
+/// URL (no bearer auth), `checksum` is Apple's advertised checksum, and
+/// `size_in_bytes` is the compressed size when advertised. Optional fields are
+/// `None` when the corresponding attribute is absent.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, uniffi::Record)]
+#[serde(rename_all = "camelCase")]
+pub struct AnalyticsReportSegment {
+    pub id: String,
+    pub url: String,
+    pub checksum: Option<String>,
+    pub size_in_bytes: Option<i64>,
+}
+
+/// One page of analytics report requests plus an opaque token to fetch the next
+/// page. `next_token` is `None` on the last page; otherwise pass it back verbatim
+/// as the next call's `page_token` (it is the JSON:API `links.next` URL). Mirrors
+/// [`CustomerReviewsPage`].
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, uniffi::Record)]
+#[serde(rename_all = "camelCase")]
+pub struct AnalyticsReportRequestsPage {
+    pub requests: Vec<AnalyticsReportRequest>,
+    pub next_token: Option<String>,
+}
+
+/// One page of analytics reports plus an opaque `next_token` (see
+/// [`AnalyticsReportRequestsPage`]).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, uniffi::Record)]
+#[serde(rename_all = "camelCase")]
+pub struct AnalyticsReportsPage {
+    pub reports: Vec<AnalyticsReport>,
+    pub next_token: Option<String>,
+}
+
+/// One page of analytics report instances plus an opaque `next_token` (see
+/// [`AnalyticsReportRequestsPage`]).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, uniffi::Record)]
+#[serde(rename_all = "camelCase")]
+pub struct AnalyticsReportInstancesPage {
+    pub instances: Vec<AnalyticsReportInstance>,
+    pub next_token: Option<String>,
+}
+
+/// One page of analytics report segments plus an opaque `next_token` (see
+/// [`AnalyticsReportRequestsPage`]).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, uniffi::Record)]
+#[serde(rename_all = "camelCase")]
+pub struct AnalyticsReportSegmentsPage {
+    pub segments: Vec<AnalyticsReportSegment>,
+    pub next_token: Option<String>,
+}
+
+/// The parsed contents of a downloaded analytics segment: a generic tab-delimited
+/// table of `headers` plus `rows`. The core does no typed per-report parsing —
+/// the host interprets the columns. `row_count` is the number of data rows (it
+/// equals `rows.len()`, surfaced as a convenience for bindings). This record
+/// never crosses the wire to App Store Connect; the serde derives are kept only
+/// for consistency with the other analytics DTOs.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, uniffi::Record)]
+#[serde(rename_all = "camelCase")]
+pub struct AnalyticsReportData {
+    pub headers: Vec<String>,
+    pub rows: Vec<Vec<String>>,
+    pub row_count: u32,
+}

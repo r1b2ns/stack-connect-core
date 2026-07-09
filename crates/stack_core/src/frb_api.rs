@@ -51,13 +51,14 @@ use flutter_rust_bridge::DartFnFuture;
 
 use crate::crypto::{self, CryptoError, ScexportPayload};
 use crate::domain::{
-    AccessibilityDeclarationInfo, AccountExport, AppCategoryInfo, AppInfo, AppInfoDetails,
-    AppInfoLocalizationInfo, AppReviewDetailInfo, AppStoreLocalizationInfo, AppStoreVersionInfo,
-    BetaAppLocalizationInfo, BetaAppReviewDetailInfo, BetaBuildLocalizationInfo, BetaGroupInfo,
-    BetaTesterInfo, BuildDetailInfo, BuildInfo, BuildsPage, BundleIdCapabilityInfo, BundleIdInfo,
-    CertificateInfo, CustomerReview, CustomerReviewsPage, DeviceInfo, PhasedReleaseInfo,
-    ProvisioningProfileInfo, ReviewResponse, ScreenshotInfo, ScreenshotSetInfo, TeamMemberInfo,
-    UserInfo,
+    AccessibilityDeclarationInfo, AccountExport, AnalyticsReportData, AnalyticsReportInstancesPage,
+    AnalyticsReportRequest, AnalyticsReportRequestsPage, AnalyticsReportSegmentsPage,
+    AnalyticsReportsPage, AppCategoryInfo, AppInfo, AppInfoDetails, AppInfoLocalizationInfo,
+    AppReviewDetailInfo, AppStoreLocalizationInfo, AppStoreVersionInfo, BetaAppLocalizationInfo,
+    BetaAppReviewDetailInfo, BetaBuildLocalizationInfo, BetaGroupInfo, BetaTesterInfo,
+    BuildDetailInfo, BuildInfo, BuildsPage, BundleIdCapabilityInfo, BundleIdInfo, CertificateInfo,
+    CustomerReview, CustomerReviewsPage, DeviceInfo, PhasedReleaseInfo, ProvisioningProfileInfo,
+    ReviewResponse, ScreenshotInfo, ScreenshotSetInfo, TeamMemberInfo, UserInfo,
 };
 use crate::error::StackError;
 use crate::ports::{BlobStore, CredentialStore, DebugLogger};
@@ -593,6 +594,18 @@ impl FrbProvider {
     #[flutter_rust_bridge::frb(sync)]
     pub fn profiles(&self) -> Option<FrbProfiles> {
         self.inner.profiles().map(|inner| FrbProfiles {
+            inner,
+            log_buffer: self.log_buffer.clone(),
+        })
+    }
+
+    /// The Analytics (App Store Connect Analytics Reports) capability handle, or
+    /// `None` when this provider does not expose analytics. Mirrors
+    /// [`Provider::analytics`]: the discovery mechanism is a `None` return, not an
+    /// error.
+    #[flutter_rust_bridge::frb(sync)]
+    pub fn analytics(&self) -> Option<FrbAnalytics> {
+        self.inner.analytics().map(|inner| FrbAnalytics {
             inner,
             log_buffer: self.log_buffer.clone(),
         })
@@ -2638,6 +2651,161 @@ impl FrbProfiles {
     /// transport failure.
     pub async fn fetch_profile_content(&self, id: String) -> Result<Option<String>, StackError> {
         let result = self.inner.fetch_profile_content(id).await;
+        self.flush_logs().await;
+        result
+    }
+
+    /// Drains any buffered debug lines to the Dart logger. No-op when no logger
+    /// was supplied.
+    async fn flush_logs(&self) {
+        if let Some(buffer) = &self.log_buffer {
+            buffer.flush().await;
+        }
+    }
+}
+
+/// FRB-exposed Analytics (App Store Connect Analytics Reports) capability handle:
+/// a thin opaque wrapper around the core `Arc<Analytics>`. Reached via
+/// [`FrbProvider::analytics`]. Mirrors the M0 reads (navigate report requests →
+/// reports → instances → segments, each paginated), the M1 write (create a report
+/// request), and the L2 download (fetch + gunzip + parse a segment).
+#[flutter_rust_bridge::frb(opaque)]
+pub struct FrbAnalytics {
+    inner: Arc<crate::service::capabilities::analytics::Analytics>,
+    log_buffer: Option<Arc<LogBuffer>>,
+}
+
+impl FrbAnalytics {
+    /// Creates an analytics report request for `app_id` with `access_type` (the
+    /// raw ASC value — `ONGOING` / `ONE_TIME_SNAPSHOT` — passed through verbatim),
+    /// returning the created request.
+    ///
+    /// # Errors
+    /// [`StackError::PendingAgreements`] when App Store Connect reports pending
+    /// agreements, [`StackError::Http`] on any other non-2xx response,
+    /// [`StackError::Decode`] on malformed JSON, or [`StackError::Network`] on
+    /// transport failure.
+    pub async fn create_analytics_report_request(
+        &self,
+        app_id: String,
+        access_type: String,
+    ) -> Result<AnalyticsReportRequest, StackError> {
+        let result = self
+            .inner
+            .create_analytics_report_request(app_id, access_type)
+            .await;
+        self.flush_logs().await;
+        result
+    }
+
+    /// Fetches a single page of the analytics report requests for `app_id`,
+    /// optionally filtered by `filter_access_type`. `page_token` is `None` for the
+    /// first page; otherwise pass back a previous call's `next_token` verbatim.
+    ///
+    /// # Errors
+    /// [`StackError::PendingAgreements`] when App Store Connect reports pending
+    /// agreements, [`StackError::Http`] on any other non-2xx page,
+    /// [`StackError::Decode`] on malformed JSON, or [`StackError::Network`] on
+    /// transport failure.
+    pub async fn fetch_analytics_report_requests_page(
+        &self,
+        app_id: String,
+        filter_access_type: Option<String>,
+        limit: u32,
+        page_token: Option<String>,
+    ) -> Result<AnalyticsReportRequestsPage, StackError> {
+        let result = self
+            .inner
+            .fetch_analytics_report_requests_page(app_id, filter_access_type, limit, page_token)
+            .await;
+        self.flush_logs().await;
+        result
+    }
+
+    /// Fetches a single page of the reports under the report request `request_id`,
+    /// optionally filtered by `filter_category`.
+    ///
+    /// # Errors
+    /// [`StackError::PendingAgreements`] when App Store Connect reports pending
+    /// agreements, [`StackError::Http`] on any other non-2xx page,
+    /// [`StackError::Decode`] on malformed JSON, or [`StackError::Network`] on
+    /// transport failure.
+    pub async fn fetch_analytics_reports_page(
+        &self,
+        request_id: String,
+        filter_category: Option<String>,
+        limit: u32,
+        page_token: Option<String>,
+    ) -> Result<AnalyticsReportsPage, StackError> {
+        let result = self
+            .inner
+            .fetch_analytics_reports_page(request_id, filter_category, limit, page_token)
+            .await;
+        self.flush_logs().await;
+        result
+    }
+
+    /// Fetches a single page of the instances of the report `report_id`,
+    /// optionally filtered by `filter_granularity`.
+    ///
+    /// # Errors
+    /// [`StackError::PendingAgreements`] when App Store Connect reports pending
+    /// agreements, [`StackError::Http`] on any other non-2xx page,
+    /// [`StackError::Decode`] on malformed JSON, or [`StackError::Network`] on
+    /// transport failure.
+    pub async fn fetch_analytics_report_instances_page(
+        &self,
+        report_id: String,
+        filter_granularity: Option<String>,
+        limit: u32,
+        page_token: Option<String>,
+    ) -> Result<AnalyticsReportInstancesPage, StackError> {
+        let result = self
+            .inner
+            .fetch_analytics_report_instances_page(report_id, filter_granularity, limit, page_token)
+            .await;
+        self.flush_logs().await;
+        result
+    }
+
+    /// Fetches a single page of the segments of the report instance `instance_id`.
+    ///
+    /// # Errors
+    /// [`StackError::PendingAgreements`] when App Store Connect reports pending
+    /// agreements, [`StackError::Http`] on any other non-2xx page,
+    /// [`StackError::Decode`] on malformed JSON, or [`StackError::Network`] on
+    /// transport failure.
+    pub async fn fetch_analytics_report_segments_page(
+        &self,
+        instance_id: String,
+        limit: u32,
+        page_token: Option<String>,
+    ) -> Result<AnalyticsReportSegmentsPage, StackError> {
+        let result = self
+            .inner
+            .fetch_analytics_report_segments_page(instance_id, limit, page_token)
+            .await;
+        self.flush_logs().await;
+        result
+    }
+
+    /// Downloads the analytics segment at the pre-signed `url` (no bearer auth),
+    /// gunzips it, and parses the tab-delimited payload into generic headers +
+    /// rows. Transfers advertising, or growing past, `max_bytes` are refused so
+    /// the host can download such large segments via the URL directly.
+    ///
+    /// # Errors
+    /// [`StackError::Unsupported`] when the segment exceeds `max_bytes`,
+    /// [`StackError::PendingAgreements`] on a pending-agreements 403,
+    /// [`StackError::Http`] on any other non-2xx response, [`StackError::Decode`]
+    /// when the gzip payload cannot be inflated or is not valid UTF-8, or
+    /// [`StackError::Network`] on transport failure.
+    pub async fn download_analytics_segment(
+        &self,
+        url: String,
+        max_bytes: u64,
+    ) -> Result<AnalyticsReportData, StackError> {
+        let result = self.inner.download_analytics_segment(url, max_bytes).await;
         self.flush_logs().await;
         result
     }

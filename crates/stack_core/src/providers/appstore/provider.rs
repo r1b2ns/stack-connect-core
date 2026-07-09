@@ -5,19 +5,21 @@ use async_trait::async_trait;
 use super::client::AppStoreClient;
 use crate::auth::es256::AppStoreAuthenticator;
 use crate::domain::{
-    AccessibilityDeclarationInfo, AppCategoryInfo, AppInfo, AppInfoDetails,
-    AppInfoLocalizationInfo, AppReviewDetailInfo, AppStoreLocalizationInfo, AppStoreVersionInfo,
-    BetaAppLocalizationInfo, BetaAppReviewDetailInfo, BetaBuildLocalizationInfo, BetaGroupInfo,
-    BetaTesterInfo, BuildDetailInfo, BuildInfo, BuildsPage, BundleIdCapabilityInfo, BundleIdInfo,
-    CertificateInfo, CustomerReview, CustomerReviewsPage, DeviceInfo, PhasedReleaseInfo,
-    ProvisioningProfileInfo, ReviewResponse, ReviewSubmission, ScreenshotInfo, ScreenshotSetInfo,
-    TeamMemberInfo, UserInfo,
+    AccessibilityDeclarationInfo, AnalyticsReportData, AnalyticsReportInstancesPage,
+    AnalyticsReportRequest, AnalyticsReportRequestsPage, AnalyticsReportSegmentsPage,
+    AnalyticsReportsPage, AppCategoryInfo, AppInfo, AppInfoDetails, AppInfoLocalizationInfo,
+    AppReviewDetailInfo, AppStoreLocalizationInfo, AppStoreVersionInfo, BetaAppLocalizationInfo,
+    BetaAppReviewDetailInfo, BetaBuildLocalizationInfo, BetaGroupInfo, BetaTesterInfo,
+    BuildDetailInfo, BuildInfo, BuildsPage, BundleIdCapabilityInfo, BundleIdInfo, CertificateInfo,
+    CustomerReview, CustomerReviewsPage, DeviceInfo, PhasedReleaseInfo, ProvisioningProfileInfo,
+    ReviewResponse, ReviewSubmission, ScreenshotInfo, ScreenshotSetInfo, TeamMemberInfo, UserInfo,
 };
 use crate::error::StackError;
 use crate::ports::DebugLogger;
 use crate::service::capabilities::accessibility_declarations::{
     AccessibilityDeclarations, AccessibilityDeclarationsImpl,
 };
+use crate::service::capabilities::analytics::{Analytics, AnalyticsImpl};
 use crate::service::capabilities::app_metadata::{AppMetadata, AppMetadataImpl};
 use crate::service::capabilities::app_store_versions::{AppStoreVersions, AppStoreVersionsImpl};
 use crate::service::capabilities::beta_app_localizations::{
@@ -89,6 +91,7 @@ impl ProviderImpl for AppStoreProvider {
             Capability::BundleIds,
             Capability::Certificates,
             Capability::Profiles,
+            Capability::Analytics,
         ]
     }
 
@@ -188,6 +191,12 @@ impl ProviderImpl for AppStoreProvider {
 
     fn profiles(&self) -> Option<Arc<Profiles>> {
         Some(Profiles::new(Box::new(AppStoreProfiles {
+            client: Arc::clone(&self.client),
+        })))
+    }
+
+    fn analytics(&self) -> Option<Arc<Analytics>> {
+        Some(Analytics::new(Box::new(AppStoreAnalytics {
             client: Arc::clone(&self.client),
         })))
     }
@@ -1230,6 +1239,97 @@ impl ProfilesImpl for AppStoreProfiles {
     }
 }
 
+/// App Store Connect implementation of the [`AnalyticsImpl`] capability contract.
+/// Holds a shared [`AppStoreClient`] so it reuses the provider's token cache.
+struct AppStoreAnalytics {
+    client: Arc<AppStoreClient>,
+}
+
+#[async_trait]
+impl AnalyticsImpl for AppStoreAnalytics {
+    async fn create_analytics_report_request(
+        &self,
+        app_id: String,
+        access_type: String,
+    ) -> Result<AnalyticsReportRequest, StackError> {
+        self.client
+            .create_analytics_report_request(&app_id, &access_type)
+            .await
+    }
+
+    async fn fetch_analytics_report_requests_page(
+        &self,
+        app_id: String,
+        filter_access_type: Option<String>,
+        limit: u32,
+        page_token: Option<String>,
+    ) -> Result<AnalyticsReportRequestsPage, StackError> {
+        self.client
+            .fetch_analytics_report_requests_page(
+                &app_id,
+                filter_access_type.as_deref(),
+                limit,
+                page_token.as_deref(),
+            )
+            .await
+    }
+
+    async fn fetch_analytics_reports_page(
+        &self,
+        request_id: String,
+        filter_category: Option<String>,
+        limit: u32,
+        page_token: Option<String>,
+    ) -> Result<AnalyticsReportsPage, StackError> {
+        self.client
+            .fetch_analytics_reports_page(
+                &request_id,
+                filter_category.as_deref(),
+                limit,
+                page_token.as_deref(),
+            )
+            .await
+    }
+
+    async fn fetch_analytics_report_instances_page(
+        &self,
+        report_id: String,
+        filter_granularity: Option<String>,
+        limit: u32,
+        page_token: Option<String>,
+    ) -> Result<AnalyticsReportInstancesPage, StackError> {
+        self.client
+            .fetch_analytics_report_instances_page(
+                &report_id,
+                filter_granularity.as_deref(),
+                limit,
+                page_token.as_deref(),
+            )
+            .await
+    }
+
+    async fn fetch_analytics_report_segments_page(
+        &self,
+        instance_id: String,
+        limit: u32,
+        page_token: Option<String>,
+    ) -> Result<AnalyticsReportSegmentsPage, StackError> {
+        self.client
+            .fetch_analytics_report_segments_page(&instance_id, limit, page_token.as_deref())
+            .await
+    }
+
+    async fn download_analytics_segment(
+        &self,
+        url: String,
+        max_bytes: u64,
+    ) -> Result<AnalyticsReportData, StackError> {
+        self.client
+            .download_analytics_segment(&url, max_bytes)
+            .await
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1264,7 +1364,8 @@ mod tests {
                 Capability::Devices,
                 Capability::BundleIds,
                 Capability::Certificates,
-                Capability::Profiles
+                Capability::Profiles,
+                Capability::Analytics
             ]
         );
     }
@@ -1387,5 +1488,12 @@ mod tests {
         // App Store Connect supports Profiles, so the accessor must return `Some`.
         assert!(provider().profiles().is_some());
         assert!(provider().capabilities().contains(&Capability::Profiles));
+    }
+
+    #[test]
+    fn exposes_analytics_capability_handle() {
+        // App Store Connect supports Analytics, so the accessor must return `Some`.
+        assert!(provider().analytics().is_some());
+        assert!(provider().capabilities().contains(&Capability::Analytics));
     }
 }
