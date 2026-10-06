@@ -315,6 +315,10 @@ impl Provider {
 impl Provider {
     /// Verifies the stored credentials against the live service.
     ///
+    /// For Google Play, `Ok` means the key works and the Play Developer
+    /// Reporting API is enabled; it does not guarantee the service account can
+    /// see any app yet (Play Console access can take hours to propagate).
+    ///
     /// # Errors
     /// [`StackError::Auth`] when the credentials are rejected (including App Store
     /// Connect "pending agreements"), or a transport/decoding error.

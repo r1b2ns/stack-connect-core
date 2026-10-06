@@ -1,10 +1,12 @@
 //! `stack_core` — shared Rust core for [stack-connect](../stack-connect).
 //!
-//! A multi-service hub: each external service (App Store Connect today; Firebase,
-//! Google Play, AWS, GitHub later) is a plugin implementing a uniform contract.
-//! The UniFFI facade exposes a stable surface — `available_services`,
-//! `credential_schema`, `connect` → `Provider` — that does not change as plugins
-//! are added. Consumed natively by iOS via UniFFI.
+//! A multi-service hub: each external service is a plugin implementing a uniform
+//! contract. App Store Connect and Google Play (connect + list apps) are in the
+//! core today; Firebase, AWS and GitHub may follow. The UniFFI facade exposes a
+//! stable surface — `available_services`, `credential_schema`, `connect` →
+//! `Provider` — that does not change as plugins are added. Consumed natively by
+//! iOS via UniFFI and by the Flutter apps via flutter_rust_bridge (`frb`
+//! feature).
 
 uniffi::setup_scaffolding!();
 

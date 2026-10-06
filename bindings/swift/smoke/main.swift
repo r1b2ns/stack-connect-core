@@ -12,20 +12,30 @@ func fail(_ msg: String) -> Never {
     exit(1)
 }
 
-// 1) Service registry crosses the FFI: App Store Connect is available.
+// 1) Service registry crosses the FFI: App Store Connect and Google Play are available.
 let services = availableServices()
 guard services.contains(.appStoreConnect) else {
     fail("availableServices() did not contain .appStoreConnect: \(services)")
 }
 print("ok: availableServices() contains .appStoreConnect")
+guard services.contains(.googlePlay) else {
+    fail("availableServices() did not contain .googlePlay: \(services)")
+}
+print("ok: availableServices() contains .googlePlay")
 
-// 2) Credential schema crosses the FFI with the expected App Store Connect fields.
+// 2) Credential schema crosses the FFI with the expected per-service fields.
 let schema = credentialSchema(kind: .appStoreConnect)
 let keys = schema.map { $0.key }
 guard keys == ["issuerId", "keyId", "privateKeyP8"] else {
     fail("credentialSchema keys mismatch, got: \(keys)")
 }
 print("ok: credentialSchema(.appStoreConnect) keys are \(keys)")
+
+let playKeys = credentialSchema(kind: .googlePlay).map { $0.key }
+guard playKeys == ["clientEmail", "privateKeyId", "privateKey"] else {
+    fail("credentialSchema(.googlePlay) keys mismatch, got: \(playKeys)")
+}
+print("ok: credentialSchema(.googlePlay) keys are \(playKeys)")
 
 // 3) Foreign-trait callback: while connecting, Rust calls back into the Swift
 //    CredentialStore. With no secrets stored, `connect` must throw
@@ -43,7 +53,7 @@ final class RecordingStore: CredentialStore, @unchecked Sendable {
 
 let store = RecordingStore()
 do {
-    _ = try connect(kind: .appStoreConnect, accountId: "acct-1", store: store)
+    _ = try connect(kind: .appStoreConnect, accountId: "acct-1", store: store, debugLogger: nil)
     fail("expected connect to throw on missing secret")
 } catch let error as StackError {
     guard case .InvalidCredentials = error else {

@@ -12,9 +12,18 @@ final class SmokeTests: XCTestCase {
         XCTAssertTrue(availableServices().contains(.appStoreConnect))
     }
 
+    func testGooglePlayIsAvailableAcrossFFI() {
+        XCTAssertTrue(availableServices().contains(.googlePlay))
+    }
+
     func testCredentialSchemaCrossesFFI() {
         let keys = credentialSchema(kind: .appStoreConnect).map { $0.key }
         XCTAssertEqual(keys, ["issuerId", "keyId", "privateKeyP8"])
+    }
+
+    func testGooglePlayCredentialSchemaCrossesFFI() {
+        let keys = credentialSchema(kind: .googlePlay).map { $0.key }
+        XCTAssertEqual(keys, ["clientEmail", "privateKeyId", "privateKey"])
     }
 
     func testRustCallsBackIntoSwiftCredentialStore() {
@@ -42,7 +51,7 @@ final class SmokeTests: XCTestCase {
         }
 
         let store = RecordingStore()
-        XCTAssertThrowsError(try connect(kind: .appStoreConnect, accountId: "acct-1", store: store)) { error in
+        XCTAssertThrowsError(try connect(kind: .appStoreConnect, accountId: "acct-1", store: store, debugLogger: nil)) { error in
             guard case StackError.InvalidCredentials = error else {
                 return XCTFail("expected .InvalidCredentials, got \(error)")
             }

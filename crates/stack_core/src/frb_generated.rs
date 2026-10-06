@@ -9065,6 +9065,7 @@ impl SseDecode for crate::service::kind::ServiceKind {
         let mut inner = <i32>::sse_decode(deserializer);
         return match inner {
             0 => crate::service::kind::ServiceKind::AppStoreConnect,
+            1 => crate::service::kind::ServiceKind::GooglePlay,
             _ => unreachable!("Invalid variant for ServiceKind: {}", inner),
         };
     }
@@ -11103,6 +11104,7 @@ impl flutter_rust_bridge::IntoDart for crate::service::kind::ServiceKind {
     fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
         match self {
             Self::AppStoreConnect => 0.into_dart(),
+            Self::GooglePlay => 1.into_dart(),
             _ => unreachable!(),
         }
     }
@@ -12701,6 +12703,7 @@ impl SseEncode for crate::service::kind::ServiceKind {
         <i32>::sse_encode(
             match self {
                 crate::service::kind::ServiceKind::AppStoreConnect => 0,
+                crate::service::kind::ServiceKind::GooglePlay => 1,
                 _ => {
                     unimplemented!("");
                 }

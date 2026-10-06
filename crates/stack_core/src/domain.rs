@@ -26,12 +26,18 @@ pub struct AccountExport {
 ///
 /// Serializes camelCase (`bundleId`, not `bundle_id`) so persisted blobs match the
 /// iOS-facing contract — see [`crate::service::sync::SyncService`].
+///
+/// Per service: App Store Connect sets `id` to the app's App Store Connect id
+/// and `bundle_id` to its bundle identifier. Google Play has no separate app id,
+/// so both `id` and `bundle_id` are the package name (e.g. `com.example.app`).
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, uniffi::Record)]
 #[serde(rename_all = "camelCase")]
 pub struct AppInfo {
     pub id: String,
     pub name: String,
     pub bundle_id: String,
+    /// The app's platform: `Some("ANDROID")` for Google Play apps, `None` for
+    /// App Store Connect apps (an ASC app can span several platforms).
     pub platform: Option<String>,
 }
 

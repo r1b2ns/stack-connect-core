@@ -31,11 +31,19 @@ pub trait BlobStore: Send + Sync {
 }
 
 /// Optional debug sink for HTTP tracing. When the host injects one (via
-/// `connect`), the App Store Connect client logs every request as a runnable
-/// cURL (headers + pretty-printed JSON body) and the response (status line +
-/// pretty-printed JSON). Off by default — the host only passes a logger when its
-/// debug launch flag is set. Implemented natively (the iOS app prints to the
-/// Xcode console) and injected across the FFI as a foreign trait.
+/// `connect`), every provider logs each request as a runnable cURL (headers +
+/// body, pretty-printed when JSON) and the response (status line +
+/// pretty-printed JSON): App Store Connect API calls, and for Google Play both
+/// the OAuth token exchange and every API call. Off by default — the host only
+/// passes a logger when its debug launch flag is set. Implemented natively (the
+/// iOS app prints to the Xcode console) and injected across the FFI as a foreign
+/// trait.
+///
+/// Nothing is redacted, so the log is sensitive: `Authorization` bearer tokens
+/// appear verbatim, and so does Google's signed JWT assertion in the token
+/// request body. Each grants API access until it expires (an assertion can be
+/// exchanged again for a fresh one-hour token until its own `exp`). Private keys
+/// never appear in any request.
 #[uniffi::export(with_foreign)]
 pub trait DebugLogger: Send + Sync {
     /// Emits one already-formatted, possibly multi-line debug message.

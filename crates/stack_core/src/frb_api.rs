@@ -84,7 +84,10 @@ use crate::service::sync::SyncService;
 /// ```
 /// # use stack_core::frb_api::available_services;
 /// # use stack_core::ServiceKind;
-/// assert_eq!(available_services(), vec![ServiceKind::AppStoreConnect]);
+/// assert_eq!(
+///     available_services(),
+///     vec![ServiceKind::AppStoreConnect, ServiceKind::GooglePlay]
+/// );
 /// ```
 #[flutter_rust_bridge::frb(sync)]
 pub fn available_services() -> Vec<ServiceKind> {
@@ -119,8 +122,13 @@ pub struct FrbCredential {
 /// Reads the secrets the Dart host supplies and builds a connected provider.
 ///
 /// Mirror of [`crate::facade::connect`]. Synchronous on purpose: it only wraps
-/// the supplied secrets and parses the key material — no network. The returned
+/// the supplied secrets and builds the provider — no network. The returned
 /// [`FrbProvider`] does the async work (`validate`, `fetch_apps`).
+///
+/// Key handling differs per service. App Store Connect keeps its `.p8` as-is
+/// and parses it on the first request. Google Play parses its private key here,
+/// including one local test signature, so a blank field or an unusable key is
+/// rejected at connect rather than on the first request.
 ///
 /// `debug_logger` is an async Dart closure invoked once per already-formatted
 /// HTTP trace line (runnable cURL request + response). It is gated by
@@ -138,7 +146,8 @@ pub struct FrbCredential {
 ///
 /// # Errors
 /// [`StackError::InvalidCredentials`] if a required secret is missing from
-/// `credentials`.
+/// `credentials`, or, for Google Play, if a field is blank or the private key is
+/// not a usable RSA key.
 pub fn connect(
     kind: ServiceKind,
     account_id: String,
@@ -409,6 +418,10 @@ impl FrbProvider {
     }
 
     /// Verifies the stored credentials against the live service.
+    ///
+    /// For Google Play, `Ok` means the key works and the Play Developer
+    /// Reporting API is enabled; it does not guarantee the service account can
+    /// see any app yet (Play Console access can take hours to propagate).
     ///
     /// # Errors
     /// [`StackError::PendingAgreements`] when App Store Connect reports pending
@@ -2990,8 +3003,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn available_services_returns_app_store_connect() {
-        assert_eq!(available_services(), vec![ServiceKind::AppStoreConnect]);
+    fn available_services_returns_every_service() {
+        assert_eq!(
+            available_services(),
+            vec![ServiceKind::AppStoreConnect, ServiceKind::GooglePlay]
+        );
     }
 
     /// The per-app scope (`appsBundles`) survives a full FRB round-trip:
@@ -3047,6 +3063,73 @@ mod tests {
         let schema = credential_schema(ServiceKind::AppStoreConnect);
         let keys: Vec<&str> = schema.iter().map(|f| f.key.as_str()).collect();
         assert_eq!(keys, vec!["issuerId", "keyId", "privateKeyP8"]);
+    }
+
+    #[test]
+    fn credential_schema_matches_registry_for_google_play() {
+        assert_eq!(
+            credential_schema(ServiceKind::GooglePlay),
+            registry::credential_schema(ServiceKind::GooglePlay)
+        );
+        let keys: Vec<String> = credential_schema(ServiceKind::GooglePlay)
+            .into_iter()
+            .map(|f| f.key)
+            .collect();
+        assert_eq!(keys, vec!["clientEmail", "privateKeyId", "privateKey"]);
+    }
+
+    const PLAY_PKCS8_PEM: &str = include_str!("../tests/fixtures/test_rsa_private_pkcs8.pem");
+
+    /// The three Google Play secrets as the Dart host would hand them over.
+    fn play_credentials() -> Vec<FrbCredential> {
+        [
+            ("clientEmail", "play-bot@my-project.iam.gserviceaccount.com"),
+            ("privateKeyId", "0123456789abcdef0123456789abcdef01234567"),
+            ("privateKey", PLAY_PKCS8_PEM),
+        ]
+        .into_iter()
+        .map(|(key, value)| FrbCredential {
+            key: key.to_string(),
+            value: value.to_string(),
+        })
+        .collect()
+    }
+
+    #[test]
+    fn connect_google_play_from_frb_credentials() {
+        // `FrbProvider` is not `Debug`, so match instead of `unwrap`.
+        let provider = match connect(
+            ServiceKind::GooglePlay,
+            "acct-1".to_string(),
+            play_credentials(),
+            false,
+            |_| Box::pin(async {}),
+        ) {
+            Ok(provider) => provider,
+            Err(err) => panic!("expected a Google Play provider, got {err:?}"),
+        };
+        assert_eq!(provider.kind(), ServiceKind::GooglePlay);
+        assert_eq!(provider.capabilities(), vec![Capability::Apps]);
+        assert!(provider.log_buffer.is_none());
+    }
+
+    #[test]
+    fn connect_google_play_missing_secret_is_invalid_credentials() {
+        let mut credentials = play_credentials();
+        credentials.retain(|c| c.key != "privateKey");
+
+        let result = connect(
+            ServiceKind::GooglePlay,
+            "acct-1".to_string(),
+            credentials,
+            false,
+            |_| Box::pin(async {}),
+        );
+        assert!(matches!(
+            result,
+            Err(StackError::InvalidCredentials { ref message })
+                if message == "missing credential: privateKey"
+        ));
     }
 
     #[test]
