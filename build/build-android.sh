@@ -16,10 +16,17 @@ cd "$(dirname "$0")/.."
 #   x86_64      -> x86_64-linux-android
 ABIS=(arm64-v8a armeabi-v7a x86_64)
 
-# Output: the Flutter app's jniLibs. The two repos are siblings today
-# (stack-connect-core and stack-connect). When stack-connect-core becomes a
-# submodule of stack-connect this relative path stays valid (../../...).
-JNI_LIBS="../stack-connect/flutter/apps/stack_mobile/android/app/src/main/jniLibs"
+# Output: the stack_mobile Flutter app's jniLibs. The Flutter apps live in the
+# sibling repo stack-connect-flutter (next to stack-connect-core). Override with
+# JNI_LIBS=/path/to/jniLibs; a relative path is resolved from this repo's root,
+# because the script cd's there above. jniLibs/ itself is created on demand, but
+# its parent (app/src/main) must already exist, so a wrong path fails instead of
+# creating directories in the wrong place.
+JNI_LIBS="${JNI_LIBS:-../stack-connect-flutter/apps/stack_mobile/android/app/src/main/jniLibs}"
+if [[ ! -d "$(dirname "$JNI_LIBS")" ]]; then
+  echo "error: $(dirname "$JNI_LIBS") not found; set JNI_LIBS to stack_mobile's jniLibs dir" >&2
+  exit 1
+fi
 
 # Release build: ~10x smaller .so than debug, and the host FRB build already
 # works in release. Drop --release below if you ever need faster iteration.

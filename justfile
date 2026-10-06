@@ -12,7 +12,8 @@ build *ARGS:
 build-xcframework:
     ./build/build-xcframework.sh
 
-# Build libstack_core.so (FRB) for Android and copy into the stack_mobile jniLibs.
+# Build libstack_core.so (FRB) for Android into stack_mobile's jniLibs in the sibling
+# stack-connect-flutter repo (override the output dir with JNI_LIBS=/path/to/jniLibs).
 build-android:
     ./build/build-android.sh
 
