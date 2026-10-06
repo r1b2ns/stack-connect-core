@@ -43,6 +43,9 @@ pub struct AppInfo {
 
 /// The developer's response attached to a [`CustomerReview`]. Dates are raw
 /// ISO8601 strings; the core does no date parsing (the host owns that).
+///
+/// Google Play replies have no id or state of their own: `id` repeats the
+/// review's opaque [`CustomerReview::id`] and `state` is always `None`.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, uniffi::Record)]
 pub struct ReviewResponse {
     pub id: String,
@@ -51,8 +54,14 @@ pub struct ReviewResponse {
     pub last_modified_date: Option<String>,
 }
 
-/// A single end-user App Store review, optionally with the developer's response.
+/// A single end-user store review, optionally with the developer's response.
 /// Dates are raw ISO8601 strings; the core does no date parsing.
+///
+/// Per service: for App Store Connect, `id` is the ASC review id. For Google
+/// Play, `id` is an opaque composite (`{packageName}/{reviewId}`) that the core
+/// needs to reply; hosts must treat every review id as opaque. Play has no
+/// territory (`territory` is `None`) and no creation date: `created_date`
+/// carries the last time the user wrote or edited the review.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, uniffi::Record)]
 pub struct CustomerReview {
     pub id: String,
@@ -67,7 +76,8 @@ pub struct CustomerReview {
 
 /// One page of customer reviews plus an opaque token to fetch the next page.
 /// `next_token` is `None` on the last page; otherwise pass it back verbatim as
-/// the next call's `page_token` (it is the JSON:API `links.next` URL).
+/// the next call's `page_token` (for App Store Connect it is the JSON:API
+/// `links.next` URL, for Google Play the API's `nextPageToken`).
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
 pub struct CustomerReviewsPage {
     pub reviews: Vec<CustomerReview>,
@@ -711,4 +721,77 @@ pub struct AnalyticsReportData {
     pub headers: Vec<String>,
     pub rows: Vec<Vec<String>>,
     pub row_count: u32,
+}
+
+/// An app's store contact details and default language, as Google Play keeps
+/// them (`edits.details`). `app_id` is the id the call was made with (for Google
+/// Play, the package name); every other field is `None` when the store has no
+/// value for it.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, uniffi::Record)]
+#[serde(rename_all = "camelCase")]
+pub struct AppDetailsInfo {
+    pub app_id: String,
+    /// BCP-47 language code of the default store listing (e.g. `en-US`).
+    pub default_language: Option<String>,
+    pub contact_email: Option<String>,
+    pub contact_phone: Option<String>,
+    pub contact_website: Option<String>,
+}
+
+/// One localized store listing of an app (Google Play `edits.listings`).
+/// `language` is the BCP-47 code that keys the listing (e.g. `de-AT`); `video`
+/// is the promotional YouTube URL. Text fields are `None` when the listing has
+/// no value for them.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, uniffi::Record)]
+#[serde(rename_all = "camelCase")]
+pub struct StoreListingInfo {
+    pub language: String,
+    pub title: Option<String>,
+    pub short_description: Option<String>,
+    pub full_description: Option<String>,
+    pub video: Option<String>,
+}
+
+/// A release track of an app (Google Play `edits.tracks`) with its releases.
+/// `track` is the raw track name (`production`, `beta`, `alpha`, `internal`, a
+/// custom closed-testing track, or a form-factor track such as
+/// `wear:production`). `releases` is empty for a track with no release.
+///
+/// Only `PartialEq` (not `Eq`): [`TrackReleaseInfo::user_fraction`] is a float.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize, uniffi::Record)]
+#[serde(rename_all = "camelCase")]
+pub struct TrackInfo {
+    pub track: String,
+    pub releases: Vec<TrackReleaseInfo>,
+}
+
+/// One release on a [`TrackInfo`], with the raw Google Play values passed
+/// through:
+///
+/// - `status`: `draft`, `inProgress` (staged rollout), `halted`, `completed`
+///   (or `statusUnspecified`); `None` when absent.
+/// - `version_codes`: the release's version codes as decimal strings (Play's
+///   int64 values; parse them with a 64-bit integer type).
+/// - `user_fraction`: the staged-rollout fraction in `(0, 1)`, set only while a
+///   rollout is `inProgress` or `halted`.
+/// - `release_notes`: the localized "What's new" texts.
+/// - `in_app_update_priority`: `0` to `5`, `None` when unset.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize, uniffi::Record)]
+#[serde(rename_all = "camelCase")]
+pub struct TrackReleaseInfo {
+    pub name: Option<String>,
+    pub status: Option<String>,
+    pub version_codes: Vec<String>,
+    pub user_fraction: Option<f64>,
+    pub release_notes: Vec<LocalizedTextInfo>,
+    pub in_app_update_priority: Option<i32>,
+}
+
+/// A text in one language, e.g. a release note. `language` is a BCP-47 code.
+/// Google omits empty strings from its JSON, so an absent value is `""`.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, uniffi::Record)]
+#[serde(rename_all = "camelCase")]
+pub struct LocalizedTextInfo {
+    pub language: String,
+    pub text: String,
 }

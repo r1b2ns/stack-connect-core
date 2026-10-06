@@ -2,15 +2,21 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 use serde::Deserialize;
+use tokio::sync::Mutex;
 
-use super::error::map_google_error;
+use super::error::{map_google_error, ErrorHints};
 use crate::auth::oauth_jwt::ServiceAccountAuthenticator;
 use crate::domain::AppInfo;
 use crate::error::StackError;
 use crate::http_debug::send_and_read;
 use crate::ports::DebugLogger;
 
-const DEFAULT_BASE_URL: &str = "https://playdeveloperreporting.googleapis.com";
+/// Play Developer Reporting API: lists apps (`apps:search`).
+const DEFAULT_REPORTING_BASE_URL: &str = "https://playdeveloperreporting.googleapis.com";
+/// Google Play Android Developer API (androidpublisher): reviews and edits.
+const DEFAULT_PUBLISHER_BASE_URL: &str = "https://androidpublisher.googleapis.com";
+/// Path segments from the Android Publisher host to the per-app resources.
+const PUBLISHER_APPLICATIONS_PATH: [&str; 3] = ["androidpublisher", "v3", "applications"];
 /// The only endpoint that lists a Play account's apps.
 const APPS_SEARCH_PATH: &str = "/v1beta1/apps:search";
 /// `validate` only needs to know the call is authorized.
@@ -73,11 +79,56 @@ impl ReportingApp {
     }
 }
 
-/// Minimal Google Play client: validate credentials and list apps through the
-/// Play Developer Reporting API. `base_url` is injectable so tests can point it
-/// at a mock server.
+/// Whether `name` is a valid Android application id (package name): at least
+/// two `.`-separated segments, each starting with an ASCII letter and made only
+/// of ASCII letters, digits and `_`. These are the rules Android itself applies
+/// (`PackageParser.validateName`), so no Play app can have any other name.
+pub(super) fn is_valid_package_name(name: &str) -> bool {
+    let mut segments = 0;
+    for segment in name.split('.') {
+        let mut chars = segment.chars();
+        if !chars.next().is_some_and(|c| c.is_ascii_alphabetic()) {
+            return false;
+        }
+        if !chars.all(|c| c.is_ascii_alphanumeric() || c == '_') {
+            return false;
+        }
+        segments += 1;
+    }
+    segments >= 2
+}
+
+/// Rejects a package name no Play app can have, before any request is sent.
+///
+/// Reported as [`StackError::Http`] `404` — the answer Google gives for a
+/// package it does not know — so hosts handle "no such app" in one place; the
+/// message says the check was local. It also keeps URL building safe: `""`,
+/// `.`, `..` or a `/` can never reach a path segment.
+fn ensure_package_name(name: &str) -> Result<(), StackError> {
+    if is_valid_package_name(name) {
+        return Ok(());
+    }
+    Err(StackError::Http {
+        status: 404,
+        message: format!(
+            "{name:?} is not a valid Android package name, so no Google Play app can \
+             have it (checked locally; nothing was sent to Google)."
+        ),
+    })
+}
+
+/// Google Play client: the shared transport (bearer token, one retry on 401,
+/// debug tracing, error mapping) plus the Reporting API calls that validate
+/// credentials and list apps. Reviews and edit-based reads live in sibling
+/// modules (`reviews`, `edits`) as further `impl` blocks over the `pub(super)`
+/// helpers here.
+///
+/// Both base URLs are injectable so tests can point them at a mock server.
 pub(crate) struct GooglePlayClient {
-    base_url: String,
+    /// Play Developer Reporting API base (`apps:search`).
+    reporting_base_url: String,
+    /// Android Publisher API base (reviews, edits).
+    publisher_base_url: String,
     /// Shared with the authenticator (one connection pool, one set of timeouts).
     http: reqwest::Client,
     auth: ServiceAccountAuthenticator,
@@ -85,23 +136,35 @@ pub(crate) struct GooglePlayClient {
     /// [`Self::with_debug_logger`], which also hands it to the authenticator so
     /// the token exchange is traced too.
     debug_logger: Option<Arc<dyn DebugLogger>>,
+    /// Serializes edit sessions: Google keeps one open edit per service account
+    /// and app, and opening one invalidates the previous one, so two
+    /// concurrent edit-based reads through this client would break each other.
+    edit_lock: Mutex<()>,
 }
 
 impl GooglePlayClient {
     pub(crate) fn new(auth: ServiceAccountAuthenticator, http: reqwest::Client) -> Self {
-        Self::with_base_url(auth, http, DEFAULT_BASE_URL.to_string())
+        Self::with_base_urls(
+            auth,
+            http,
+            DEFAULT_REPORTING_BASE_URL.to_string(),
+            DEFAULT_PUBLISHER_BASE_URL.to_string(),
+        )
     }
 
-    pub(crate) fn with_base_url(
+    pub(crate) fn with_base_urls(
         auth: ServiceAccountAuthenticator,
         http: reqwest::Client,
-        base_url: String,
+        reporting_base_url: String,
+        publisher_base_url: String,
     ) -> Self {
         Self {
-            base_url: base_url.trim_end_matches('/').to_string(),
+            reporting_base_url: reporting_base_url.trim_end_matches('/').to_string(),
+            publisher_base_url: publisher_base_url.trim_end_matches('/').to_string(),
             http,
             auth,
             debug_logger: None,
+            edit_lock: Mutex::new(()),
         }
     }
 
@@ -113,8 +176,62 @@ impl GooglePlayClient {
         self
     }
 
-    /// One `GET {base}/v1beta1/apps:search?pageSize=…[&pageToken=…]`, returning
-    /// the 2xx body. The token goes through `.query()`, so it is URL-encoded.
+    /// The shared HTTP client, for building requests passed to
+    /// [`Self::execute`].
+    pub(super) fn http(&self) -> &reqwest::Client {
+        &self.http
+    }
+
+    /// The lock every edit session holds from insert to delete.
+    pub(super) fn edit_lock(&self) -> &Mutex<()> {
+        &self.edit_lock
+    }
+
+    /// Writes `message()` to the debug logger, if one is attached. Lazy, so
+    /// nothing is formatted without a logger.
+    pub(super) fn trace(&self, message: impl FnOnce() -> String) {
+        if let Some(logger) = &self.debug_logger {
+            logger.log(message());
+        }
+    }
+
+    /// `{publisher}/androidpublisher/v3/applications/{package_name}/{segments…}`.
+    /// Every segment is percent-encoded on its own, so a `/`, `?` or `#` inside
+    /// one cannot change the path.
+    ///
+    /// # Errors
+    /// [`StackError::Http`] `404` for an invalid package name (see
+    /// [`is_valid_package_name`]), [`StackError::Decode`] for a blank, `.` or
+    /// `..` segment (only an id Google returned can produce one), or
+    /// [`StackError::Network`] if the base URL is not a valid URL.
+    pub(super) fn publisher_url(
+        &self,
+        package_name: &str,
+        segments: &[&str],
+    ) -> Result<reqwest::Url, StackError> {
+        ensure_package_name(package_name)?;
+        // The URL parser would drop a `.`/`..` segment and keep an empty one,
+        // silently addressing another resource.
+        if let Some(bad) = segments.iter().find(|s| matches!(**s, "" | "." | "..")) {
+            return Err(StackError::decode(format!(
+                "unusable Google Play resource id {bad:?}"
+            )));
+        }
+
+        let mut url = reqwest::Url::parse(&self.publisher_base_url)
+            .map_err(|e| StackError::network(format!("invalid Google Play API URL: {e}")))?;
+        url.path_segments_mut()
+            .map_err(|()| StackError::network("invalid Google Play API URL: not a base URL"))?
+            .pop_if_empty()
+            .extend(PUBLISHER_APPLICATIONS_PATH)
+            .push(package_name)
+            .extend(segments);
+        Ok(url)
+    }
+
+    /// Sends the request `build` makes, authorized with the cached bearer
+    /// token, and returns the 2xx body. `build` is called again for the retry,
+    /// so it must not consume anything.
     ///
     /// On a 401 the cached access token is dropped and the call retried once
     /// with a fresh one: Google decides token validity server-side, so a cached
@@ -122,16 +239,19 @@ impl GooglePlayClient {
     ///
     /// # Errors
     /// The authenticator's errors, [`StackError::Network`] on transport failure,
-    /// or [`map_google_error`] for a non-2xx response.
-    async fn search_apps(
+    /// or [`map_google_error`] (with `hints`) for a non-2xx response.
+    pub(super) async fn execute<F>(
         &self,
-        page_size: u32,
-        page_token: Option<&str>,
-    ) -> Result<String, StackError> {
-        let (mut status, mut body) = self.send_search(page_size, page_token).await?;
+        build: F,
+        hints: &ErrorHints<'_>,
+    ) -> Result<String, StackError>
+    where
+        F: Fn() -> reqwest::RequestBuilder + Send + Sync,
+    {
+        let (mut status, mut body) = self.send_authorized(&build).await?;
         if status == reqwest::StatusCode::UNAUTHORIZED {
             self.auth.invalidate().await;
-            (status, body) = self.send_search(page_size, page_token).await?;
+            (status, body) = self.send_authorized(&build).await?;
         }
 
         if status.is_success() {
@@ -141,25 +261,45 @@ impl GooglePlayClient {
             status.as_u16(),
             &body,
             self.auth.client_email(),
+            hints,
         ))
     }
 
-    /// Sends one `apps:search` request with the current bearer token.
-    async fn send_search(
+    /// Sends one request built by `build` with the current bearer token.
+    async fn send_authorized<F>(
+        &self,
+        build: &F,
+    ) -> Result<(reqwest::StatusCode, String), StackError>
+    where
+        F: Fn() -> reqwest::RequestBuilder + Send + Sync,
+    {
+        let token = self.auth.bearer_token().await?;
+        send_and_read(build().bearer_auth(token), self.debug_logger.as_deref()).await
+    }
+
+    /// One `GET {reporting}/v1beta1/apps:search?pageSize=…[&pageToken=…]`,
+    /// returning the 2xx body. The token goes through `.query()`, so it is
+    /// URL-encoded.
+    ///
+    /// # Errors
+    /// See [`Self::execute`].
+    async fn search_apps(
         &self,
         page_size: u32,
         page_token: Option<&str>,
-    ) -> Result<(reqwest::StatusCode, String), StackError> {
-        let token = self.auth.bearer_token().await?;
-        let mut request = self
-            .http
-            .get(format!("{}{APPS_SEARCH_PATH}", self.base_url))
-            .bearer_auth(token)
-            .query(&[("pageSize", page_size)]);
-        if let Some(page_token) = page_token {
-            request = request.query(&[("pageToken", page_token)]);
-        }
-        send_and_read(request, self.debug_logger.as_deref()).await
+    ) -> Result<String, StackError> {
+        let url = format!("{}{APPS_SEARCH_PATH}", self.reporting_base_url);
+        self.execute(
+            || {
+                let request = self.http.get(&url).query(&[("pageSize", page_size)]);
+                match page_token {
+                    Some(page_token) => request.query(&[("pageToken", page_token)]),
+                    None => request,
+                }
+            },
+            &ErrorHints::REPORTING,
+        )
+        .await
     }
 
     /// Cheap credential check: a token exchange, then
@@ -168,7 +308,8 @@ impl GooglePlayClient {
     /// `Ok` means the key works and the Reporting API is enabled and answering.
     /// It does **not** mean any app is visible yet: a service account that was
     /// never invited in Play Console, or whose invite is still propagating, may
-    /// get an empty `{}`.
+    /// get an empty `{}`. Nor does it check the Android Publisher API (reviews,
+    /// details, listings, tracks), which must be enabled separately.
     ///
     /// # Errors
     /// [`StackError::Auth`] when the key or the account's access is rejected,
@@ -231,46 +372,16 @@ impl GooglePlayClient {
 mod tests {
     use super::*;
     use crate::auth::oauth_jwt::ServiceAccountKey;
+    use crate::providers::googleplay::test_support::{
+        client, mount_token, CapturingLogger, EMAIL, KID, PKCS8_PEM,
+    };
     use crate::providers::googleplay::PLAY_SCOPES;
     use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::sync::Mutex;
     use wiremock::matchers::{bearer_token, method, path, query_param, query_param_is_missing};
     use wiremock::{Mock, MockServer, Request, Respond, ResponseTemplate};
 
-    const PKCS8_PEM: &str = include_str!("../../../tests/fixtures/test_rsa_private_pkcs8.pem");
-    const EMAIL: &str = "play-bot@my-project.iam.gserviceaccount.com";
-    const KID: &str = "0123456789abcdef0123456789abcdef01234567";
-
     /// The real SERVICE_DISABLED 403 (same capture as the `error` tests).
     const SERVICE_DISABLED_BODY: &str = r#"{"error":{"code":403,"message":"Google Play Developer Reporting API has not been used in project 764216752430 before or it is disabled.","status":"PERMISSION_DENIED","details":[{"@type":"type.googleapis.com/google.rpc.ErrorInfo","reason":"SERVICE_DISABLED","domain":"googleapis.com","metadata":{"service":"playdeveloperreporting.googleapis.com","consumer":"projects/764216752430","containerInfo":"764216752430","serviceTitle":"Google Play Developer Reporting API","activationUrl":"https://console.developers.google.com/apis/api/playdeveloperreporting.googleapis.com/overview?project=764216752430"}}]}}"#;
-
-    /// A client whose authenticator posts to `{server}/token` and whose
-    /// `apps:search` calls go to the same mock server.
-    fn client(server: &MockServer) -> GooglePlayClient {
-        let http = reqwest::Client::new();
-        let key = ServiceAccountKey::parse(EMAIL, KID, PKCS8_PEM).unwrap();
-        let auth = ServiceAccountAuthenticator::with_token_url(
-            key,
-            PLAY_SCOPES,
-            http.clone(),
-            format!("{}/token", server.uri()),
-        );
-        GooglePlayClient::with_base_url(auth, http, server.uri())
-    }
-
-    /// Mounts a token endpoint answering `token`, expected `times` times.
-    async fn mount_token(server: &MockServer, token: &str, times: u64) {
-        Mock::given(method("POST"))
-            .and(path("/token"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "access_token": token,
-                "expires_in": 3600,
-                "token_type": "Bearer"
-            })))
-            .expect(times)
-            .mount(server)
-            .await;
-    }
 
     fn search() -> wiremock::MockBuilder {
         Mock::given(method("GET")).and(path("/v1beta1/apps:search"))
@@ -290,23 +401,6 @@ mod tests {
             name: name.into(),
             bundle_id: package.into(),
             platform: Some("ANDROID".into()),
-        }
-    }
-
-    #[derive(Default)]
-    struct CapturingLogger {
-        messages: Mutex<Vec<String>>,
-    }
-
-    impl CapturingLogger {
-        fn messages(&self) -> Vec<String> {
-            self.messages.lock().unwrap().clone()
-        }
-    }
-
-    impl DebugLogger for CapturingLogger {
-        fn log(&self, message: String) {
-            self.messages.lock().unwrap().push(message);
         }
     }
 
@@ -942,7 +1036,7 @@ mod tests {
 
     #[tokio::test]
     async fn no_logger_by_default_works_without_tracing() {
-        // `client(..)` uses `with_base_url`, whose `debug_logger` defaults to
+        // `client(..)` uses `with_base_urls`, whose `debug_logger` defaults to
         // None (the authenticator's too): the calls succeed with nowhere to log.
         let server = MockServer::start().await;
         mount_token(&server, "tok-1", 1).await;
@@ -958,24 +1052,152 @@ mod tests {
         assert_eq!(client.fetch_apps().await.unwrap().len(), 1);
     }
 
+    /// A client that never touches the network, for URL-building tests.
+    fn offline_client(reporting: &str, publisher: &str) -> GooglePlayClient {
+        let http = reqwest::Client::new();
+        let key = ServiceAccountKey::parse(EMAIL, KID, PKCS8_PEM).unwrap();
+        let auth = ServiceAccountAuthenticator::new(key, PLAY_SCOPES, http.clone());
+        GooglePlayClient::with_base_urls(auth, http, reporting.into(), publisher.into())
+    }
+
     #[test]
-    fn new_targets_reporting_api() {
+    fn new_targets_reporting_and_publisher_apis() {
         let http = reqwest::Client::new();
         let key = ServiceAccountKey::parse(EMAIL, KID, PKCS8_PEM).unwrap();
         let auth = ServiceAccountAuthenticator::new(key, PLAY_SCOPES, http.clone());
         let client = GooglePlayClient::new(auth, http);
         assert_eq!(
-            client.base_url,
+            client.reporting_base_url,
             "https://playdeveloperreporting.googleapis.com"
+        );
+        assert_eq!(
+            client.publisher_base_url,
+            "https://androidpublisher.googleapis.com"
         );
     }
 
     #[test]
-    fn with_base_url_trims_trailing_slash() {
-        let http = reqwest::Client::new();
-        let key = ServiceAccountKey::parse(EMAIL, KID, PKCS8_PEM).unwrap();
-        let auth = ServiceAccountAuthenticator::new(key, PLAY_SCOPES, http.clone());
-        let client = GooglePlayClient::with_base_url(auth, http, "http://mock.test/".into());
-        assert_eq!(client.base_url, "http://mock.test");
+    fn with_base_urls_trims_trailing_slashes() {
+        let client = offline_client("http://reporting.test/", "http://publisher.test//");
+        assert_eq!(client.reporting_base_url, "http://reporting.test");
+        assert_eq!(client.publisher_base_url, "http://publisher.test");
+    }
+
+    // -----------------------------------------------------------------------
+    // Package names and publisher URLs
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn package_name_rules_follow_android() {
+        for valid in [
+            "com.example.app",
+            "a.b",
+            "Com.Example_1.App2",
+            "com.example.app_",
+            "x1.y_2.z3",
+        ] {
+            assert!(is_valid_package_name(valid), "{valid} should be valid");
+        }
+        for invalid in [
+            "",
+            "com",
+            ".",
+            "..",
+            "com.",
+            ".com",
+            "com..example",
+            "1com.example",
+            "com.1example",
+            "_com.example",
+            "com.exa-mple",
+            "com.example/app",
+            "com.example app",
+            "com.exämple",
+            " com.example",
+        ] {
+            assert!(
+                !is_valid_package_name(invalid),
+                "{invalid:?} should be invalid"
+            );
+        }
+    }
+
+    #[test]
+    fn publisher_url_appends_encoded_segments() {
+        let client = offline_client("http://reporting.test", "http://publisher.test");
+        let url = client
+            .publisher_url("com.example.app", &["reviews", "gp:AOqp/T?#%:reply"])
+            .unwrap();
+        assert_eq!(
+            url.as_str(),
+            "http://publisher.test/androidpublisher/v3/applications/com.example.app/\
+             reviews/gp:AOqp%2FT%3F%23%25:reply"
+        );
+
+        let bare = client.publisher_url("com.example.app", &[]).unwrap();
+        assert_eq!(
+            bare.as_str(),
+            "http://publisher.test/androidpublisher/v3/applications/com.example.app"
+        );
+    }
+
+    #[test]
+    fn publisher_url_keeps_a_base_path() {
+        let client = offline_client("http://reporting.test", "http://proxy.test/google");
+        let url = client.publisher_url("com.example.app", &["edits"]).unwrap();
+        assert_eq!(
+            url.as_str(),
+            "http://proxy.test/google/androidpublisher/v3/applications/com.example.app/edits"
+        );
+    }
+
+    #[test]
+    fn publisher_url_rejects_invalid_package_as_local_404() {
+        let client = offline_client("http://reporting.test", "http://publisher.test");
+        for package in ["", "..", "com.example/../other.app", "not-a-package"] {
+            match client.publisher_url(package, &["reviews"]).unwrap_err() {
+                StackError::Http { status, message } => {
+                    assert_eq!(status, 404);
+                    assert!(message.contains("is not a valid Android package name"));
+                    assert!(message.contains("nothing was sent to Google"));
+                }
+                other => panic!("expected Http 404 for {package:?}, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn publisher_url_rejects_dot_and_blank_segments() {
+        let client = offline_client("http://reporting.test", "http://publisher.test");
+        for segment in ["", ".", ".."] {
+            match client
+                .publisher_url("com.example.app", &["edits", segment])
+                .unwrap_err()
+            {
+                StackError::Decode { message } => {
+                    assert!(message.contains("unusable Google Play resource id"))
+                }
+                other => panic!("expected Decode for {segment:?}, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn publisher_url_with_invalid_base_is_network() {
+        let client = offline_client("http://reporting.test", "not a url");
+        let err = client.publisher_url("com.example.app", &[]).unwrap_err();
+        assert!(matches!(err, StackError::Network { .. }));
+    }
+
+    #[test]
+    fn trace_is_lazy_and_needs_a_logger() {
+        let client = offline_client("http://reporting.test", "http://publisher.test");
+        // No logger: the closure must not even run.
+        client.trace(|| panic!("formatted without a logger"));
+
+        let logger = Arc::new(CapturingLogger::default());
+        let client = client.with_debug_logger(Some(logger.clone()));
+        client.trace(|| "hello".to_string());
+        assert_eq!(logger.messages(), vec!["hello".to_string()]);
     }
 }

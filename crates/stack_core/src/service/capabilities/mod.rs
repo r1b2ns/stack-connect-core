@@ -10,6 +10,7 @@
 
 pub(crate) mod accessibility_declarations;
 pub(crate) mod analytics;
+pub(crate) mod app_details;
 pub(crate) mod app_metadata;
 pub(crate) mod app_store_versions;
 pub(crate) mod beta_app_localizations;
@@ -22,4 +23,6 @@ pub(crate) mod certificates;
 pub(crate) mod devices;
 pub(crate) mod profiles;
 pub(crate) mod reviews;
+pub(crate) mod store_listings;
+pub(crate) mod tracks;
 pub(crate) mod users;

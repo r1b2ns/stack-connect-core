@@ -142,16 +142,29 @@ fn connect_google_play_rejects_malformed_key() {
 }
 
 #[test]
-fn connect_google_play_reports_kind_and_apps_only() {
+fn connect_google_play_reports_kind_and_capabilities() {
     let provider = match connect_play(PLAY_PKCS8_PEM) {
         Ok(provider) => provider,
         Err(err) => panic!("expected a Google Play provider, got {err:?}"),
     };
 
     assert_eq!(provider.kind(), ServiceKind::GooglePlay);
-    assert_eq!(provider.capabilities(), vec![Capability::Apps]);
-    // First slice: every capability sub-object is absent.
-    assert!(provider.reviews().is_none());
+    assert_eq!(
+        provider.capabilities(),
+        vec![
+            Capability::Apps,
+            Capability::Reviews,
+            Capability::AppDetails,
+            Capability::StoreListings,
+            Capability::Tracks,
+        ]
+    );
+    // The Play handles are present ...
+    assert!(provider.reviews().is_some());
+    assert!(provider.app_details().is_some());
+    assert!(provider.store_listings().is_some());
+    assert!(provider.tracks().is_some());
+    // ... and every App Store Connect-only one is absent.
     assert!(provider.app_store_versions().is_none());
     assert!(provider.builds().is_none());
     assert!(provider.beta_groups().is_none());

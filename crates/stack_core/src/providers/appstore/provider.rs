@@ -1371,6 +1371,23 @@ mod tests {
     }
 
     #[test]
+    fn lacks_the_google_play_only_capabilities() {
+        // The Play-shaped capabilities stay off App Store Connect: not
+        // advertised, and their accessors keep the trait's `None` default.
+        let p = provider();
+        for capability in [
+            Capability::AppDetails,
+            Capability::StoreListings,
+            Capability::Tracks,
+        ] {
+            assert!(!p.capabilities().contains(&capability), "{capability:?}");
+        }
+        assert!(p.app_details().is_none());
+        assert!(p.store_listings().is_none());
+        assert!(p.tracks().is_none());
+    }
+
+    #[test]
     fn exposes_reviews_capability_handle() {
         // App Store Connect supports Reviews, so the accessor must return `Some`.
         // (Appstore is the only provider today; a `None` provider cannot yet be

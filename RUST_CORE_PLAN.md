@@ -272,6 +272,34 @@ becomes a problem.
   `StackError` variants (no new variant). Pending: host integration (iOS, Flutter), the
   `.scexport` conversion between iOS's `serviceAccountJSON` blob and the three fields, and
   further capabilities (reviews, tracks/releases).
+- **Google Play — reviews + read-only app detail (Phase 3, core side). ✅ IN THE CORE.**
+  `capabilities() == [Apps, Reviews, AppDetails, StoreListings, Tracks]`; the three new
+  `Capability` variants are appended (position-encoded in both bindings), and App Store
+  Connect is unchanged. All calls go to the Android Publisher API (`androidpublisher` v3),
+  which must be enabled next to the Reporting API.
+  - `Reviews` reuses the generic capability: list (`tokenPagination`, bounded to 100 pages),
+    one page (no server-side sort/filter: `sort` ∈ {`""`, `-createdDate`} else
+    `Unsupported`; `filter_rating` applied to each fetched page; `limit` clamped to
+    1–100), and reply (`reviews/{id}:reply`, no local length check). `CustomerReview.id`
+    is the opaque composite `{packageName}/{reviewId}`. Reply deletion and review
+    submissions are `Unsupported`. Google only serves reviews created or modified in the
+    last week, with a comment, for production versions.
+  - `AppDetails` / `StoreListings` / `Tracks` read `edits.details` / `edits.listings` /
+    `edits.tracks` through one edit-session helper (insert → read → always delete, best
+    effort, the read's error wins, never commit), serialized per client. Opening an edit
+    invalidates any other open edit of the same service account and app (documented
+    side effect). `fetch_app_details` doubles as the access check for a manually added
+    package: `Http 404` = unknown package (also returned locally for a name that breaks
+    Android's rules), `Auth` = no access or API disabled.
+  - Error mapping gained per-call hints (API, Play Console permission, target app): a
+    401 `permissionDenied` reads as "no access", and a 404 on an app-level call names
+    the package.
+  - Pending: writes (store listing updates, rollout/track changes, all via
+    `edits.commit`); `CustomerReview` extra Play fields (app version, device, reviewer
+    language) and `TrackReleaseInfo.countryTargeting`; FRB wrappers for `AppDetails` /
+    `StoreListings` / `Tracks` (Play reviews already reach Dart through `FrbReviews`);
+    `translationLanguage` for reviews; live verification of which Play Console permission
+    `edits.insert` requires for read-only use.
 
 > **Out of scope (for now): Firebase.** It is **not** being migrated to the core at this
 > time — it remains implemented **natively in the iOS app** (`APIProviderFirebase`). If it

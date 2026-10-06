@@ -3109,7 +3109,18 @@ mod tests {
             Err(err) => panic!("expected a Google Play provider, got {err:?}"),
         };
         assert_eq!(provider.kind(), ServiceKind::GooglePlay);
-        assert_eq!(provider.capabilities(), vec![Capability::Apps]);
+        assert_eq!(
+            provider.capabilities(),
+            vec![
+                Capability::Apps,
+                Capability::Reviews,
+                Capability::AppDetails,
+                Capability::StoreListings,
+                Capability::Tracks,
+            ]
+        );
+        // Play reviews reach Dart through the existing `FrbReviews` handle.
+        assert!(provider.reviews().is_some());
         assert!(provider.log_buffer.is_none());
     }
 
