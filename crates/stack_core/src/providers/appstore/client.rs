@@ -20,6 +20,7 @@ use crate::domain::{
     ReviewResponse, ReviewSubmission, ScreenshotInfo, ScreenshotSetInfo, TeamMemberInfo, UserInfo,
 };
 use crate::error::StackError;
+use crate::http_debug::render_response;
 use crate::ports::DebugLogger;
 
 const DEFAULT_BASE_URL: &str = "https://api.appstoreconnect.apple.com";
@@ -2485,8 +2486,9 @@ impl AppStoreClient {
     /// cURL (with pretty-printed JSON body) before sending and the response
     /// (status + pretty-printed JSON body) after.
     ///
-    /// This is the single choke point every HTTP call routes through, so logging
-    /// lives in one place and the send/read boilerplate is not duplicated.
+    /// Every HTTP call this client makes routes through here, which delegates to
+    /// the crate-wide [`crate::http_debug::send_and_read`] so logging lives in one
+    /// place and the send/read boilerplate is not duplicated.
     ///
     /// # Errors
     /// [`StackError::Network`] on transport failure (sending or reading the body)
@@ -2495,29 +2497,7 @@ impl AppStoreClient {
         &self,
         builder: reqwest::RequestBuilder,
     ) -> Result<(reqwest::StatusCode, String), StackError> {
-        if let Some(logger) = &self.debug_logger {
-            // `try_clone` fails only for streaming bodies; the client uses
-            // in-memory `.json()`/empty bodies, so this clones in practice.
-            if let Some(req) = builder.try_clone().and_then(|b| b.build().ok()) {
-                logger.log(render_curl(&req));
-            }
-        }
-
-        let response = builder
-            .send()
-            .await
-            .map_err(|e| StackError::network(e.to_string()))?;
-        let status = response.status();
-        let body = response
-            .text()
-            .await
-            .map_err(|e| StackError::network(e.to_string()))?;
-
-        if let Some(logger) = &self.debug_logger {
-            logger.log(render_response(status, &body));
-        }
-
-        Ok((status, body))
+        crate::http_debug::send_and_read(builder, self.debug_logger.as_deref()).await
     }
 
     /// Cheap credential check: `GET /v1/apps?limit=1`.
@@ -5870,7 +5850,8 @@ impl AppStoreClient {
     /// Performs a single pre-signed chunk upload described by `op`, sending
     /// `chunk` as the request body.
     ///
-    /// Unlike [`Self::send_and_read`], this deliberately bypasses `render_curl`:
+    /// Unlike [`Self::send_and_read`], this deliberately bypasses
+    /// [`render_curl`](crate::http_debug::render_curl):
     /// the body is raw binary image data, so routing it through the pretty-JSON
     /// logger would dump megabytes of lossy UTF-8 into the debug log. Instead,
     /// when a debug logger is present a single redacted line records the method,
@@ -7756,37 +7737,6 @@ impl AppStoreClient {
     }
 }
 
-/// Renders a `reqwest::Request` as a runnable, multi-line cURL command for the
-/// debug logger: the method/URL, one `-H` line per header (in reqwest's stored
-/// order, Authorization included verbatim — this is an opt-in, debug-only sink),
-/// and a `-d` line carrying the pretty-printed JSON body when one is present.
-fn render_curl(req: &reqwest::Request) -> String {
-    let mut out = format!(
-        "[RustCore] → request\n→ curl -X {} '{}'",
-        req.method(),
-        req.url()
-    );
-
-    for (name, value) in req.headers() {
-        let value = value.to_str().unwrap_or("<non-utf8>");
-        out.push_str(&format!(" \\\n  -H '{name}: {value}'"));
-    }
-
-    if let Some(bytes) = req.body().and_then(reqwest::Body::as_bytes) {
-        if !bytes.is_empty() {
-            out.push_str(&format!(" \\\n  -d '{}'", pretty_json(bytes)));
-        }
-    }
-
-    out
-}
-
-/// Renders a response status line plus its body (pretty-printed when the body is
-/// JSON, raw otherwise) for the debug logger.
-fn render_response(status: reqwest::StatusCode, body: &str) -> String {
-    format!("[RustCore] ← {status}\n{}", pretty_json(body.as_bytes()))
-}
-
 /// Computes the MD5 of `data`, returning it as a lowercase hex string. Used as
 /// the `sourceFileChecksum` when committing an uploaded screenshot. The 16-byte
 /// digest is hex-encoded inline (`{:02x}`) to avoid pulling in a hex crate.
@@ -7799,15 +7749,6 @@ fn md5_hex(data: &[u8]) -> String {
         let _ = write!(hex, "{byte:02x}");
     }
     hex
-}
-
-/// Pretty-prints `bytes` as JSON; on any parse/serialize failure falls back to
-/// the lossy UTF-8 of the raw bytes. Never panics.
-fn pretty_json(bytes: &[u8]) -> String {
-    serde_json::from_slice::<serde_json::Value>(bytes)
-        .ok()
-        .and_then(|v| serde_json::to_string_pretty(&v).ok())
-        .unwrap_or_else(|| String::from_utf8_lossy(bytes).into_owned())
 }
 
 /// Detects an App Store Connect "pending agreements" 403 from a non-2xx
@@ -14517,16 +14458,6 @@ mod tests {
         // `client(..)` uses `with_base_url`, whose `debug_logger` defaults to None.
         let apps = client(server.uri()).fetch_apps().await.unwrap();
         assert_eq!(apps.len(), 1);
-    }
-
-    #[test]
-    fn pretty_json_falls_back_to_raw_for_non_json() {
-        // Non-JSON bytes must not panic and must round-trip as lossy UTF-8.
-        assert_eq!(pretty_json(b"not json"), "not json");
-        // Valid JSON is re-rendered in pretty (multi-line) form.
-        let pretty = pretty_json(br#"{"a":1}"#);
-        assert!(pretty.contains("\"a\": 1"));
-        assert!(pretty.contains('\n'));
     }
 
     // -----------------------------------------------------------------------

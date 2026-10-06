@@ -12,6 +12,7 @@ mod auth;
 mod domain;
 mod error;
 mod facade;
+mod http_debug;
 mod ports;
 mod providers;
 mod service;

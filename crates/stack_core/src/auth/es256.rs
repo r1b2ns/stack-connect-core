@@ -1,9 +1,8 @@
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
-
 use jsonwebtoken::{encode, Algorithm, EncodingKey, Header};
 use serde::Serialize;
 use tokio::sync::Mutex;
 
+use super::token::{needs_refresh, unix_now, CachedToken};
 use crate::error::StackError;
 
 /// App Store Connect requires `aud = "appstoreconnect-v1"`.
@@ -11,9 +10,6 @@ const AUDIENCE: &str = "appstoreconnect-v1";
 /// Token lifetime. Apple rejects tokens expiring more than 20 minutes out, so we
 /// stay safely under the cap (matches the Swift SDK's recommended 20-minute max).
 const TTL_SECS: i64 = 1200;
-/// Regenerate this long before `exp` to avoid handing out a token that expires
-/// mid-flight.
-const REFRESH_MARGIN: Duration = Duration::from_secs(60);
 
 /// Team-key JWT header for App Store Connect: `alg = ES256`, `typ = JWT`,
 /// `kid = <Key ID>`.
@@ -105,13 +101,6 @@ pub(crate) fn sign_team_token(
     encode(&header, &claims, &key).map_err(|e| StackError::auth(format!("JWT signing failed: {e}")))
 }
 
-#[derive(Clone)]
-struct CachedToken {
-    token: String,
-    /// Unix-seconds `exp` of the cached token.
-    expires_at: i64,
-}
-
 /// Mints and caches App Store Connect team JWTs until shortly before they expire.
 /// Cloning the team key once keeps the credentials inside the core; the cache is
 /// guarded by a `tokio::sync::Mutex` so concurrent requests share one token.
@@ -133,7 +122,8 @@ impl AppStoreAuthenticator {
     }
 
     /// Returns a valid bearer token, signing a fresh one only when the cache is
-    /// empty or within [`REFRESH_MARGIN`] of expiry.
+    /// empty or within [`REFRESH_MARGIN_SECS`](super::token::REFRESH_MARGIN_SECS)
+    /// of expiry.
     pub(crate) async fn bearer_token(&self) -> Result<String, StackError> {
         let now = unix_now();
         let mut cache = self.cache.lock().await;
@@ -150,18 +140,6 @@ impl AppStoreAuthenticator {
         });
         Ok(token)
     }
-}
-
-fn unix_now() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0)
-}
-
-/// A cached token must be refreshed once `now` reaches `exp - REFRESH_MARGIN`.
-fn needs_refresh(expires_at: i64, now: i64) -> bool {
-    now + REFRESH_MARGIN.as_secs() as i64 >= expires_at
 }
 
 #[cfg(test)]
@@ -255,18 +233,6 @@ mod tests {
     fn rejects_non_ec_key() {
         let err = sign_team_token("iss", "kid", b"not a pem", 0).unwrap_err();
         assert!(matches!(err, StackError::Auth { .. }));
-    }
-
-    #[test]
-    fn token_fresh_outside_margin() {
-        // exp 120s out, now=0 → no refresh.
-        assert!(!needs_refresh(120, 0));
-    }
-
-    #[test]
-    fn token_stale_inside_margin() {
-        // exp 30s out, now=0 → within the 60s margin → refresh.
-        assert!(needs_refresh(30, 0));
     }
 
     #[tokio::test]
