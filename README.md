@@ -38,9 +38,34 @@ A generic `SyncService` drives persistence over the host's `BlobStore`. The type
 across every capability call. The iOS app runs on this core **only** — the legacy
 `appstoreconnect-swift-sdk` has been removed.
 
-**Out of scope (for now):** Firebase and Google Play stay implemented **natively in the
-iOS app**; they are not (yet) ported to the core. When revisited, each is just a
-`providers/<x>/` module + registration (plan §4).
+**Google Play — first slice in the core (connect + list apps).** The `googleplay`
+provider (`ServiceKind::GooglePlay`) exposes only `Apps`; every capability sub-object
+returns `None`.
+
+| | |
+| --- | --- |
+| Credentials | `clientEmail` / `privateKeyId` / `privateKey`, which the host extracts from the service account's JSON key file. The key is parsed eagerly at `connect` (PKCS#8 or PKCS#1, raw or JSON-escaped, RSA ≥ 2048-bit), so a bad key fails there with `InvalidCredentials`. |
+| Auth | `auth::oauth_jwt`: an RS256 JWT-bearer assertion (RFC 7523) exchanged at `https://oauth2.googleapis.com/token`; the access token is cached with a 60 s refresh margin and dropped on a 401. |
+| `Apps` | `GET https://playdeveloperreporting.googleapis.com/v1beta1/apps:search` with `pageToken` pagination (the Android Publisher API has no list-apps endpoint). `AppInfo.id` = `bundleId` = the package name; `platform` = `"ANDROID"`. |
+| `validate()` | Token exchange, then `apps:search?pageSize=1`. `Ok` means the key works and the API is enabled, not that any app is visible yet. |
+
+Google-side setup: enable the **Google Play Developer Reporting API** in the service
+account's Google Cloud project, then invite the service-account email in Play Console ›
+Users and permissions with at least "View app information (read-only)". Access can take
+hours to propagate. Google errors map onto the existing `StackError` variants (no new
+variant): a disabled API or a missing permission is `Auth` with an actionable message;
+quota and server errors are `Http`. The host apps are not wired to Google Play yet, and
+converting iOS's `.scexport` `serviceAccountJSON` blob to the three fields is a follow-up.
+
+**Design as built.** Each provider owns a concrete authenticator (`auth::es256` for App
+Store Connect, `auth::oauth_jwt` for Google) and shares `http_debug` for sending and
+tracing requests; there is no common `Authenticator` trait. Every provider is always
+compiled in: the only cargo features are `frb` (Dart binding) and `cli` (embedded
+`uniffi-bindgen`).
+
+**Out of scope (for now):** Firebase stays implemented **natively in the iOS app**. When
+revisited, it is just a `providers/<x>/` module + registration (plan §4), reusing
+`auth::oauth_jwt`.
 
 ## Layout
 
@@ -48,6 +73,9 @@ iOS app**; they are not (yet) ported to the core. When revisited, each is just a
 crates/stack_core/                    # the core crate
   src/
     auth/es256.rs                     # ES256 (P-256 / .p8) JWT for App Store Connect
+    auth/oauth_jwt.rs                 # Google service-account RS256 JWT-bearer -> access token
+    auth/token.rs                     # token cache primitives shared by the authenticators
+    http_debug.rs                     # shared HTTP send + debug tracing (runnable cURL)
     domain.rs                         # uniffi::Record value types (AppInfo, ...)
     error.rs                          # StackError (uniffi::Error)
     ports.rs                          # foreign traits: CredentialStore, BlobStore, DebugLogger
@@ -59,6 +87,7 @@ crates/stack_core/                    # the core crate
       sync.rs                         # SyncService over BlobStore
       capabilities/                   # one module per App Store Connect capability
     providers/appstore/               # the App Store Connect plugin (client + provider)
+    providers/googleplay/             # the Google Play plugin (client + error mapping + provider)
     frb_api.rs / frb_generated.rs     # flutter_rust_bridge facade (feature = "frb")
     bin/uniffi-bindgen.rs             # embedded bindgen, pinned to the runtime version
 bindings/
@@ -86,7 +115,7 @@ Rust toolchain **1.96.0** (pinned in `rust-toolchain.toml`). Recipes via [`just`
 
 ```bash
 just                       # list recipes
-just test                  # cargo test -p stack_core (240 lib + 3 facade tests)
+just test                  # cargo test -p stack_core (403 lib + 8 facade tests)
 just build-xcframework     # Swift bindings + xcframework (macOS)
 just gen-dart              # Dart FRB bindings into bindings/dart (regenerates frb_generated.rs)
 just build-android         # libstack_core.so (FRB) into the Flutter jniLibs
