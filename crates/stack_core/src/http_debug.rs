@@ -22,13 +22,7 @@ pub(crate) async fn send_and_read(
     builder: reqwest::RequestBuilder,
     logger: Option<&dyn DebugLogger>,
 ) -> Result<(reqwest::StatusCode, String), StackError> {
-    if let Some(logger) = logger {
-        // `try_clone` fails only for streaming bodies; callers use in-memory
-        // `.json()`/`.form()`/empty bodies, so this clones in practice.
-        if let Some(req) = builder.try_clone().and_then(|b| b.build().ok()) {
-            logger.log(render_curl(&req));
-        }
-    }
+    trace_request(&builder, logger);
 
     let response = builder
         .send()
@@ -45,6 +39,68 @@ pub(crate) async fn send_and_read(
     }
 
     Ok((status, body))
+}
+
+/// Like [`send_and_read`], for a response that is large and not worth tracing,
+/// such as an HTML page: at most `max_bytes` of the body are read (the rest is
+/// left unread, so a huge or endless body costs bounded memory), the bytes are
+/// decoded as lossy UTF-8, and the response trace carries only the status and
+/// how many bytes were read, never the body.
+///
+/// # Errors
+/// [`StackError::Network`] on transport failure (sending or reading the body).
+pub(crate) async fn send_and_read_capped(
+    builder: reqwest::RequestBuilder,
+    logger: Option<&dyn DebugLogger>,
+    max_bytes: usize,
+) -> Result<(reqwest::StatusCode, String), StackError> {
+    trace_request(&builder, logger);
+
+    let mut response = builder
+        .send()
+        .await
+        .map_err(|e| StackError::network(e.to_string()))?;
+    let status = response.status();
+
+    let mut body: Vec<u8> = Vec::new();
+    let mut truncated = false;
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(|e| StackError::network(e.to_string()))?
+    {
+        // `body.len() <= max_bytes` holds on every iteration.
+        let room = max_bytes.saturating_sub(body.len());
+        if chunk.len() > room {
+            body.extend_from_slice(chunk.get(..room).unwrap_or_default());
+            truncated = true;
+            break;
+        }
+        body.extend_from_slice(&chunk);
+    }
+
+    if let Some(logger) = logger {
+        let cut = if truncated { ", truncated" } else { "" };
+        logger.log(format!(
+            "{}[{} bytes read{cut}; body not logged]",
+            render_response(status, ""),
+            body.len()
+        ));
+    }
+
+    Ok((status, String::from_utf8_lossy(&body).into_owned()))
+}
+
+/// Logs the request `builder` would send as a runnable cURL, if a `logger` is
+/// present.
+fn trace_request(builder: &reqwest::RequestBuilder, logger: Option<&dyn DebugLogger>) {
+    if let Some(logger) = logger {
+        // `try_clone` fails only for streaming bodies; callers use in-memory
+        // `.json()`/`.form()`/empty bodies, so this clones in practice.
+        if let Some(req) = builder.try_clone().and_then(|b| b.build().ok()) {
+            logger.log(render_curl(&req));
+        }
+    }
 }
 
 /// Renders a `reqwest::Request` as a runnable, multi-line cURL command for the
@@ -220,6 +276,107 @@ mod tests {
         assert!(matches!(result, Err(StackError::Network { .. })));
         // The request is traced before sending; no response line follows a
         // transport failure.
+        let messages = logger.messages();
+        assert_eq!(messages.len(), 1);
+        assert!(messages[0].starts_with("[RustCore] → request"));
+    }
+
+    #[tokio::test]
+    async fn send_and_read_capped_returns_whole_body_under_the_cap_without_logging_it() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/page"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("<html>secret</html>"))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let logger = CapturingLogger::default();
+        let builder = reqwest::Client::new().get(format!("{}/page", server.uri()));
+        let (status, body) = send_and_read_capped(builder, Some(&logger), 1024)
+            .await
+            .unwrap();
+
+        assert_eq!(status, reqwest::StatusCode::OK);
+        assert_eq!(body, "<html>secret</html>");
+
+        let messages = logger.messages();
+        assert_eq!(messages.len(), 2);
+        assert!(messages[0].starts_with("[RustCore] → request"));
+        assert!(messages[0].contains(&format!("curl -X GET '{}/page'", server.uri())));
+        assert_eq!(
+            messages[1],
+            "[RustCore] ← 200 OK\n[19 bytes read; body not logged]"
+        );
+    }
+
+    #[tokio::test]
+    async fn send_and_read_capped_stops_reading_at_the_cap() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/big"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("a".repeat(10_000)))
+            .mount(&server)
+            .await;
+
+        let logger = CapturingLogger::default();
+        let builder = reqwest::Client::new().get(format!("{}/big", server.uri()));
+        let (status, body) = send_and_read_capped(builder, Some(&logger), 100)
+            .await
+            .unwrap();
+
+        assert_eq!(status, reqwest::StatusCode::OK);
+        assert_eq!(body, "a".repeat(100));
+        assert_eq!(
+            logger.messages()[1],
+            "[RustCore] ← 200 OK\n[100 bytes read, truncated; body not logged]"
+        );
+    }
+
+    #[tokio::test]
+    async fn send_and_read_capped_exactly_at_the_cap_is_not_truncated() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/exact"))
+            .respond_with(ResponseTemplate::new(404).set_body_string("x".repeat(64)))
+            .mount(&server)
+            .await;
+
+        let logger = CapturingLogger::default();
+        let builder = reqwest::Client::new().get(format!("{}/exact", server.uri()));
+        let (status, body) = send_and_read_capped(builder, Some(&logger), 64)
+            .await
+            .unwrap();
+
+        assert_eq!(status, reqwest::StatusCode::NOT_FOUND);
+        assert_eq!(body.len(), 64);
+        assert_eq!(
+            logger.messages()[1],
+            "[RustCore] ← 404 Not Found\n[64 bytes read; body not logged]"
+        );
+    }
+
+    #[tokio::test]
+    async fn send_and_read_capped_decodes_invalid_utf8_lossily() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/bytes"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(vec![b'o', 0xFF, b'k']))
+            .mount(&server)
+            .await;
+
+        let builder = reqwest::Client::new().get(format!("{}/bytes", server.uri()));
+        let (_, body) = send_and_read_capped(builder, None, 1024).await.unwrap();
+        assert_eq!(body, "o\u{FFFD}k");
+    }
+
+    #[tokio::test]
+    async fn send_and_read_capped_maps_transport_error_to_network() {
+        let logger = CapturingLogger::default();
+        let builder = reqwest::Client::new().get("http://127.0.0.1:1/unreachable");
+        let result = send_and_read_capped(builder, Some(&logger), 1024).await;
+
+        assert!(matches!(result, Err(StackError::Network { .. })));
         let messages = logger.messages();
         assert_eq!(messages.len(), 1);
         assert!(messages[0].starts_with("[RustCore] → request"));

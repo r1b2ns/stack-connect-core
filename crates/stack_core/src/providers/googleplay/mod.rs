@@ -5,20 +5,24 @@
 //! (`apps:search`, `nextPageToken` pagination): the Android Publisher API has no
 //! list-apps endpoint. Everything else goes to the Android Publisher API
 //! (`androidpublisher` v3): reviews (`reviews`) and the edit-scoped reads —
-//! app details, store listings, tracks (`edits`).
+//! app details, store listings, tracks (`edits`). App icons are the exception:
+//! they come from the public store page (`store_page`), without credentials and
+//! without an edit.
 //!
 //! One connected account is one service account, which may see apps from
 //! several Play developer accounts; `apps:search` returns them mixed together.
 //!
 //! Modules: `client` (transport, URL building, Reporting calls), `error`
-//! (Google error mapping), `reviews`, `edits`, `timestamp` (Google's number
-//! and date encodings) and `provider` (the capability wiring).
+//! (Google error mapping), `reviews`, `edits`, `store_page` (icons from the
+//! public store page), `timestamp` (Google's number and date encodings) and
+//! `provider` (the capability wiring).
 
 mod client;
 mod edits;
 mod error;
 mod provider;
 mod reviews;
+mod store_page;
 #[cfg(test)]
 mod test_support;
 mod timestamp;

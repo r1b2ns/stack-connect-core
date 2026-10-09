@@ -2,8 +2,8 @@
 //!
 //! A multi-service hub: each external service is a plugin implementing a uniform
 //! contract. App Store Connect and Google Play (apps, reviews, app details, store
-//! listings, tracks) are in the core today; Firebase, AWS and GitHub may follow. The UniFFI facade exposes a
-//! stable surface — `available_services`, `credential_schema`, `connect` →
+//! listings, tracks, app icons) are in the core today; Firebase, AWS and GitHub
+//! may follow. The UniFFI facade exposes a stable surface — `available_services`, `credential_schema`, `connect` →
 //! `Provider` — that does not change as plugins are added. Consumed natively by
 //! iOS via UniFFI and by the Flutter apps via flutter_rust_bridge (`frb`
 //! feature).
@@ -49,6 +49,7 @@ pub use facade::{available_services, connect, credential_schema, make_sync_servi
 pub use ports::{BlobStore, CredentialStore};
 pub use service::capabilities::analytics::Analytics;
 pub use service::capabilities::app_details::AppDetails;
+pub use service::capabilities::app_icons::AppIcons;
 pub use service::capabilities::app_store_versions::AppStoreVersions;
 pub use service::capabilities::beta_groups::BetaGroups;
 pub use service::capabilities::builds::Builds;

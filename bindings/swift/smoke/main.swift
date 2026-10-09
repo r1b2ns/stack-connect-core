@@ -99,19 +99,20 @@ do {
     fail("connect(.googlePlay) failed: \(error)")
 }
 let playCapabilities = play.capabilities()
-guard playCapabilities == [.apps, .reviews, .appDetails, .storeListings, .tracks] else {
+guard playCapabilities == [.apps, .reviews, .appDetails, .storeListings, .tracks, .appIcons] else {
     fail("Google Play capabilities mismatch, got: \(playCapabilities)")
 }
 print("ok: Google Play capabilities are \(playCapabilities)")
 
 guard let playReviews = play.reviews(), let appDetails = play.appDetails(),
+      let appIcons = play.appIcons(),
       play.storeListings() != nil, play.tracks() != nil else {
     fail("a Google Play capability handle is missing")
 }
 guard play.appStoreVersions() == nil, play.builds() == nil else {
     fail("Google Play exposed an App Store Connect-only handle")
 }
-print("ok: Google Play exposes reviews/appDetails/storeListings/tracks handles")
+print("ok: Google Play exposes reviews/appDetails/storeListings/tracks/appIcons handles")
 
 // 5) The new async surface crosses the FFI and its typed errors come back,
 //    still offline: each call is rejected locally before any request.
@@ -125,6 +126,16 @@ do {
     print("ok: fetchAppDetails(invalid package) -> .Http(404) without a request")
 } catch {
     fail("unexpected error type: \(error)")
+}
+
+do {
+    // A name no Play app can have has no store page: nil, decided locally.
+    guard try await appIcons.fetchIconUrl(appId: "not a package") == nil else {
+        fail("expected fetchIconUrl to answer nil for an invalid package name")
+    }
+    print("ok: fetchIconUrl(invalid package) -> nil without a request")
+} catch {
+    fail("fetchIconUrl threw for an invalid package name: \(error)")
 }
 
 do {

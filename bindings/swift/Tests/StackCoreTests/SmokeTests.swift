@@ -97,11 +97,12 @@ final class SmokeTests: XCTestCase {
 
     func testGooglePlayCapabilitiesCrossFFI() throws {
         let play = try connectGooglePlay()
-        XCTAssertEqual(play.capabilities(), [.apps, .reviews, .appDetails, .storeListings, .tracks])
+        XCTAssertEqual(play.capabilities(), [.apps, .reviews, .appDetails, .storeListings, .tracks, .appIcons])
         XCTAssertNotNil(play.reviews())
         XCTAssertNotNil(play.appDetails())
         XCTAssertNotNil(play.storeListings())
         XCTAssertNotNil(play.tracks())
+        XCTAssertNotNil(play.appIcons())
         XCTAssertNil(play.appStoreVersions())
         XCTAssertNil(play.builds())
     }
@@ -114,6 +115,13 @@ final class SmokeTests: XCTestCase {
         } catch StackError.Http(let status, _) {
             XCTAssertEqual(status, 404)
         }
+    }
+
+    func testGooglePlayIconOfInvalidPackageIsNilWithoutARequest() async throws {
+        // A name no Play app can have has no store page: `nil`, decided locally.
+        let icons = try XCTUnwrap(try connectGooglePlay().appIcons())
+        let icon = try await icons.fetchIconUrl(appId: "not a package")
+        XCTAssertNil(icon)
     }
 
     func testGooglePlayRejectsForeignReviewIdBeforeAnyRequest() async throws {

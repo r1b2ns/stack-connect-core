@@ -11,6 +11,7 @@
 pub(crate) mod accessibility_declarations;
 pub(crate) mod analytics;
 pub(crate) mod app_details;
+pub(crate) mod app_icons;
 pub(crate) mod app_metadata;
 pub(crate) mod app_store_versions;
 pub(crate) mod beta_app_localizations;

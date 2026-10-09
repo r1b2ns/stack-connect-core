@@ -7,6 +7,7 @@ use crate::error::StackError;
 use crate::service::capabilities::accessibility_declarations::AccessibilityDeclarations;
 use crate::service::capabilities::analytics::Analytics;
 use crate::service::capabilities::app_details::AppDetails;
+use crate::service::capabilities::app_icons::AppIcons;
 use crate::service::capabilities::app_metadata::AppMetadata;
 use crate::service::capabilities::app_store_versions::AppStoreVersions;
 use crate::service::capabilities::beta_app_localizations::BetaAppLocalizations;
@@ -56,6 +57,8 @@ pub enum Capability {
     StoreListings,
     /// An app's release tracks and their releases ([`Tracks`]).
     Tracks,
+    /// Where to load an app's icon from ([`AppIcons`]).
+    AppIcons,
 }
 
 /// Internal, non-exported contract every concrete plugin implements. Kept off the
@@ -191,6 +194,12 @@ pub(crate) trait ProviderImpl: Send + Sync {
     /// The Tracks capability handle, or `None` if this provider lacks
     /// [`Capability::Tracks`]. Default `None` so providers opt in explicitly.
     fn tracks(&self) -> Option<Arc<Tracks>> {
+        None
+    }
+
+    /// The App Icons capability handle, or `None` if this provider lacks
+    /// [`Capability::AppIcons`]. Default `None` so providers opt in explicitly.
+    fn app_icons(&self) -> Option<Arc<AppIcons>> {
         None
     }
 }
@@ -364,6 +373,14 @@ impl Provider {
     /// unsupported.
     pub fn tracks(&self) -> Option<Arc<Tracks>> {
         self.inner.tracks()
+    }
+
+    /// The App Icons capability handle, or `None` when this provider does not
+    /// expose [`Capability::AppIcons`]. This is the discovery mechanism: the
+    /// host calls `provider.app_icons()` and gets `None` when app icons are
+    /// unsupported.
+    pub fn app_icons(&self) -> Option<Arc<AppIcons>> {
+        self.inner.app_icons()
     }
 }
 

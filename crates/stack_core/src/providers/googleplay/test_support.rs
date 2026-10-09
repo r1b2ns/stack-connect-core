@@ -1,6 +1,7 @@
 //! Test-only helpers shared by the Google Play module tests: a client wired to
-//! a wiremock server (token endpoint and both APIs on the same server), a token
-//! mock, and a capturing debug logger.
+//! a wiremock server (token endpoint and both APIs on the same server), a
+//! store-page client on the same kind of server, a token mock, and a capturing
+//! debug logger.
 
 use std::sync::Mutex;
 
@@ -8,6 +9,7 @@ use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 use super::client::GooglePlayClient;
+use super::store_page::StorePageClient;
 use super::PLAY_SCOPES;
 use crate::auth::oauth_jwt::{ServiceAccountAuthenticator, ServiceAccountKey};
 use crate::ports::DebugLogger;
@@ -29,6 +31,11 @@ pub(super) fn client(server: &MockServer) -> GooglePlayClient {
         format!("{}/token", server.uri()),
     );
     GooglePlayClient::with_base_urls(auth, http, server.uri(), server.uri())
+}
+
+/// A store-page client whose public store pages are served by the mock server.
+pub(super) fn store_page_client(server: &MockServer) -> StorePageClient {
+    StorePageClient::with_base_url(reqwest::Client::new(), server.uri())
 }
 
 /// Mounts a token endpoint answering `token`, expected `times` times.

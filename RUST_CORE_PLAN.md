@@ -300,6 +300,36 @@ becomes a problem.
     `StoreListings` / `Tracks` (Play reviews already reach Dart through `FrbReviews`);
     `translationLanguage` for reviews; live verification of which Play Console permission
     `edits.insert` requires for read-only use.
+- **Google Play — app icons (`AppIcons`). ✅ IN THE CORE.** A new generic capability,
+  appended to `Capability` (position-encoded, so append only):
+  `AppIcons.fetch_icon_url(app_id) -> Option<String>`, reached via `Provider::app_icons()`.
+  Google Play now reports `capabilities() == [Apps, Reviews, AppDetails, StoreListings,
+  Tracks, AppIcons]`; App Store Connect also exposes `AppIcons` (appended after
+  `Analytics`) by delegating to the existing latest-build `iconAssetToken` lookup, and
+  keeps `AppMetadata::fetch_icon_url` unchanged for existing callers.
+  - **Source: the public store page, never an edit.** The Android Publisher API only lists
+    images through `edits.images.list`, and opening an edit invalidates any other open edit
+    of the same service account and app (e.g. a CI upload). Icons are needed for every app
+    in a list, so `providers/googleplay/store_page.rs` reads
+    `GET https://play.google.com/store/apps/details?id={package}&hl=en` instead. Its client
+    shares the provider's `reqwest::Client` (pool and timeouts) but holds no authenticator,
+    so it cannot mint or send a token; the base URL is injectable for tests.
+  - **Parsing:** the first `og:image` meta tag (any attribute order, double/single/no
+    quotes, HTML entities decoded). Only `https://` on `*.googleusercontent.com` (Play uses
+    `play-lh.googleusercontent.com`), no credentials or explicit port; the options after
+    the last `=` of the last path segment become `=s512` (appended when absent), query and
+    fragment dropped. At most 8 MiB of the page is read (`http_debug::send_and_read_capped`;
+    a live page is about 1.3 MB with the tag past the first megabyte), and the body is never
+    logged, only its size.
+  - **Semantics:** `200` with a usable icon → `Some(url)`; `404` (unpublished, unknown, not
+    visible in the store) → `None`; `200` without a usable `og:image` (consent page, foreign
+    host) → `None` plus a debug line; invalid package name → `None` without a request;
+    other non-2xx → `Http`; transport failure → `Network`. Store visibility decides, not
+    Play Console access: an app that is not live in the store (never published, or only on
+    internal/closed testing tracks) has no icon.
+  - FRB: only the `Capability` codec was regenerated (variant 19); no new wrapper, content
+    hash unchanged. Pending: an FRB `AppIcons` wrapper if the Flutter apps need icons;
+    host-side caching of the URL (the core does not cache).
 
 > **Out of scope (for now): Firebase.** It is **not** being migrated to the core at this
 > time — it remains implemented **natively in the iOS app** (`APIProviderFirebase`). If it

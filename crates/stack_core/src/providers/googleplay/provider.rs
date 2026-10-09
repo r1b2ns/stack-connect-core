@@ -4,6 +4,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 
 use super::client::GooglePlayClient;
+use super::store_page::StorePageClient;
 use super::PLAY_SCOPES;
 use crate::auth::oauth_jwt::{ServiceAccountAuthenticator, ServiceAccountKey};
 use crate::domain::{
@@ -13,6 +14,7 @@ use crate::domain::{
 use crate::error::StackError;
 use crate::ports::DebugLogger;
 use crate::service::capabilities::app_details::{AppDetails, AppDetailsImpl};
+use crate::service::capabilities::app_icons::{AppIcons, AppIconsImpl};
 use crate::service::capabilities::reviews::{Reviews, ReviewsImpl};
 use crate::service::capabilities::store_listings::{StoreListings, StoreListingsImpl};
 use crate::service::capabilities::tracks::{Tracks, TracksImpl};
@@ -28,14 +30,17 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 /// Google Play implementation of the internal [`ProviderImpl`] contract:
 /// [`Capability::Apps`] (Reporting API), plus [`Capability::Reviews`],
 /// [`Capability::AppDetails`], [`Capability::StoreListings`] and
-/// [`Capability::Tracks`] (Android Publisher API). Every other capability
-/// accessor keeps the trait's `None` default.
+/// [`Capability::Tracks`] (Android Publisher API), and [`Capability::AppIcons`]
+/// (the public store page, no credentials). Every other capability accessor
+/// keeps the trait's `None` default.
 ///
 /// The [`GooglePlayClient`] is held behind an `Arc` so the capability
 /// sub-objects share the same client — and therefore the same authenticator,
-/// token cache and edit lock — as `validate`/`fetch_apps`.
+/// token cache and edit lock — as `validate`/`fetch_apps`. The
+/// [`StorePageClient`] shares only the HTTP client: it holds no credentials.
 pub(crate) struct GooglePlayProvider {
     client: Arc<GooglePlayClient>,
+    store_page: Arc<StorePageClient>,
 }
 
 impl GooglePlayProvider {
@@ -44,9 +49,10 @@ impl GooglePlayProvider {
     /// Unlike App Store Connect, the key is parsed eagerly — including one test
     /// signature (see [`ServiceAccountKey::parse`]) — so a malformed key fails
     /// at connect. One `reqwest::Client` with connect and request timeouts is
-    /// shared by the authenticator and the API client. When `debug_logger` is
-    /// `Some`, both the token exchange and every API call are traced through it
-    /// (see [`crate::ports::DebugLogger`]).
+    /// shared by the authenticator, the API client and the store-page client.
+    /// When `debug_logger` is `Some`, the token exchange, every API call and
+    /// every store-page read are traced through it (see
+    /// [`crate::ports::DebugLogger`]).
     ///
     /// # Errors
     /// [`StackError::InvalidCredentials`] if a field is blank or the key is not
@@ -65,10 +71,12 @@ impl GooglePlayProvider {
             .build()
             .map_err(|e| StackError::network(format!("HTTP client setup failed: {e}")))?;
 
-        // `reqwest::Client` is an `Arc` internally: the clone shares one pool.
+        // `reqwest::Client` is an `Arc` internally: the clones share one pool.
         let auth = ServiceAccountAuthenticator::new(key, PLAY_SCOPES, http.clone());
+        let store_page = StorePageClient::new(http.clone()).with_debug_logger(debug_logger.clone());
         Ok(Self {
             client: Arc::new(GooglePlayClient::new(auth, http).with_debug_logger(debug_logger)),
+            store_page: Arc::new(store_page),
         })
     }
 }
@@ -86,6 +94,7 @@ impl ProviderImpl for GooglePlayProvider {
             Capability::AppDetails,
             Capability::StoreListings,
             Capability::Tracks,
+            Capability::AppIcons,
         ]
     }
 
@@ -118,6 +127,12 @@ impl ProviderImpl for GooglePlayProvider {
     fn tracks(&self) -> Option<Arc<Tracks>> {
         Some(Tracks::new(Box::new(GooglePlayTracks {
             client: Arc::clone(&self.client),
+        })))
+    }
+
+    fn app_icons(&self) -> Option<Arc<AppIcons>> {
+        Some(AppIcons::new(Box::new(GooglePlayAppIcons {
+            store_page: Arc::clone(&self.store_page),
         })))
     }
 }
@@ -235,10 +250,26 @@ impl TracksImpl for GooglePlayTracks {
     }
 }
 
+/// Google Play implementation of the [`AppIconsImpl`] capability contract: the
+/// `og:image` of the app's public store page (see `super::store_page`), never
+/// an edit and never a token. `app_id` is the package name.
+struct GooglePlayAppIcons {
+    store_page: Arc<StorePageClient>,
+}
+
+#[async_trait]
+impl AppIconsImpl for GooglePlayAppIcons {
+    async fn fetch_icon_url(&self, app_id: String) -> Result<Option<String>, StackError> {
+        self.store_page.fetch_icon_url(&app_id).await
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::providers::googleplay::test_support::{client, mount_token};
+    use crate::providers::googleplay::test_support::{
+        client, mount_token, store_page_client, CapturingLogger,
+    };
     use crate::service::provider::Provider;
     use wiremock::matchers::{body_json, method, path, query_param};
     use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -252,12 +283,13 @@ mod tests {
         GooglePlayProvider::try_new(EMAIL, KID, PKCS8_PEM, None).unwrap()
     }
 
-    const PLAY_CAPABILITIES: [Capability; 5] = [
+    const PLAY_CAPABILITIES: [Capability; 6] = [
         Capability::Apps,
         Capability::Reviews,
         Capability::AppDetails,
         Capability::StoreListings,
         Capability::Tracks,
+        Capability::AppIcons,
     ];
 
     #[test]
@@ -274,6 +306,7 @@ mod tests {
         assert!(p.app_details().is_some());
         assert!(p.store_listings().is_some());
         assert!(p.tracks().is_some());
+        assert!(p.app_icons().is_some());
         // App Store Connect-only capabilities keep the trait's `None` default.
         assert!(p.app_store_versions().is_none());
         assert!(p.builds().is_none());
@@ -301,6 +334,7 @@ mod tests {
         assert!(p.app_details().is_some());
         assert!(p.store_listings().is_some());
         assert!(p.tracks().is_some());
+        assert!(p.app_icons().is_some());
         assert!(p.app_store_versions().is_none());
         assert!(p.builds().is_none());
         assert!(p.beta_groups().is_none());
@@ -328,6 +362,7 @@ mod tests {
                 Capability::AppDetails => p.app_details().is_some(),
                 Capability::StoreListings => p.store_listings().is_some(),
                 Capability::Tracks => p.tracks().is_some(),
+                Capability::AppIcons => p.app_icons().is_some(),
                 other => panic!("Google Play should not advertise {other:?}"),
             };
             assert!(has_handle, "{capability:?} has no handle");
@@ -496,6 +531,83 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(tracks[0].track, "beta");
+    }
+
+    #[tokio::test]
+    async fn app_icons_handle_reads_the_store_page_without_a_token() {
+        let server = MockServer::start().await;
+        // Neither a token exchange nor an Android Publisher call (e.g. an edit)
+        // may happen: unmatched paths would 404 and `expect(0)` fails on drop.
+        mount_token(&server, "tok-1", 0).await;
+        Mock::given(method("GET"))
+            .and(path("/store/apps/details"))
+            .and(query_param("id", "com.example.app"))
+            .and(query_param("hl", "en"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(
+                r#"<meta content="https://play-lh.googleusercontent.com/Icon=s0-br30" property="og:image">"#,
+            ))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let provider = GooglePlayProvider {
+            client: Arc::new(client(&server)),
+            store_page: Arc::new(store_page_client(&server)),
+        };
+        let icons = provider.app_icons().expect("Google Play exposes AppIcons");
+        let icon = icons
+            .fetch_icon_url("com.example.app".into())
+            .await
+            .unwrap();
+        assert_eq!(
+            icon.as_deref(),
+            Some("https://play-lh.googleusercontent.com/Icon=s512")
+        );
+
+        let requests = server.received_requests().await.unwrap();
+        assert_eq!(requests.len(), 1, "only the store page may be requested");
+        assert_eq!(requests[0].url.path(), "/store/apps/details");
+        assert!(requests[0].headers.get("authorization").is_none());
+    }
+
+    #[tokio::test]
+    async fn app_icons_unpublished_app_is_none() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/store/apps/details"))
+            .respond_with(ResponseTemplate::new(404))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let icons = AppIcons::new(Box::new(GooglePlayAppIcons {
+            store_page: Arc::new(store_page_client(&server)),
+        }));
+        assert_eq!(
+            icons
+                .fetch_icon_url("com.example.unpublished".into())
+                .await
+                .unwrap(),
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn try_new_wires_the_debug_logger_into_the_store_page_client() {
+        // Offline: an invalid package name is answered locally, and the trace
+        // proves the logger reached the store-page client.
+        let logger = Arc::new(CapturingLogger::default());
+        let p = GooglePlayProvider::try_new(EMAIL, KID, PKCS8_PEM, Some(logger.clone())).unwrap();
+        let icon = p
+            .app_icons()
+            .unwrap()
+            .fetch_icon_url("not a package".into())
+            .await
+            .unwrap();
+        assert_eq!(icon, None);
+        let messages = logger.messages();
+        assert_eq!(messages.len(), 1);
+        assert!(messages[0].contains("is not a valid package name"));
     }
 
     #[test]

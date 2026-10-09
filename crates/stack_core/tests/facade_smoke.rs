@@ -157,6 +157,7 @@ fn connect_google_play_reports_kind_and_capabilities() {
             Capability::AppDetails,
             Capability::StoreListings,
             Capability::Tracks,
+            Capability::AppIcons,
         ]
     );
     // The Play handles are present ...
@@ -164,6 +165,7 @@ fn connect_google_play_reports_kind_and_capabilities() {
     assert!(provider.app_details().is_some());
     assert!(provider.store_listings().is_some());
     assert!(provider.tracks().is_some());
+    assert!(provider.app_icons().is_some());
     // ... and every App Store Connect-only one is absent.
     assert!(provider.app_store_versions().is_none());
     assert!(provider.builds().is_none());
@@ -179,4 +181,20 @@ fn connect_google_play_reports_kind_and_capabilities() {
     assert!(provider.certificates().is_none());
     assert!(provider.profiles().is_none());
     assert!(provider.analytics().is_none());
+}
+
+#[tokio::test]
+async fn google_play_app_icons_answer_an_invalid_package_offline() {
+    // A name no Play app can have has no store page: `None`, decided locally,
+    // so this crosses the public `AppIcons` handle without any network.
+    let provider = match connect_play(PLAY_PKCS8_PEM) {
+        Ok(provider) => provider,
+        Err(err) => panic!("expected a Google Play provider, got {err:?}"),
+    };
+    let icons = match provider.app_icons() {
+        Some(icons) => icons,
+        None => panic!("Google Play should expose AppIcons"),
+    };
+    let icon = icons.fetch_icon_url("not a package".to_string()).await;
+    assert!(matches!(icon, Ok(None)), "{icon:?}");
 }

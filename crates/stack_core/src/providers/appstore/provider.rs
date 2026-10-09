@@ -20,6 +20,7 @@ use crate::service::capabilities::accessibility_declarations::{
     AccessibilityDeclarations, AccessibilityDeclarationsImpl,
 };
 use crate::service::capabilities::analytics::{Analytics, AnalyticsImpl};
+use crate::service::capabilities::app_icons::{AppIcons, AppIconsImpl};
 use crate::service::capabilities::app_metadata::{AppMetadata, AppMetadataImpl};
 use crate::service::capabilities::app_store_versions::{AppStoreVersions, AppStoreVersionsImpl};
 use crate::service::capabilities::beta_app_localizations::{
@@ -92,6 +93,7 @@ impl ProviderImpl for AppStoreProvider {
             Capability::Certificates,
             Capability::Profiles,
             Capability::Analytics,
+            Capability::AppIcons,
         ]
     }
 
@@ -197,6 +199,12 @@ impl ProviderImpl for AppStoreProvider {
 
     fn analytics(&self) -> Option<Arc<Analytics>> {
         Some(Analytics::new(Box::new(AppStoreAnalytics {
+            client: Arc::clone(&self.client),
+        })))
+    }
+
+    fn app_icons(&self) -> Option<Arc<AppIcons>> {
+        Some(AppIcons::new(Box::new(AppStoreAppIcons {
             client: Arc::clone(&self.client),
         })))
     }
@@ -787,6 +795,22 @@ impl BetaAppReviewDetailImpl for AppStoreBetaAppReviewDetail {
     }
 }
 
+/// App Store Connect implementation of the [`AppIconsImpl`] capability
+/// contract: the same latest-build `iconAssetToken` lookup as
+/// [`AppMetadataImpl::fetch_icon_url`], which stays in place for existing
+/// callers. Holds a shared [`AppStoreClient`] so it reuses the provider's token
+/// cache.
+struct AppStoreAppIcons {
+    client: Arc<AppStoreClient>,
+}
+
+#[async_trait]
+impl AppIconsImpl for AppStoreAppIcons {
+    async fn fetch_icon_url(&self, app_id: String) -> Result<Option<String>, StackError> {
+        self.client.fetch_icon_url(&app_id).await
+    }
+}
+
 /// App Store Connect implementation of the [`AppMetadataImpl`] capability
 /// contract. Holds a shared [`AppStoreClient`] so it reuses the provider's token
 /// cache.
@@ -1333,6 +1357,10 @@ impl AnalyticsImpl for AppStoreAnalytics {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use wiremock::matchers::{method, path, query_param};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    const PRIVATE_P8: &[u8] = include_bytes!("../../../tests/fixtures/test_ec_private.p8");
 
     fn provider() -> AppStoreProvider {
         AppStoreProvider::new(
@@ -1365,7 +1393,8 @@ mod tests {
                 Capability::BundleIds,
                 Capability::Certificates,
                 Capability::Profiles,
-                Capability::Analytics
+                Capability::Analytics,
+                Capability::AppIcons
             ]
         );
     }
@@ -1512,5 +1541,109 @@ mod tests {
         // App Store Connect supports Analytics, so the accessor must return `Some`.
         assert!(provider().analytics().is_some());
         assert!(provider().capabilities().contains(&Capability::Analytics));
+    }
+
+    #[test]
+    fn exposes_app_icons_capability_handle() {
+        // App Store Connect supports App Icons, so the accessor must return
+        // `Some`.
+        assert!(provider().app_icons().is_some());
+        assert!(provider().capabilities().contains(&Capability::AppIcons));
+    }
+
+    #[tokio::test]
+    async fn app_icons_delegates_to_the_latest_build_icon_like_app_metadata() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v1/builds"))
+            .and(query_param("filter[app]", "app-1"))
+            .and(query_param("sort", "-uploadedDate"))
+            .and(query_param("limit", "1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": [{
+                    "type": "builds",
+                    "id": "build-1",
+                    "attributes": {
+                        "iconAssetToken": {
+                            "templateUrl": "https://img.example.com/{w}x{h}bb.{f}"
+                        }
+                    }
+                }],
+                "links": {}
+            })))
+            // Once through AppIcons, once through the legacy AppMetadata path.
+            .expect(2)
+            .mount(&server)
+            .await;
+
+        let auth = AppStoreAuthenticator::new("issuer".into(), "kid".into(), PRIVATE_P8.to_vec());
+        let p = AppStoreProvider {
+            client: Arc::new(AppStoreClient::with_base_url(auth, server.uri())),
+        };
+
+        let icon = p
+            .app_icons()
+            .unwrap()
+            .fetch_icon_url("app-1".into())
+            .await
+            .unwrap();
+        assert_eq!(
+            icon.as_deref(),
+            Some("https://img.example.com/512x512bb.png")
+        );
+        let legacy = p
+            .app_metadata()
+            .unwrap()
+            .fetch_icon_url("app-1".into())
+            .await
+            .unwrap();
+        assert_eq!(icon, legacy);
+    }
+
+    #[tokio::test]
+    async fn app_icons_is_none_without_a_build() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v1/builds"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({ "data": [], "links": {} })),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let auth = AppStoreAuthenticator::new("issuer".into(), "kid".into(), PRIVATE_P8.to_vec());
+        let icons = AppIcons::new(Box::new(AppStoreAppIcons {
+            client: Arc::new(AppStoreClient::with_base_url(auth, server.uri())),
+        }));
+        assert_eq!(icons.fetch_icon_url("app-1".into()).await.unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn app_icons_surfaces_pending_agreements() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v1/builds"))
+            .respond_with(ResponseTemplate::new(403).set_body_json(serde_json::json!({
+                "errors": [{
+                    "status": "403",
+                    "code": "FORBIDDEN.REQUIRED_AGREEMENTS_MISSING_OR_EXPIRED",
+                    "title": "A required agreement is missing or has expired.",
+                    "detail": "This request requires an in-effect agreement."
+                }]
+            })))
+            .mount(&server)
+            .await;
+
+        let auth = AppStoreAuthenticator::new("issuer".into(), "kid".into(), PRIVATE_P8.to_vec());
+        let icons = AppIcons::new(Box::new(AppStoreAppIcons {
+            client: Arc::new(AppStoreClient::with_base_url(auth, server.uri())),
+        }));
+        let err = icons.fetch_icon_url("app-1".into()).await.unwrap_err();
+        assert!(
+            matches!(err, StackError::PendingAgreements { .. }),
+            "{err:?}"
+        );
     }
 }

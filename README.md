@@ -15,7 +15,7 @@ plugs in as a `Provider` implementing a common contract, registered in a `regist
 Adding a service touches neither the core nor the FFI facade — see
 [RUST_CORE_PLAN.md](RUST_CORE_PLAN.md) (§3 contract, §4 how to add a service).
 
-**App Store Connect — fully migrated.** The `appstore` provider exposes 15 capabilities,
+**App Store Connect — fully migrated.** The `appstore` provider exposes 17 capabilities,
 each as an `async` sub-object off `Provider`:
 
 | | |
@@ -32,16 +32,18 @@ each as an `async` sub-object off `Provider`:
 | `AccessibilityDeclarations` | accessibility declarations |
 | `Users` | team users + invitations |
 | `Devices` · `BundleIds` · `Certificates` · `Profiles` | provisioning |
+| `Analytics` | analytics report requests (create + list), reports, instances and segments (download, gunzip, TSV parse) |
+| `AppIcons` | `fetch_icon_url(app_id)`: the latest build's `iconAssetToken` as a URL (the same lookup as `AppMetadata.fetch_icon_url`, which stays for existing callers); `None` without a build |
 
 A generic `SyncService` drives persistence over the host's `BlobStore`. The typed
 `StackError::PendingAgreements` surfaces App Store Connect 403 *pending agreements*
 across every capability call. The iOS app runs on this core **only** — the legacy
 `appstoreconnect-swift-sdk` has been removed.
 
-**Google Play — apps, reviews and read-only app detail in the core.** The `googleplay`
-provider (`ServiceKind::GooglePlay`) exposes `Apps`, `Reviews`, `AppDetails`,
-`StoreListings` and `Tracks`; every App Store Connect-only accessor returns `None`.
-Everything is read-only except review replies, and no edit is ever committed.
+**Google Play — apps, reviews, read-only app detail and icons in the core.** The
+`googleplay` provider (`ServiceKind::GooglePlay`) exposes `Apps`, `Reviews`, `AppDetails`,
+`StoreListings`, `Tracks` and `AppIcons`; every App Store Connect-only accessor returns
+`None`. Everything is read-only except review replies, and no edit is ever committed.
 
 | | |
 | --- | --- |
@@ -53,6 +55,7 @@ Everything is read-only except review replies, and no edit is ever committed.
 | `AppDetails` | `fetch_app_details(app_id)` → `AppDetailsInfo` (default language, contact email/phone/website) from `edits.details`. Doubles as the "can this service account reach package X?" check: `Ok` = yes, `Http 404` = no such package, `Auth` = no access or API disabled. |
 | `StoreListings` | `fetch_store_listings(app_id)` → `[StoreListingInfo]` (language, title, short/full description, video) from `edits.listings`. |
 | `Tracks` | `fetch_tracks(app_id)` → `[TrackInfo]` (track name + releases: name, status, version codes as decimal strings, user fraction, release notes, in-app update priority) from `edits.tracks`; tracks without a release are included. |
+| `AppIcons` | `fetch_icon_url(app_id)` → the app icon at 512 px, read from the **public** store page `GET https://play.google.com/store/apps/details?id={package}&hl=en` with no credentials (no token is minted, no `androidpublisher` call, no edit). See *App icons* below. |
 
 *Reviews, as mapped onto `CustomerReview`:* `id` is an **opaque composite**,
 `{packageName}/{reviewId}` (the reply endpoint needs the package, and the store-agnostic
@@ -70,6 +73,24 @@ it only returns reviews users **created or modified within the last week** (olde
 are only in the Play Console CSV export), only reviews **with a comment**, and only for
 **production** versions of the app. Quotas: 200 `GET`s per hour, 2000 replies per day.
 Replies of more than about 350 characters are rejected, and HTML is stripped.
+
+*App icons (`AppIcons`):* the Android Publisher API only exposes an app's images through
+`edits.images.list`, which needs an edit, and opening an edit invalidates any other edit
+of the same service account and app (see *Edit sessions* below). Icons are wanted for
+every app in a list, so they never go through edits: the core reads the public store
+page instead and takes its `og:image` meta tag (attribute order, quoting and HTML
+entities such as `&amp;` are tolerated). Only an `https://` URL on a
+`*.googleusercontent.com` host (Play uses `play-lh.googleusercontent.com`) is accepted;
+the image-server options after the last `=` (e.g. `=s0-br30`) are replaced with `=s512`,
+the size the App Store icon defaults to. Results: a published app → `Some(url)`; `404`
+(unpublished, unknown, or not visible in the store) → `None`; a `200` page without a
+usable `og:image` (e.g. a consent page, or a foreign image host) → `None` plus a debug
+log line; an invalid package name → `None` without a request; any other non-2xx →
+`Http`; transport failure → `Network`. At most 8 MiB of the page is read (a page is about
+1.3 MB, with the tag past the first megabyte), and the page body is never written to the
+debug log, only its size. Store visibility, not Play Console access, decides the result,
+so an app the service account cannot see may still have an icon, and an app that is not
+live in the store (never published, or only on internal/closed testing tracks) has none.
 
 *Edit sessions (`AppDetails`, `StoreListings`, `Tracks`):* the Android Publisher API only
 serves these inside an edit, so each call inserts an edit, reads, and **always** deletes
@@ -90,6 +111,8 @@ concurrent reads cannot invalidate each other.
      `AppDetails` / `StoreListings` / `Tracks`;
    - "Reply to reviews" for `reply_to_review`.
 
+   `AppIcons` needs neither an API nor a permission: it reads the public store page.
+
    Google does not document which permission `edits.insert` checks for a read-only use.
    If the edit-based reads are denied with view-only access, the error is an `Auth`
    that names the app and the service account. Access can take hours to propagate.
@@ -102,7 +125,8 @@ message that names the app and the permission. A package Google does not know is
 Android's naming rules gets the same `Http 404`, decided locally without a request.
 Quota and server errors are `Http`. The iOS app connects Google Play accounts and lists
 apps through the core; the Flutter apps only label the service so far, and the new
-capabilities have no FRB wrappers yet (Play reviews already work through `FrbReviews`).
+capabilities (`AppDetails`, `StoreListings`, `Tracks`, `AppIcons`) have no FRB wrappers
+yet (Play reviews already work through `FrbReviews`; `Capability` itself crosses FRB).
 
 **Design as built.** Each provider owns a concrete authenticator (`auth::es256` for App
 Store Connect, `auth::oauth_jwt` for Google) and shares `http_debug` for sending and
@@ -122,7 +146,7 @@ crates/stack_core/                    # the core crate
     auth/es256.rs                     # ES256 (P-256 / .p8) JWT for App Store Connect
     auth/oauth_jwt.rs                 # Google service-account RS256 JWT-bearer -> access token
     auth/token.rs                     # token cache primitives shared by the authenticators
-    http_debug.rs                     # shared HTTP send + debug tracing (runnable cURL)
+    http_debug.rs                     # shared HTTP send + debug tracing (runnable cURL; capped, body-less variant for HTML pages)
     domain.rs                         # uniffi::Record value types (AppInfo, ...)
     error.rs                          # StackError (uniffi::Error)
     ports.rs                          # foreign traits: CredentialStore, BlobStore, DebugLogger
@@ -135,7 +159,8 @@ crates/stack_core/                    # the core crate
       capabilities/                   # one module per capability (sub-object off Provider)
     providers/appstore/               # the App Store Connect plugin (client + provider)
     providers/googleplay/             # the Google Play plugin: client (transport + Reporting API),
-                                      #   reviews, edits (edit-session reads), error, timestamp, provider
+                                      #   reviews, edits (edit-session reads), store_page (icons from the
+                                      #   public store page), error, timestamp, provider
     frb_api.rs / frb_generated.rs     # flutter_rust_bridge facade (feature = "frb")
     bin/uniffi-bindgen.rs             # embedded bindgen, pinned to the runtime version
 bindings/
@@ -163,7 +188,7 @@ Rust toolchain **1.96.0** (pinned in `rust-toolchain.toml`). Recipes via [`just`
 
 ```bash
 just                       # list recipes
-just test                  # cargo test -p stack_core (477 lib + 8 facade tests)
+just test                  # cargo test -p stack_core (516 lib + 9 facade tests)
 just build-xcframework     # Swift bindings + xcframework (macOS)
 just gen-dart              # Dart FRB bindings into bindings/dart (regenerates frb_generated.rs)
 just build-android         # libstack_core.so (FRB) into the Flutter jniLibs
