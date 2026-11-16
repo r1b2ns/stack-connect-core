@@ -159,6 +159,7 @@ fn connect_google_play_reports_kind_and_capabilities() {
             Capability::Tracks,
             Capability::AppIcons,
             Capability::ReleaseManagement,
+            Capability::PlayUsers,
         ]
     );
     // The Play handles are present ...
@@ -167,6 +168,7 @@ fn connect_google_play_reports_kind_and_capabilities() {
     assert!(provider.store_listings().is_some());
     assert!(provider.tracks().is_some());
     assert!(provider.app_icons().is_some());
+    assert!(provider.play_users().is_some());
     // ... and every App Store Connect-only one is absent.
     assert!(provider.app_store_versions().is_none());
     assert!(provider.builds().is_none());

@@ -22,6 +22,7 @@ pub(crate) mod builds;
 pub(crate) mod bundle_ids;
 pub(crate) mod certificates;
 pub(crate) mod devices;
+pub(crate) mod play_users;
 pub(crate) mod profiles;
 pub(crate) mod reviews;
 pub(crate) mod store_listings;

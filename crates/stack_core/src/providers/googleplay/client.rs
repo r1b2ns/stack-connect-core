@@ -17,6 +17,9 @@ const DEFAULT_REPORTING_BASE_URL: &str = "https://playdeveloperreporting.googlea
 const DEFAULT_PUBLISHER_BASE_URL: &str = "https://androidpublisher.googleapis.com";
 /// Path segments from the Android Publisher host to the per-app resources.
 const PUBLISHER_APPLICATIONS_PATH: [&str; 3] = ["androidpublisher", "v3", "applications"];
+/// Path segments from the Android Publisher host to the developer-account
+/// resources (users and grants).
+const PUBLISHER_DEVELOPERS_PATH: [&str; 3] = ["androidpublisher", "v3", "developers"];
 /// The only endpoint that lists a Play account's apps.
 const APPS_SEARCH_PATH: &str = "/v1beta1/apps:search";
 /// `validate` only needs to know the call is authorized.
@@ -117,6 +120,28 @@ fn ensure_package_name(name: &str) -> Result<(), StackError> {
     })
 }
 
+/// Whether `id` can be a Play developer account ID: the decimal number in
+/// every Play Console URL (`…/console/developers/{id}/…`).
+pub(super) fn is_valid_developer_id(id: &str) -> bool {
+    !id.is_empty() && id.bytes().all(|b| b.is_ascii_digit())
+}
+
+/// Rejects a developer ID that cannot exist before any request, as a local
+/// [`StackError::Http`] `404` (like [`ensure_package_name`]).
+fn ensure_developer_id(id: &str) -> Result<(), StackError> {
+    if is_valid_developer_id(id) {
+        return Ok(());
+    }
+    Err(StackError::Http {
+        status: 404,
+        message: format!(
+            "{id:?} is not a valid Google Play developer account ID (the number in a Play \
+             Console URL after /developers/), so no developer account can have it (checked \
+             locally; nothing was sent to Google)."
+        ),
+    })
+}
+
 /// Google Play client: the shared transport (bearer token, one retry on 401,
 /// debug tracing, error mapping) plus the Reporting API calls that validate
 /// credentials and list apps. Reviews and edit-based reads live in sibling
@@ -210,6 +235,32 @@ impl GooglePlayClient {
         segments: &[&str],
     ) -> Result<reqwest::Url, StackError> {
         ensure_package_name(package_name)?;
+        self.api_url(&PUBLISHER_APPLICATIONS_PATH, package_name, segments)
+    }
+
+    /// `{publisher}/androidpublisher/v3/developers/{developer_id}/{segments…}`,
+    /// encoded like [`Self::publisher_url`].
+    ///
+    /// # Errors
+    /// [`StackError::Http`] `404` for an invalid developer ID (see
+    /// [`is_valid_developer_id`]); otherwise as [`Self::publisher_url`].
+    pub(super) fn developer_url(
+        &self,
+        developer_id: &str,
+        segments: &[&str],
+    ) -> Result<reqwest::Url, StackError> {
+        ensure_developer_id(developer_id)?;
+        self.api_url(&PUBLISHER_DEVELOPERS_PATH, developer_id, segments)
+    }
+
+    /// `{publisher}/{prefix…}/{owner}/{segments…}`, each segment encoded on its
+    /// own. `owner` was validated by the caller.
+    fn api_url(
+        &self,
+        prefix: &[&str],
+        owner: &str,
+        segments: &[&str],
+    ) -> Result<reqwest::Url, StackError> {
         // The URL parser would drop a `.`/`..` segment and keep an empty one,
         // silently addressing another resource.
         if let Some(bad) = segments.iter().find(|s| matches!(**s, "" | "." | "..")) {
@@ -223,8 +274,8 @@ impl GooglePlayClient {
         url.path_segments_mut()
             .map_err(|()| StackError::network("invalid Google Play API URL: not a base URL"))?
             .pop_if_empty()
-            .extend(PUBLISHER_APPLICATIONS_PATH)
-            .push(package_name)
+            .extend(prefix)
+            .push(owner)
             .extend(segments);
         Ok(url)
     }
@@ -1180,6 +1231,38 @@ mod tests {
                 other => panic!("expected Decode for {segment:?}, got {other:?}"),
             }
         }
+    }
+
+    #[test]
+    fn developer_url_appends_encoded_segments() {
+        let client = offline_client("http://reporting.test", "http://publisher.test");
+        let url = client
+            .developer_url("5374", &["users", "a+b@example.com", "grants", "com.x.y"])
+            .unwrap();
+        assert_eq!(
+            url.as_str(),
+            "http://publisher.test/androidpublisher/v3/developers/5374/users/\
+             a+b@example.com/grants/com.x.y"
+        );
+    }
+
+    #[test]
+    fn developer_url_rejects_invalid_ids_as_local_404() {
+        let client = offline_client("http://reporting.test", "http://publisher.test");
+        for id in ["", "..", "12a", " 12", "1/2", "-1"] {
+            match client.developer_url(id, &["users"]).unwrap_err() {
+                StackError::Http { status, message } => {
+                    assert_eq!(status, 404);
+                    assert!(message.contains("is not a valid Google Play developer account ID"));
+                    assert!(message.contains("nothing was sent to Google"));
+                }
+                other => panic!("expected Http 404 for {id:?}, got {other:?}"),
+            }
+        }
+        assert!(matches!(
+            client.developer_url("1", &["users", ".."]).unwrap_err(),
+            StackError::Decode { .. }
+        ));
     }
 
     #[test]

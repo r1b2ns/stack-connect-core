@@ -18,6 +18,7 @@ use crate::service::capabilities::builds::Builds;
 use crate::service::capabilities::bundle_ids::BundleIds;
 use crate::service::capabilities::certificates::Certificates;
 use crate::service::capabilities::devices::Devices;
+use crate::service::capabilities::play_users::PlayUsers;
 use crate::service::capabilities::profiles::Profiles;
 use crate::service::capabilities::reviews::Reviews;
 use crate::service::capabilities::store_listings::StoreListings;
@@ -65,6 +66,10 @@ pub enum Capability {
     /// plus the bundles a release can be made from. Hosts hide every release
     /// write on providers without it. Served by the [`Tracks`] handle.
     ReleaseManagement,
+    /// The users of a Google Play developer account and their per-app grants
+    /// ([`PlayUsers`]). Distinct from [`Capability::Users`], whose App Store
+    /// shape (roles, visible apps) does not fit Google Play.
+    PlayUsers,
 }
 
 /// Internal, non-exported contract every concrete plugin implements. Kept off the
@@ -206,6 +211,12 @@ pub(crate) trait ProviderImpl: Send + Sync {
     /// The App Icons capability handle, or `None` if this provider lacks
     /// [`Capability::AppIcons`]. Default `None` so providers opt in explicitly.
     fn app_icons(&self) -> Option<Arc<AppIcons>> {
+        None
+    }
+
+    /// The Play Users capability handle, or `None` if this provider lacks
+    /// [`Capability::PlayUsers`]. Default `None` so providers opt in explicitly.
+    fn play_users(&self) -> Option<Arc<PlayUsers>> {
         None
     }
 }
@@ -387,6 +398,14 @@ impl Provider {
     /// unsupported.
     pub fn app_icons(&self) -> Option<Arc<AppIcons>> {
         self.inner.app_icons()
+    }
+
+    /// The Play Users capability handle, or `None` when this provider does not
+    /// expose [`Capability::PlayUsers`]. This is the discovery mechanism: the
+    /// host calls `provider.play_users()` and gets `None` when Google Play user
+    /// management is unsupported.
+    pub fn play_users(&self) -> Option<Arc<PlayUsers>> {
+        self.inner.play_users()
     }
 }
 

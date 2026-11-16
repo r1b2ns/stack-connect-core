@@ -97,12 +97,13 @@ final class SmokeTests: XCTestCase {
 
     func testGooglePlayCapabilitiesCrossFFI() throws {
         let play = try connectGooglePlay()
-        XCTAssertEqual(play.capabilities(), [.apps, .reviews, .appDetails, .storeListings, .tracks, .appIcons, .releaseManagement])
+        XCTAssertEqual(play.capabilities(), [.apps, .reviews, .appDetails, .storeListings, .tracks, .appIcons, .releaseManagement, .playUsers])
         XCTAssertNotNil(play.reviews())
         XCTAssertNotNil(play.appDetails())
         XCTAssertNotNil(play.storeListings())
         XCTAssertNotNil(play.tracks())
         XCTAssertNotNil(play.appIcons())
+        XCTAssertNotNil(play.playUsers())
         XCTAssertNil(play.appStoreVersions())
         XCTAssertNil(play.builds())
     }
@@ -129,6 +130,16 @@ final class SmokeTests: XCTestCase {
             XCTFail("expected a rollout fraction of 1 to be rejected")
         } catch StackError.Http(let status, _) {
             XCTAssertEqual(status, 400)
+        }
+    }
+
+    func testGooglePlayUsersRejectAnInvalidDeveloperIdBeforeAnyRequest() async throws {
+        let users = try XCTUnwrap(try connectGooglePlay().playUsers())
+        do {
+            _ = try await users.fetchUsers(developerId: "not-a-number")
+            XCTFail("expected an invalid developer ID to be rejected")
+        } catch StackError.Http(let status, _) {
+            XCTAssertEqual(status, 404)
         }
     }
 

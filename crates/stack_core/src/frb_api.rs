@@ -3119,6 +3119,7 @@ mod tests {
                 Capability::Tracks,
                 Capability::AppIcons,
                 Capability::ReleaseManagement,
+                Capability::PlayUsers,
             ]
         );
         // Play reviews reach Dart through the existing `FrbReviews` handle.

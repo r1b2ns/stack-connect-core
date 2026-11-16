@@ -37,6 +37,8 @@ pub(super) const PERMISSION_RELEASE_PRODUCTION: &str =
     "Release to production, exclude devices, and use app signing by Google Play";
 /// The Play Console permission changing a testing track needs.
 pub(super) const PERMISSION_RELEASE_TESTING: &str = "Release to testing tracks";
+/// The Play Console permission managing users and their access needs.
+pub(super) const PERMISSION_ADMIN: &str = "Admin (all permissions)";
 
 /// The Google API a request went to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -69,14 +71,23 @@ pub(super) enum Target<'a> {
     /// A resource inside the app (a review, an open edit): a 404 may mean that
     /// resource is gone, so Google's own message is kept as is.
     AppResource(&'a str),
+    /// A Play developer account itself (listing or inviting its users): a 404
+    /// means Google Play has no developer account with this ID.
+    Developer(&'a str),
+    /// A resource inside a developer account (a user, a grant): a 404 may mean
+    /// that resource is gone, so Google's own message is kept as is.
+    DeveloperResource(&'a str),
 }
 
-impl<'a> Target<'a> {
-    /// The package the call is scoped to, if any.
-    fn package(self) -> Option<&'a str> {
+impl Target<'_> {
+    /// What the call is scoped to, as "no access" messages name it.
+    fn subject(self) -> Option<String> {
         match self {
             Self::Account => None,
-            Self::App(package) | Self::AppResource(package) => Some(package),
+            Self::App(package) | Self::AppResource(package) => Some(format!("the app {package}")),
+            Self::Developer(id) | Self::DeveloperResource(id) => {
+                Some(format!("the developer account {id}"))
+            }
         }
     }
 }
@@ -211,7 +222,8 @@ fn google_message(parsed: Option<&GoogleErrorBody>, body: &str) -> String {
 ///   - anything else: the service account (`client_email`) must be invited in
 ///     Play Console with `hints.permission`.
 /// - **404** → [`StackError::Http`]; for a [`Target::App`] call the message
-///   says Google Play has no app with that package name.
+///   says Google Play has no app with that package name, for a
+///   [`Target::Developer`] call no developer account with that ID.
 /// - **Anything else** (400, 409, 429, 5xx) → [`StackError::Http`] carrying
 ///   Google's message: not a credential problem.
 pub(super) fn map_google_error(
@@ -243,7 +255,13 @@ pub(super) fn map_google_error(
                     "Google Play found no app with package name {package} (HTTP 404): \
                      check the package name. Google said: {google_msg}"
                 ),
-                Target::Account | Target::AppResource(_) => google_msg,
+                Target::Developer(id) => format!(
+                    "Google Play found no developer account with ID {id} (HTTP 404): \
+                     check the developer ID. Google said: {google_msg}"
+                ),
+                Target::Account | Target::AppResource(_) | Target::DeveloperResource(_) => {
+                    google_msg
+                }
             },
         },
         _ => StackError::Http {
@@ -281,10 +299,10 @@ fn map_forbidden(
 /// The "invite the service account in Play Console" message, naming the app
 /// when the call targets one and the permission the call needs.
 fn no_access(client_email: &str, hints: &ErrorHints<'_>, google_msg: &str) -> StackError {
-    let subject = match hints.target.package() {
-        Some(package) => format!("the app {package}"),
-        None => "this Google Play data".to_string(),
-    };
+    let subject = hints
+        .target
+        .subject()
+        .unwrap_or_else(|| "this Google Play data".to_string());
     StackError::auth(format!(
         "The service account {client_email} cannot access {subject}. \
          Invite it in Play Console > Users and permissions with at least \"{}\"; \
@@ -687,5 +705,52 @@ mod tests {
             assert_eq!(mapped, status);
             assert_eq!(message, "boom");
         }
+    }
+
+    #[test]
+    fn developer_404_says_the_developer_account_was_not_found() {
+        let body =
+            r#"{"error":{"code":404,"message":"Developer not found.","status":"NOT_FOUND"}}"#;
+        let (status, message) = http(map_google_error(
+            404,
+            body,
+            EMAIL,
+            &publisher(PERMISSION_ADMIN, Target::Developer("1234")),
+        ));
+        assert_eq!(status, 404);
+        assert_eq!(
+            message,
+            "Google Play found no developer account with ID 1234 (HTTP 404): check the \
+             developer ID. Google said: Developer not found. [NOT_FOUND]"
+        );
+
+        let (_, message) = http(map_google_error(
+            404,
+            body,
+            EMAIL,
+            &publisher(PERMISSION_ADMIN, Target::DeveloperResource("1234")),
+        ));
+        assert_eq!(message, "Developer not found. [NOT_FOUND]");
+    }
+
+    #[test]
+    fn developer_403_names_the_account_and_admin_and_keeps_googles_message() {
+        let body = r#"{"error":{"code":403,"message":"The caller does not have the CAN_MANAGE_PERMISSIONS_GLOBAL permission.","status":"PERMISSION_DENIED"}}"#;
+        let message = auth_message(map_google_error(
+            403,
+            body,
+            EMAIL,
+            &publisher(PERMISSION_ADMIN, Target::DeveloperResource("1234")),
+        ));
+        assert_eq!(
+            message,
+            format!(
+                "The service account {EMAIL} cannot access the developer account 1234. \
+                 Invite it in Play Console > Users and permissions with at least \"Admin \
+                 (all permissions)\"; new access can take a while to propagate. Google \
+                 said: The caller does not have the CAN_MANAGE_PERMISSIONS_GLOBAL \
+                 permission. [PERMISSION_DENIED]"
+            )
+        );
     }
 }

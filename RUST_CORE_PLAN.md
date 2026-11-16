@@ -353,6 +353,18 @@ becomes a problem.
     a new release, whether Google requires `changesNotSentForReview` for a given app
     state, the 500-character release-notes limit, and whether `releases.list` 404s on an
     unknown track.
+- **Google Play — user management (`PlayUsers`). ✅ IN THE CORE.** Plan task U-C1.
+  `Capability::PlayUsers` (variant 21) and `Provider::play_users()`: a capability of its own,
+  because the App Store-shaped `Users` (roles, visible apps, names) cannot express Play's
+  account permissions, per-app grants and expiry. `providers/googleplay/users.rs` calls
+  `developers/{developer_id}/users` and `…/users/{email}/grants/{package}` (no edit):
+  paged list, invite (user, then grants, rolled back on a failed grant), patch with an
+  explicit update mask, delete, grant upsert (patch, create on `404`) and delete.
+  Permissions cross as raw strings. New `error::Target::{Developer, DeveloperResource}`
+  word the 404 / no-access messages for a developer account. Not validated against a live
+  account: the permission the caller needs (expected: Admin), whether `users.list` lists
+  service accounts, whether a grant patch on a missing grant answers `404`, whether a
+  mask with an absent `expirationTime` clears it, and the `pageSize` maximum.
 
 > **Out of scope (for now): Firebase.** It is **not** being migrated to the core at this
 > time — it remains implemented **natively in the iOS app** (`APIProviderFirebase`). If it

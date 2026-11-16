@@ -8116,6 +8116,7 @@ impl SseDecode for crate::service::provider::Capability {
             18 => crate::service::provider::Capability::Tracks,
             19 => crate::service::provider::Capability::AppIcons,
             20 => crate::service::provider::Capability::ReleaseManagement,
+            21 => crate::service::provider::Capability::PlayUsers,
             _ => unreachable!("Invalid variant for Capability: {}", inner),
         };
     }
@@ -10847,6 +10848,7 @@ impl flutter_rust_bridge::IntoDart for crate::service::provider::Capability {
             Self::Tracks => 18.into_dart(),
             Self::AppIcons => 19.into_dart(),
             Self::ReleaseManagement => 20.into_dart(),
+            Self::PlayUsers => 21.into_dart(),
             _ => unreachable!(),
         }
     }
@@ -11973,6 +11975,7 @@ impl SseEncode for crate::service::provider::Capability {
                 crate::service::provider::Capability::Tracks => 18,
                 crate::service::provider::Capability::AppIcons => 19,
                 crate::service::provider::Capability::ReleaseManagement => 20,
+                crate::service::provider::Capability::PlayUsers => 21,
                 _ => {
                     unimplemented!("");
                 }

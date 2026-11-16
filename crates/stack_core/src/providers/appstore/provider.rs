@@ -1414,6 +1414,7 @@ mod tests {
         assert!(p.app_details().is_none());
         assert!(p.store_listings().is_none());
         assert!(p.tracks().is_none());
+        assert!(p.play_users().is_none());
     }
 
     #[test]

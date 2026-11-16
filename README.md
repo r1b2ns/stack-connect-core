@@ -40,11 +40,12 @@ A generic `SyncService` drives persistence over the host's `BlobStore`. The type
 across every capability call. The iOS app runs on this core **only** — the legacy
 `appstoreconnect-swift-sdk` has been removed.
 
-**Google Play — apps, reviews, app detail, icons and release management in the core.**
-The `googleplay` provider (`ServiceKind::GooglePlay`) exposes `Apps`, `Reviews`,
-`AppDetails`, `StoreListings`, `Tracks`, `AppIcons` and `ReleaseManagement`; every App
-Store Connect-only accessor returns `None`. The only writes are review replies and
-`Tracks.apply_release_change`, the one call that commits an edit.
+**Google Play — apps, reviews, app detail, icons, release and user management in the
+core.** The `googleplay` provider (`ServiceKind::GooglePlay`) exposes `Apps`, `Reviews`,
+`AppDetails`, `StoreListings`, `Tracks`, `AppIcons`, `ReleaseManagement` and `PlayUsers`;
+every App Store Connect-only accessor returns `None`. The writes are review replies,
+`Tracks.apply_release_change` (the one call that commits an edit) and the `PlayUsers`
+calls.
 
 | | |
 | --- | --- |
@@ -57,6 +58,7 @@ Store Connect-only accessor returns `None`. The only writes are review replies a
 | `StoreListings` | `fetch_store_listings(app_id)` → `[StoreListingInfo]` (language, title, short/full description, video) from `edits.listings`. |
 | `Tracks` | `fetch_tracks(app_id)` → `[TrackInfo]` (track name + releases: name, status, version codes as decimal strings, user fraction, release notes, in-app update priority, optional country targeting) from `edits.tracks`; tracks without a release are included. `fetch_release_summaries(app_id, track)` → `[ReleaseSummaryInfo]` (track, name, raw `releaseLifecycleState`, version codes) from `GET applications/{package}/tracks/{track}/releases`, **without an edit** (a `404` track is an empty list). `fetch_bundles(app_id)` → `[BundleInfo]` (version code, SHA-256) from `edits.bundles`. |
 | `ReleaseManagement` | `Tracks.apply_release_change(app_id, track, change, options)` → the committed `TrackInfo`. See *Release changes* below. |
+| `PlayUsers` | `Provider.play_users()`, on `androidpublisher/v3/developers/{developer_id}/users` (no edit). `fetch_users` (all pages, `pageSize=100`, at most 100 pages) → `[PlayUserInfo]` (email, resource name, raw `accessState`, `expirationTime`, account permissions, grants, `partial`); `invite_user` (`users.create`, then one `grants.create` per grant, since `User.grants` is output-only; a failed grant removes the new invitation again, best effort); `update_user` (`users.patch?updateMask=developerAccountPermissions,expirationTime`, so `None` clears the expiry); `delete_user`; `set_grant` (`grants.patch?updateMask=appLevelPermissions`, falling back to `grants.create` on a `404`); `delete_grant`. Permissions are raw strings both ways. The developer ID (the number in a Play Console URL) is checked locally (digits only, else `Http 404`), as are e-mails and grant package names (`Http 400`). An unknown developer account is `Http 404` naming the ID; a denied call is `Auth` naming "Admin (all permissions)" and keeping Google's message. |
 | `AppIcons` | `fetch_icon_url(app_id)` → the app icon at 512 px, read from the **public** store page `GET https://play.google.com/store/apps/details?id={package}&hl=en` with no credentials (no token is minted, no `androidpublisher` call, no edit). See *App icons* below. |
 
 *Reviews, as mapped onto `CustomerReview`:* `id` is an **opaque composite**,
@@ -134,7 +136,8 @@ concurrent reads cannot invalidate each other.
    - "Reply to reviews" for `reply_to_review`;
    - "Release to production, exclude devices, and use app signing by Google Play"
      (production tracks) or "Release to testing tracks" (every other track) for
-     `apply_release_change`.
+     `apply_release_change`;
+   - "Admin (all permissions)" for `PlayUsers` (expected; not confirmed by Google's docs).
 
    `AppIcons` needs neither an API nor a permission: it reads the public store page.
 

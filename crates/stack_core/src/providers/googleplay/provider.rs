@@ -9,13 +9,14 @@ use super::PLAY_SCOPES;
 use crate::auth::oauth_jwt::{ServiceAccountAuthenticator, ServiceAccountKey};
 use crate::domain::{
     AppDetailsInfo, AppInfo, BundleInfo, CommitOptions, CustomerReview, CustomerReviewsPage,
-    ReleaseChange, ReleaseSummaryInfo, ReviewResponse, ReviewSubmission, StoreListingInfo,
-    TrackInfo,
+    PlayGrantInfo, PlayUserInfo, ReleaseChange, ReleaseSummaryInfo, ReviewResponse,
+    ReviewSubmission, StoreListingInfo, TrackInfo,
 };
 use crate::error::StackError;
 use crate::ports::DebugLogger;
 use crate::service::capabilities::app_details::{AppDetails, AppDetailsImpl};
 use crate::service::capabilities::app_icons::{AppIcons, AppIconsImpl};
+use crate::service::capabilities::play_users::{PlayUsers, PlayUsersImpl};
 use crate::service::capabilities::reviews::{Reviews, ReviewsImpl};
 use crate::service::capabilities::store_listings::{StoreListings, StoreListingsImpl};
 use crate::service::capabilities::tracks::{Tracks, TracksImpl};
@@ -98,6 +99,7 @@ impl ProviderImpl for GooglePlayProvider {
             Capability::Tracks,
             Capability::AppIcons,
             Capability::ReleaseManagement,
+            Capability::PlayUsers,
         ]
     }
 
@@ -136,6 +138,12 @@ impl ProviderImpl for GooglePlayProvider {
     fn app_icons(&self) -> Option<Arc<AppIcons>> {
         Some(AppIcons::new(Box::new(GooglePlayAppIcons {
             store_page: Arc::clone(&self.store_page),
+        })))
+    }
+
+    fn play_users(&self) -> Option<Arc<PlayUsers>> {
+        Some(PlayUsers::new(Box::new(GooglePlayUsers {
+            client: Arc::clone(&self.client),
         })))
     }
 }
@@ -292,6 +300,83 @@ impl AppIconsImpl for GooglePlayAppIcons {
     }
 }
 
+/// Google Play implementation of the [`PlayUsersImpl`] capability contract
+/// (`developers.users` and their grants; no edit). Holds the shared
+/// [`GooglePlayClient`] so it reuses the provider's token cache.
+struct GooglePlayUsers {
+    client: Arc<GooglePlayClient>,
+}
+
+#[async_trait]
+impl PlayUsersImpl for GooglePlayUsers {
+    async fn fetch_users(&self, developer_id: String) -> Result<Vec<PlayUserInfo>, StackError> {
+        self.client.fetch_users(&developer_id).await
+    }
+
+    async fn invite_user(
+        &self,
+        developer_id: String,
+        email: String,
+        account_permissions: Vec<String>,
+        grants: Vec<PlayGrantInfo>,
+        expiration_time: Option<String>,
+    ) -> Result<PlayUserInfo, StackError> {
+        self.client
+            .invite_user(
+                &developer_id,
+                &email,
+                &account_permissions,
+                &grants,
+                expiration_time.as_deref(),
+            )
+            .await
+    }
+
+    async fn update_user(
+        &self,
+        developer_id: String,
+        email: String,
+        account_permissions: Vec<String>,
+        expiration_time: Option<String>,
+    ) -> Result<PlayUserInfo, StackError> {
+        self.client
+            .update_user(
+                &developer_id,
+                &email,
+                &account_permissions,
+                expiration_time.as_deref(),
+            )
+            .await
+    }
+
+    async fn delete_user(&self, developer_id: String, email: String) -> Result<(), StackError> {
+        self.client.delete_user(&developer_id, &email).await
+    }
+
+    async fn set_grant(
+        &self,
+        developer_id: String,
+        email: String,
+        package_name: String,
+        app_level_permissions: Vec<String>,
+    ) -> Result<PlayGrantInfo, StackError> {
+        self.client
+            .set_grant(&developer_id, &email, &package_name, &app_level_permissions)
+            .await
+    }
+
+    async fn delete_grant(
+        &self,
+        developer_id: String,
+        email: String,
+        package_name: String,
+    ) -> Result<(), StackError> {
+        self.client
+            .delete_grant(&developer_id, &email, &package_name)
+            .await
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -311,7 +396,7 @@ mod tests {
         GooglePlayProvider::try_new(EMAIL, KID, PKCS8_PEM, None).unwrap()
     }
 
-    const PLAY_CAPABILITIES: [Capability; 7] = [
+    const PLAY_CAPABILITIES: [Capability; 8] = [
         Capability::Apps,
         Capability::Reviews,
         Capability::AppDetails,
@@ -319,6 +404,7 @@ mod tests {
         Capability::Tracks,
         Capability::AppIcons,
         Capability::ReleaseManagement,
+        Capability::PlayUsers,
     ];
 
     #[test]
@@ -336,6 +422,7 @@ mod tests {
         assert!(p.store_listings().is_some());
         assert!(p.tracks().is_some());
         assert!(p.app_icons().is_some());
+        assert!(p.play_users().is_some());
         // App Store Connect-only capabilities keep the trait's `None` default.
         assert!(p.app_store_versions().is_none());
         assert!(p.builds().is_none());
@@ -364,6 +451,7 @@ mod tests {
         assert!(p.store_listings().is_some());
         assert!(p.tracks().is_some());
         assert!(p.app_icons().is_some());
+        assert!(p.play_users().is_some());
         assert!(p.app_store_versions().is_none());
         assert!(p.builds().is_none());
         assert!(p.beta_groups().is_none());
@@ -394,6 +482,7 @@ mod tests {
                 Capability::AppIcons => p.app_icons().is_some(),
                 // Release writes live on the Tracks handle.
                 Capability::ReleaseManagement => p.tracks().is_some(),
+                Capability::PlayUsers => p.play_users().is_some(),
                 other => panic!("Google Play should not advertise {other:?}"),
             };
             assert!(has_handle, "{capability:?} has no handle");
@@ -640,6 +729,64 @@ mod tests {
             .unwrap_err();
         assert!(matches!(err, StackError::Http { status: 404, .. }));
         assert!(server.received_requests().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn play_users_handle_delegates_every_call() {
+        let server = MockServer::start().await;
+        mount_token(&server, "tok-1", 1).await;
+        let users = "/androidpublisher/v3/developers/42/users";
+        let user = format!("{users}/ana@example.com");
+        let grant = format!("{user}/grants/com.example.app");
+        let user_body = serde_json::json!({ "email": "ana@example.com" });
+        let grant_body = serde_json::json!({ "packageName": "com.example.app" });
+        for (verb, at, body) in [
+            (
+                "GET",
+                users.to_string(),
+                serde_json::json!({ "users": [user_body.clone()] }),
+            ),
+            ("POST", users.to_string(), user_body.clone()),
+            ("PATCH", user.clone(), user_body.clone()),
+            ("PATCH", grant.clone(), grant_body.clone()),
+            ("DELETE", grant.clone(), serde_json::json!({})),
+            ("DELETE", user.clone(), serde_json::json!({})),
+        ] {
+            Mock::given(method(verb))
+                .and(path(at))
+                .respond_with(ResponseTemplate::new(200).set_body_json(body))
+                .expect(1)
+                .mount(&server)
+                .await;
+        }
+
+        let handle = PlayUsers::new(Box::new(GooglePlayUsers {
+            client: Arc::new(client(&server)),
+        }));
+        let email = "ana@example.com".to_string();
+        assert_eq!(
+            handle.fetch_users("42".into()).await.unwrap()[0].email,
+            email
+        );
+        let invited = handle
+            .invite_user("42".into(), email.clone(), vec![], vec![], None)
+            .await
+            .unwrap();
+        assert_eq!(invited.email, email);
+        handle
+            .update_user("42".into(), email.clone(), vec![], None)
+            .await
+            .unwrap();
+        let stored = handle
+            .set_grant("42".into(), email.clone(), "com.example.app".into(), vec![])
+            .await
+            .unwrap();
+        assert_eq!(stored.package_name, "com.example.app");
+        handle
+            .delete_grant("42".into(), email.clone(), "com.example.app".into())
+            .await
+            .unwrap();
+        handle.delete_user("42".into(), email).await.unwrap();
     }
 
     #[tokio::test]

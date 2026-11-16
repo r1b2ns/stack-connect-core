@@ -42,9 +42,9 @@ pub use domain::{
     AppInfo, AppReviewDetailInfo, AppStoreLocalizationInfo, AppStoreVersionInfo, BetaGroupInfo,
     BetaTesterInfo, BuildDetailInfo, BuildInfo, BuildsPage, BundleInfo, ChangesInReviewBehavior,
     CommitOptions, CountryTargetingInfo, CustomerReview, CustomerReviewsPage, LocalizedTextInfo,
-    NewRelease, NewReleaseStatus, PhasedReleaseInfo, ReleaseChange, ReleaseMetadataUpdate,
-    ReleaseSummaryInfo, ReviewResponse, ReviewSubmission, ScreenshotInfo, ScreenshotSetInfo,
-    StoreListingInfo, TrackInfo, TrackReleaseInfo,
+    NewRelease, NewReleaseStatus, PhasedReleaseInfo, PlayGrantInfo, PlayUserInfo, ReleaseChange,
+    ReleaseMetadataUpdate, ReleaseSummaryInfo, ReviewResponse, ReviewSubmission, ScreenshotInfo,
+    ScreenshotSetInfo, StoreListingInfo, TrackInfo, TrackReleaseInfo,
 };
 pub use error::StackError;
 pub use facade::{available_services, connect, credential_schema, make_sync_service};
@@ -55,6 +55,7 @@ pub use service::capabilities::app_icons::AppIcons;
 pub use service::capabilities::app_store_versions::AppStoreVersions;
 pub use service::capabilities::beta_groups::BetaGroups;
 pub use service::capabilities::builds::Builds;
+pub use service::capabilities::play_users::PlayUsers;
 pub use service::capabilities::reviews::Reviews;
 pub use service::capabilities::store_listings::StoreListings;
 pub use service::capabilities::tracks::Tracks;

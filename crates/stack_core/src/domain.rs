@@ -981,3 +981,42 @@ pub enum ChangesInReviewBehavior {
     /// edit is then deleted like after any other failure.
     ErrorIfInReview,
 }
+
+/// A user of a Google Play developer account (`developers.users`), with the
+/// raw Google values passed through:
+///
+/// - `email`: the user's (or service account's) e-mail; it identifies the user
+///   in every other call.
+/// - `name`: Google's resource name, `developers/{developer}/users/{email}`.
+/// - `access_state`: `INVITED`, `INVITATION_EXPIRED`, `ACCESS_GRANTED`,
+///   `ACCESS_EXPIRED` (or `ACCESS_STATE_UNSPECIFIED`); `None` when absent. A
+///   state Google adds later passes through unchanged.
+/// - `expiration_time`: when the access expires, as Google's RFC 3339 text
+///   (e.g. `2027-01-01T00:00:00Z`); `None` when it never does.
+/// - `developer_account_permissions`: account-wide permissions such as
+///   `CAN_MANAGE_PERMISSIONS_GLOBAL` (Admin), as raw strings.
+/// - `grants`: per-app access.
+/// - `partial`: `true` when the caller cannot see (and so cannot manage) every
+///   permission of this user, e.g. the account owner.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, uniffi::Record)]
+#[serde(rename_all = "camelCase")]
+pub struct PlayUserInfo {
+    pub email: String,
+    pub name: Option<String>,
+    pub access_state: Option<String>,
+    pub expiration_time: Option<String>,
+    pub developer_account_permissions: Vec<String>,
+    pub grants: Vec<PlayGrantInfo>,
+    pub partial: bool,
+}
+
+/// One app a Google Play user has access to (`developers.users.grants`).
+/// `package_name` is the app's package name (for a draft app without one,
+/// Google's app ID from the grant's resource name); `app_level_permissions`
+/// are raw strings such as `CAN_REPLY_TO_REVIEWS`.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, uniffi::Record)]
+#[serde(rename_all = "camelCase")]
+pub struct PlayGrantInfo {
+    pub package_name: String,
+    pub app_level_permissions: Vec<String>,
+}
