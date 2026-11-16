@@ -776,6 +776,9 @@ pub struct TrackInfo {
 ///   rollout is `inProgress` or `halted`.
 /// - `release_notes`: the localized "What's new" texts.
 /// - `in_app_update_priority`: `0` to `5`, `None` when unset.
+/// - `country_targeting`: the countries the release is restricted to; `None`
+///   when it is not restricted (Google only allows it on `inProgress`
+///   production releases).
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize, uniffi::Record)]
 #[serde(rename_all = "camelCase")]
 pub struct TrackReleaseInfo {
@@ -785,6 +788,19 @@ pub struct TrackReleaseInfo {
     pub user_fraction: Option<f64>,
     pub release_notes: Vec<LocalizedTextInfo>,
     pub in_app_update_priority: Option<i32>,
+    /// `#[serde(default)]` so JSON written before the field existed decodes.
+    #[serde(default)]
+    pub country_targeting: Option<CountryTargetingInfo>,
+}
+
+/// The countries a Google Play release is restricted to (`CountryTargeting`).
+/// `countries` are two-letter CLDR region codes (e.g. `BR`), in Google's order;
+/// `include_rest_of_world` also serves every country not listed.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, uniffi::Record)]
+#[serde(rename_all = "camelCase")]
+pub struct CountryTargetingInfo {
+    pub countries: Vec<String>,
+    pub include_rest_of_world: bool,
 }
 
 /// A text in one language, e.g. a release note. `language` is a BCP-47 code.

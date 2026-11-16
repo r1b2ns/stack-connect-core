@@ -20,7 +20,8 @@ use super::error::{ErrorHints, GoogleApi, Target, PERMISSION_VIEW_APP_INFO};
 use super::non_blank;
 use super::timestamp::Int64;
 use crate::domain::{
-    AppDetailsInfo, LocalizedTextInfo, StoreListingInfo, TrackInfo, TrackReleaseInfo,
+    AppDetailsInfo, CountryTargetingInfo, LocalizedTextInfo, StoreListingInfo, TrackInfo,
+    TrackReleaseInfo,
 };
 use crate::error::StackError;
 
@@ -85,7 +86,7 @@ struct PlayTrack {
     releases: Vec<PlayRelease>,
 }
 
-/// A `TrackRelease` (`countryTargeting` is not mapped yet).
+/// A `TrackRelease`.
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct PlayRelease {
@@ -102,6 +103,18 @@ struct PlayRelease {
     release_notes: Vec<PlayLocalizedText>,
     #[serde(default)]
     in_app_update_priority: Option<i32>,
+    #[serde(default)]
+    country_targeting: Option<PlayCountryTargeting>,
+}
+
+/// A `CountryTargeting`. Proto3 JSON omits an empty list and a `false` flag.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PlayCountryTargeting {
+    #[serde(default)]
+    countries: Vec<String>,
+    #[serde(default)]
+    include_rest_of_world: bool,
 }
 
 #[derive(Deserialize)]
@@ -171,6 +184,12 @@ impl PlayRelease {
                 })
                 .collect(),
             in_app_update_priority: self.in_app_update_priority,
+            country_targeting: self
+                .country_targeting
+                .map(|targeting| CountryTargetingInfo {
+                    countries: targeting.countries,
+                    include_rest_of_world: targeting.include_rest_of_world,
+                }),
         }
     }
 }
@@ -872,6 +891,10 @@ mod tests {
                                 },
                             ],
                             in_app_update_priority: Some(3),
+                            country_targeting: Some(CountryTargetingInfo {
+                                countries: vec!["BR".into()],
+                                include_rest_of_world: false,
+                            }),
                         },
                         TrackReleaseInfo {
                             name: None,
@@ -880,6 +903,7 @@ mod tests {
                             user_fraction: None,
                             release_notes: vec![],
                             in_app_update_priority: None,
+                            country_targeting: None,
                         },
                     ],
                 },
@@ -927,5 +951,45 @@ mod tests {
             .unwrap()
             .is_empty());
         assert!(client.fetch_tracks(PACKAGE).await.unwrap().is_empty());
+    }
+
+    #[test]
+    fn country_targeting_maps_omitted_fields_to_defaults() {
+        let release: PlayRelease = serde_json::from_value(serde_json::json!({
+            "status": "inProgress",
+            "countryTargeting": { "includeRestOfWorld": true }
+        }))
+        .unwrap();
+        assert_eq!(
+            release.into_info().country_targeting,
+            Some(CountryTargetingInfo {
+                countries: vec![],
+                include_rest_of_world: true,
+            })
+        );
+
+        let release: PlayRelease = serde_json::from_value(serde_json::json!({
+            "countryTargeting": { "countries": ["DE", "AT"] }
+        }))
+        .unwrap();
+        assert_eq!(
+            release.into_info().country_targeting,
+            Some(CountryTargetingInfo {
+                countries: vec!["DE".into(), "AT".into()],
+                include_rest_of_world: false,
+            })
+        );
+    }
+
+    #[test]
+    fn track_release_json_without_country_targeting_still_decodes() {
+        // Hosts may hold `TrackReleaseInfo` JSON written before the field
+        // existed (the record's own serde shape, not Google's).
+        let release: TrackReleaseInfo = serde_json::from_value(serde_json::json!({
+            "name": "1.0", "status": "completed", "versionCodes": ["1"],
+            "userFraction": null, "releaseNotes": [], "inAppUpdatePriority": null
+        }))
+        .unwrap();
+        assert_eq!(release.country_targeting, None);
     }
 }
