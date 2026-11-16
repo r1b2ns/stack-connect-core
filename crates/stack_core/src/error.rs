@@ -33,6 +33,15 @@ pub enum StackError {
     /// honestly (e.g. point the user at the App Store Connect website).
     #[error("submission not removable: {message}")]
     SubmissionNotRemovable { message: String },
+
+    /// The release a Google Play track change targets (identified by its
+    /// version codes) is not on the track any more: someone else replaced,
+    /// completed or removed it since the host read the track. Nothing was
+    /// changed; the host should reload the track and let the user decide again.
+    ///
+    /// Appended last: both bindings encode a variant by its position.
+    #[error("release not found: {message}")]
+    ReleaseNotFound { message: String },
 }
 
 impl StackError {
@@ -74,6 +83,12 @@ impl StackError {
 
     pub(crate) fn submission_not_removable(message: impl Into<String>) -> Self {
         Self::SubmissionNotRemovable {
+            message: message.into(),
+        }
+    }
+
+    pub(crate) fn release_not_found(message: impl Into<String>) -> Self {
+        Self::ReleaseNotFound {
             message: message.into(),
         }
     }

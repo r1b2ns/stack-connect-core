@@ -9130,6 +9130,12 @@ impl SseDecode for crate::error::StackError {
                     message: var_message,
                 };
             }
+            8 => {
+                let mut var_message = <String>::sse_decode(deserializer);
+                return crate::error::StackError::ReleaseNotFound {
+                    message: var_message,
+                };
+            }
             _ => {
                 unimplemented!("");
             }
@@ -11159,6 +11165,9 @@ impl flutter_rust_bridge::IntoDart for crate::error::StackError {
             crate::error::StackError::SubmissionNotRemovable { message } => {
                 [7.into_dart(), message.into_into_dart().into_dart()].into_dart()
             }
+            crate::error::StackError::ReleaseNotFound { message } => {
+                [8.into_dart(), message.into_into_dart().into_dart()].into_dart()
+            }
             _ => {
                 unimplemented!("");
             }
@@ -12760,6 +12769,10 @@ impl SseEncode for crate::error::StackError {
             }
             crate::error::StackError::SubmissionNotRemovable { message } => {
                 <i32>::sse_encode(7, serializer);
+                <String>::sse_encode(message, serializer);
+            }
+            crate::error::StackError::ReleaseNotFound { message } => {
+                <i32>::sse_encode(8, serializer);
                 <String>::sse_encode(message, serializer);
             }
             _ => {

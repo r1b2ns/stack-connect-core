@@ -6,7 +6,8 @@
 //! list-apps endpoint. Everything else goes to the Android Publisher API
 //! (`androidpublisher` v3): reviews (`reviews`) and the edit-scoped reads —
 //! app details, store listings, tracks (`edits`), plus the edit-free release
-//! summaries of a track (`releases`). App icons are the exception:
+//! summaries of a track (`releases`) and track writes (`track_writes`, one
+//! committed edit per change, built by the pure `release_change`). App icons are the exception:
 //! they come from the public store page (`store_page`), without credentials and
 //! without an edit.
 //!
@@ -22,12 +23,14 @@ mod client;
 mod edits;
 mod error;
 mod provider;
+mod release_change;
 mod releases;
 mod reviews;
 mod store_page;
 #[cfg(test)]
 mod test_support;
 mod timestamp;
+mod track_writes;
 
 use crate::service::kind::CredentialField;
 

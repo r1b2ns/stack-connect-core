@@ -8,8 +8,9 @@ use super::store_page::StorePageClient;
 use super::PLAY_SCOPES;
 use crate::auth::oauth_jwt::{ServiceAccountAuthenticator, ServiceAccountKey};
 use crate::domain::{
-    AppDetailsInfo, AppInfo, BundleInfo, CustomerReview, CustomerReviewsPage, ReleaseSummaryInfo,
-    ReviewResponse, ReviewSubmission, StoreListingInfo, TrackInfo,
+    AppDetailsInfo, AppInfo, BundleInfo, CommitOptions, CustomerReview, CustomerReviewsPage,
+    ReleaseChange, ReleaseSummaryInfo, ReviewResponse, ReviewSubmission, StoreListingInfo,
+    TrackInfo,
 };
 use crate::error::StackError;
 use crate::ports::DebugLogger;
@@ -260,6 +261,18 @@ impl TracksImpl for GooglePlayTracks {
 
     async fn fetch_bundles(&self, app_id: String) -> Result<Vec<BundleInfo>, StackError> {
         self.client.fetch_bundles(&app_id).await
+    }
+
+    async fn apply_release_change(
+        &self,
+        app_id: String,
+        track: String,
+        change: ReleaseChange,
+        options: CommitOptions,
+    ) -> Result<TrackInfo, StackError> {
+        self.client
+            .apply_release_change(&app_id, &track, &change, options)
+            .await
     }
 }
 
@@ -580,6 +593,48 @@ mod tests {
         .unwrap();
         assert_eq!(summaries.len(), 1);
         assert_eq!(summaries[0].track, "beta");
+    }
+
+    #[tokio::test]
+    async fn tracks_handle_delegates_release_changes() {
+        // A locally invalid change proves the arguments reach the client in
+        // order (app id, track, change) without any network traffic.
+        let server = MockServer::start().await;
+        mount_token(&server, "tok-1", 0).await;
+        let tracks = Tracks::new(Box::new(GooglePlayTracks {
+            client: Arc::new(client(&server)),
+        }));
+        let options = CommitOptions {
+            send_for_review: true,
+            changes_in_review_behavior: None,
+        };
+
+        let err = tracks
+            .apply_release_change(
+                "com.example.app".into(),
+                "production".into(),
+                ReleaseChange::SetRollout {
+                    version_codes: vec!["42".into()],
+                    user_fraction: 1.0,
+                },
+                options,
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(err, StackError::Http { status: 400, .. }));
+        let err = tracks
+            .apply_release_change(
+                "not a package".into(),
+                "production".into(),
+                ReleaseChange::Halt {
+                    version_codes: vec!["42".into()],
+                },
+                options,
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(err, StackError::Http { status: 404, .. }));
+        assert!(server.received_requests().await.unwrap().is_empty());
     }
 
     #[tokio::test]

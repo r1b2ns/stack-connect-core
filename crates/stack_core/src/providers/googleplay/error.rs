@@ -32,6 +32,11 @@ const ERROR_INFO_TYPE_SUFFIX: &str = "google.rpc.ErrorInfo";
 pub(super) const PERMISSION_VIEW_APP_INFO: &str = "View app information (read-only)";
 /// The Play Console permission replying to reviews needs.
 pub(super) const PERMISSION_REPLY_TO_REVIEWS: &str = "Reply to reviews";
+/// The Play Console permission changing the production track needs.
+pub(super) const PERMISSION_RELEASE_PRODUCTION: &str =
+    "Release to production, exclude devices, and use app signing by Google Play";
+/// The Play Console permission changing a testing track needs.
+pub(super) const PERMISSION_RELEASE_TESTING: &str = "Release to testing tracks";
 
 /// The Google API a request went to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

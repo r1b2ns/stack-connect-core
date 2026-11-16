@@ -26,7 +26,7 @@ use crate::domain::{
 use crate::error::StackError;
 
 /// The `edits` collection under an app.
-const EDITS: &str = "edits";
+pub(super) const EDITS: &str = "edits";
 
 /// An `AppEdit` as `edits.insert` returns it (`expiryTimeSeconds` unused).
 #[derive(Deserialize)]
@@ -79,7 +79,7 @@ struct TracksListResponse {
 }
 
 #[derive(Deserialize)]
-struct PlayTrack {
+pub(super) struct PlayTrack {
     #[serde(default)]
     track: Option<String>,
     #[serde(default)]
@@ -180,7 +180,7 @@ impl PlayListing {
 
 impl PlayTrack {
     /// `None` without a track name: it is what identifies a track.
-    fn into_info(self) -> Option<TrackInfo> {
+    pub(super) fn into_info(self) -> Option<TrackInfo> {
         Some(TrackInfo {
             track: non_blank(self.track)?,
             releases: self
@@ -256,30 +256,79 @@ impl GooglePlayClient {
         F: FnOnce(String) -> Fut,
         Fut: Future<Output = Result<T, StackError>>,
     {
-        let _session = self.edit_lock().lock().await;
-        let edit_id = self.insert_edit(package_name).await?;
-        let result = read(edit_id.clone()).await;
+        self.run_edit_session(package_name, PERMISSION_VIEW_APP_INFO, true, read)
+            .await
+    }
 
-        if let Err(err) = self.delete_edit(package_name, &edit_id).await {
-            self.trace(|| {
-                format!(
-                    "[RustCore] Google Play: could not delete edit {edit_id} of \
-                     {package_name} (ignored; it expires on its own): {err}"
-                )
-            });
+    /// Runs `work` inside an edit of `package_name` that `work` itself is
+    /// expected to commit: inserts an edit, hands its id to `work`, and deletes
+    /// the edit **only when `work` fails** (a committed edit no longer
+    /// exists). On failure `work`'s error wins over the delete's, which is
+    /// best effort as in [`Self::with_edit`]. Holds the same edit lock, so a
+    /// write never overlaps a read or another write through this client.
+    /// `permission` is the Play Console permission named if the insert is
+    /// denied.
+    ///
+    /// # Errors
+    /// The insert's error (then `work` never runs), else `work`'s.
+    pub(super) async fn with_committed_edit<T, F, Fut>(
+        &self,
+        package_name: &str,
+        permission: &str,
+        work: F,
+    ) -> Result<T, StackError>
+    where
+        F: FnOnce(String) -> Fut,
+        Fut: Future<Output = Result<T, StackError>>,
+    {
+        self.run_edit_session(package_name, permission, false, work)
+            .await
+    }
+
+    /// The edit session behind [`Self::with_edit`] (`delete_on_success`) and
+    /// [`Self::with_committed_edit`] (delete on failure only).
+    async fn run_edit_session<T, F, Fut>(
+        &self,
+        package_name: &str,
+        permission: &str,
+        delete_on_success: bool,
+        work: F,
+    ) -> Result<T, StackError>
+    where
+        F: FnOnce(String) -> Fut,
+        Fut: Future<Output = Result<T, StackError>>,
+    {
+        let _session = self.edit_lock().lock().await;
+        let edit_id = self.insert_edit(package_name, permission).await?;
+        let result = work(edit_id.clone()).await;
+
+        if delete_on_success || result.is_err() {
+            if let Err(err) = self.delete_edit(package_name, &edit_id).await {
+                self.trace(|| {
+                    format!(
+                        "[RustCore] Google Play: could not delete edit {edit_id} of \
+                         {package_name} (ignored; it expires on its own): {err}"
+                    )
+                });
+            }
         }
         result
     }
 
     /// `POST …/applications/{package_name}/edits` with an empty `AppEdit`,
     /// returning the new edit's id.
-    async fn insert_edit(&self, package_name: &str) -> Result<String, StackError> {
+    async fn insert_edit(
+        &self,
+        package_name: &str,
+        permission: &str,
+    ) -> Result<String, StackError> {
         let url = self.publisher_url(package_name, &[EDITS])?;
+        let hints = ErrorHints {
+            permission,
+            ..edit_hints(Target::App(package_name))
+        };
         let body = self
-            .execute(
-                || self.http().post(url.clone()).json(&json!({})),
-                &edit_hints(Target::App(package_name)),
-            )
+            .execute(|| self.http().post(url.clone()).json(&json!({})), &hints)
             .await?;
         let edit: AppEdit = serde_json::from_str(&body)
             .map_err(|e| StackError::decode(format!("edits.insert response: {e}")))?;

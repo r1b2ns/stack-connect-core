@@ -848,3 +848,136 @@ pub struct BundleInfo {
     pub version_code: String,
     pub sha256: Option<String>,
 }
+
+/// One change to a release on a Google Play track, applied by
+/// `Tracks::apply_release_change` inside a single edit (read the track fresh,
+/// apply, update, validate, commit).
+///
+/// The target release is identified by its `version_codes` (decimal strings,
+/// compared as a set of 64-bit integers, so order and leading zeros do not
+/// matter), never by name or position: names are optional and editable, and
+/// positions change when Google drops obsolete releases. A target that is not
+/// on the track any more is `StackError::ReleaseNotFound`.
+///
+/// Which status transitions are allowed is Google's call (`edits.validate`):
+/// the core only rejects values Google documents as invalid (a rollout
+/// fraction outside `(0, 1)`, an in-app update priority outside `0..=5`, a
+/// version code that is not an integer) before opening the edit.
+#[derive(Debug, Clone, PartialEq, uniffi::Enum)]
+pub enum ReleaseChange {
+    /// Staged rollout to `user_fraction` (`0 < f < 1`): status `inProgress`.
+    /// Starts a rollout from a draft, changes the fraction of a running one,
+    /// or restarts a halted one at a new fraction.
+    SetRollout {
+        version_codes: Vec<String>,
+        user_fraction: f64,
+    },
+    /// Stops serving the release to new users: status `halted` (the fraction
+    /// is kept, so a resume picks up where it stopped).
+    Halt { version_codes: Vec<String> },
+    /// Resumes a halted release: `inProgress` when it has a rollout fraction,
+    /// `completed` when it has none.
+    Resume { version_codes: Vec<String> },
+    /// Releases to everyone: status `completed`, no fraction. Every other
+    /// `completed` release on the track is dropped, as it is superseded.
+    Complete { version_codes: Vec<String> },
+    /// Changes the release's name, notes, priority or country targeting; the
+    /// status and rollout are left alone.
+    UpdateMetadata {
+        version_codes: Vec<String>,
+        update: ReleaseMetadataUpdate,
+    },
+    /// Adds a new release to the track (see [`NewRelease`] for what it
+    /// replaces).
+    CreateRelease { release: NewRelease },
+    /// Copies the release with `version_codes` from `from_track` to the target
+    /// track as a new release with `status`, read in the same edit. Its name,
+    /// release notes and in-app update priority are kept unless overridden;
+    /// country targeting is never copied (it is per track), only set through
+    /// `country_targeting`. Replaces releases on the target track like
+    /// [`ReleaseChange::CreateRelease`].
+    Promote {
+        from_track: String,
+        version_codes: Vec<String>,
+        status: NewReleaseStatus,
+        name: Option<String>,
+        release_notes: Option<Vec<LocalizedTextInfo>>,
+        in_app_update_priority: Option<i32>,
+        country_targeting: Option<CountryTargetingInfo>,
+    },
+}
+
+/// The fields [`ReleaseChange::UpdateMetadata`] changes. `None` leaves a field
+/// as it is.
+///
+/// - `name`: a blank name removes it (Google then derives one).
+/// - `release_notes`: replaces every language; an empty list removes them all.
+/// - `in_app_update_priority`: `0..=5`. Google refuses to change it once the
+///   release is rolled out.
+/// - `country_targeting`: replaces the targeting. It cannot be removed through
+///   this record (Google only allows it on `inProgress` production releases).
+#[derive(Debug, Clone, PartialEq, Eq, Default, uniffi::Record)]
+pub struct ReleaseMetadataUpdate {
+    pub name: Option<String>,
+    pub release_notes: Option<Vec<LocalizedTextInfo>>,
+    pub in_app_update_priority: Option<i32>,
+    pub country_targeting: Option<CountryTargetingInfo>,
+}
+
+/// A release [`ReleaseChange::CreateRelease`] adds to a track.
+///
+/// What it replaces on the track depends on `status`, following the Play
+/// Console's one-pending-release model:
+/// - `Draft`: replaces any other draft; a running rollout and the completed
+///   release keep serving.
+/// - `InProgress`: replaces drafts and any running or halted rollout; the
+///   completed release keeps serving the rest of the users.
+/// - `Completed`: replaces every release on the track.
+///
+/// `name: None` lets Google derive a name; `release_notes` may be empty.
+#[derive(Debug, Clone, PartialEq, uniffi::Record)]
+pub struct NewRelease {
+    pub version_codes: Vec<String>,
+    pub name: Option<String>,
+    pub release_notes: Vec<LocalizedTextInfo>,
+    pub status: NewReleaseStatus,
+    pub in_app_update_priority: Option<i32>,
+    pub country_targeting: Option<CountryTargetingInfo>,
+}
+
+/// The status a new release starts in.
+#[derive(Debug, Clone, PartialEq, uniffi::Enum)]
+pub enum NewReleaseStatus {
+    /// Not served to anyone (`draft`).
+    Draft,
+    /// A staged rollout to `user_fraction` of the users (`inProgress`,
+    /// `0 < f < 1`).
+    InProgress { user_fraction: f64 },
+    /// Served to everyone (`completed`).
+    Completed,
+}
+
+/// How `Tracks::apply_release_change` commits its edit (`edits.commit`).
+///
+/// - `send_for_review`: `false` sets `changesNotSentForReview=true`, so the
+///   changes wait in the Play Console until someone sends them for review
+///   there. Google rejects the commit with an explanatory message when the
+///   flag does not match the app's state.
+/// - `changes_in_review_behavior`: what to do when other changes are in
+///   review; `None` leaves it to Google (which cancels the review and submits).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Record)]
+pub struct CommitOptions {
+    pub send_for_review: bool,
+    pub changes_in_review_behavior: Option<ChangesInReviewBehavior>,
+}
+
+/// `changesInReviewBehavior` of `edits.commit`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum ChangesInReviewBehavior {
+    /// Cancel the review in progress, then submit everything
+    /// (`CANCEL_IN_REVIEW_AND_SUBMIT`).
+    CancelInReviewAndSubmit,
+    /// Fail the commit if changes are in review (`ERROR_IF_IN_REVIEW`); the
+    /// edit is then deleted like after any other failure.
+    ErrorIfInReview,
+}
