@@ -97,7 +97,7 @@ final class SmokeTests: XCTestCase {
 
     func testGooglePlayCapabilitiesCrossFFI() throws {
         let play = try connectGooglePlay()
-        XCTAssertEqual(play.capabilities(), [.apps, .reviews, .appDetails, .storeListings, .tracks, .appIcons])
+        XCTAssertEqual(play.capabilities(), [.apps, .reviews, .appDetails, .storeListings, .tracks, .appIcons, .releaseManagement])
         XCTAssertNotNil(play.reviews())
         XCTAssertNotNil(play.appDetails())
         XCTAssertNotNil(play.storeListings())
@@ -114,6 +114,21 @@ final class SmokeTests: XCTestCase {
             XCTFail("expected an invalid package name to be rejected")
         } catch StackError.Http(let status, _) {
             XCTAssertEqual(status, 404)
+        }
+    }
+
+    func testGooglePlayReleaseChangeRejectsAnInvalidFractionBeforeAnyRequest() async throws {
+        let tracks = try XCTUnwrap(try connectGooglePlay().tracks())
+        do {
+            _ = try await tracks.applyReleaseChange(
+                appId: "com.example.app",
+                track: "production",
+                change: .setRollout(versionCodes: ["42"], userFraction: 1.0),
+                options: CommitOptions(sendForReview: true, changesInReviewBehavior: nil)
+            )
+            XCTFail("expected a rollout fraction of 1 to be rejected")
+        } catch StackError.Http(let status, _) {
+            XCTAssertEqual(status, 400)
         }
     }
 

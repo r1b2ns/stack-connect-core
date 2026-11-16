@@ -99,7 +99,7 @@ do {
     fail("connect(.googlePlay) failed: \(error)")
 }
 let playCapabilities = play.capabilities()
-guard playCapabilities == [.apps, .reviews, .appDetails, .storeListings, .tracks, .appIcons] else {
+guard playCapabilities == [.apps, .reviews, .appDetails, .storeListings, .tracks, .appIcons, .releaseManagement] else {
     fail("Google Play capabilities mismatch, got: \(playCapabilities)")
 }
 print("ok: Google Play capabilities are \(playCapabilities)")

@@ -40,10 +40,11 @@ A generic `SyncService` drives persistence over the host's `BlobStore`. The type
 across every capability call. The iOS app runs on this core **only** — the legacy
 `appstoreconnect-swift-sdk` has been removed.
 
-**Google Play — apps, reviews, read-only app detail and icons in the core.** The
-`googleplay` provider (`ServiceKind::GooglePlay`) exposes `Apps`, `Reviews`, `AppDetails`,
-`StoreListings`, `Tracks` and `AppIcons`; every App Store Connect-only accessor returns
-`None`. Everything is read-only except review replies, and no edit is ever committed.
+**Google Play — apps, reviews, app detail, icons and release management in the core.**
+The `googleplay` provider (`ServiceKind::GooglePlay`) exposes `Apps`, `Reviews`,
+`AppDetails`, `StoreListings`, `Tracks`, `AppIcons` and `ReleaseManagement`; every App
+Store Connect-only accessor returns `None`. The only writes are review replies and
+`Tracks.apply_release_change`, the one call that commits an edit.
 
 | | |
 | --- | --- |
@@ -54,7 +55,8 @@ across every capability call. The iOS app runs on this core **only** — the leg
 | `Reviews` | The shared `Reviews` handle, on `androidpublisher/v3/applications/{package}/reviews`. `fetch_customer_reviews` follows `tokenPagination.nextPageToken` (`maxResults=100`, at most 100 pages). `fetch_customer_reviews_page`: Play has no server-side sort or filter, so `sort` must be `""` or `-createdDate` (Google's own order, most recent first; anything else is `Unsupported`), `filter_rating` is applied to each fetched page (a page can come back short or empty while `next_token` is still set), and `limit` is clamped to 1–100. `reply_to_review` posts `reviews/{id}:reply`; the text is sent as is and Google's own error comes back if it is too long. `delete_review_response` and the three review-submission methods are `Unsupported` (Play has no equivalent). |
 | `AppDetails` | `fetch_app_details(app_id)` → `AppDetailsInfo` (default language, contact email/phone/website) from `edits.details`. Doubles as the "can this service account reach package X?" check: `Ok` = yes, `Http 404` = no such package, `Auth` = no access or API disabled. |
 | `StoreListings` | `fetch_store_listings(app_id)` → `[StoreListingInfo]` (language, title, short/full description, video) from `edits.listings`. |
-| `Tracks` | `fetch_tracks(app_id)` → `[TrackInfo]` (track name + releases: name, status, version codes as decimal strings, user fraction, release notes, in-app update priority) from `edits.tracks`; tracks without a release are included. |
+| `Tracks` | `fetch_tracks(app_id)` → `[TrackInfo]` (track name + releases: name, status, version codes as decimal strings, user fraction, release notes, in-app update priority, optional country targeting) from `edits.tracks`; tracks without a release are included. `fetch_release_summaries(app_id, track)` → `[ReleaseSummaryInfo]` (track, name, raw `releaseLifecycleState`, version codes) from `GET applications/{package}/tracks/{track}/releases`, **without an edit** (a `404` track is an empty list). `fetch_bundles(app_id)` → `[BundleInfo]` (version code, SHA-256) from `edits.bundles`. |
+| `ReleaseManagement` | `Tracks.apply_release_change(app_id, track, change, options)` → the committed `TrackInfo`. See *Release changes* below. |
 | `AppIcons` | `fetch_icon_url(app_id)` → the app icon at 512 px, read from the **public** store page `GET https://play.google.com/store/apps/details?id={package}&hl=en` with no credentials (no token is minted, no `androidpublisher` call, no edit). See *App icons* below. |
 
 *Reviews, as mapped onto `CustomerReview`:* `id` is an **opaque composite**,
@@ -92,6 +94,26 @@ debug log, only its size. Store visibility, not Play Console access, decides the
 so an app the service account cannot see may still have an icon, and an app that is not
 live in the store (never published, or only on internal/closed testing tracks) has none.
 
+*Release changes (`ReleaseManagement`):* one `ReleaseChange` (`SetRollout`, `Halt`,
+`Resume`, `Complete`, `UpdateMetadata`, `CreateRelease`, `Promote`) is one committed edit:
+insert → `edits.tracks.get` (fresh; for `Promote` also the source track) → apply →
+`edits.tracks.update` (a full replace of the track's `releases[]`) → `edits.validate` →
+`edits.commit`. On any failure after the insert the edit is deleted (best effort) and the
+original error is returned, so nothing is published half-way. The releases are edited as
+the raw JSON Google returned, so fields the core does not model survive the full replace.
+A release is targeted by its version codes, compared as a set of integers (never by name
+or position); one that is not on the track any more is `ReleaseNotFound` and nothing is
+written. Values Google documents as invalid (a rollout fraction outside `(0, 1)`, an
+in-app update priority outside `0..=5`, a version code that is not a positive integer)
+are a local `Http 400` before any edit is opened; which status transitions are allowed is
+left to `edits.validate`, whose refusal comes back as `Http` with Google's message.
+`CommitOptions.send_for_review == false` sends `changesNotSentForReview=true`;
+`changes_in_review_behavior` maps to `changesInReviewBehavior` (omitted when `None`).
+A new release replaces what it supersedes: a draft replaces the draft; an `inProgress`
+release replaces the draft and any running or halted rollout and keeps the completed
+release; a `completed` release replaces every release on the track, and `Complete`
+drops the release it supersedes. Writes share the edit lock with the edit-based reads.
+
 *Edit sessions (`AppDetails`, `StoreListings`, `Tracks`):* the Android Publisher API only
 serves these inside an edit, so each call inserts an edit, reads, and **always** deletes
 the edit, even when the read fails. A failed delete is traced and otherwise ignored,
@@ -108,8 +130,11 @@ concurrent reads cannot invalidate each other.
    details, listings, tracks).
 2. Invite the service-account email in Play Console › Users and permissions:
    - "View app information (read-only)" for `Apps`, reading `Reviews`, and
-     `AppDetails` / `StoreListings` / `Tracks`;
-   - "Reply to reviews" for `reply_to_review`.
+     `AppDetails` / `StoreListings` / `Tracks` (reads);
+   - "Reply to reviews" for `reply_to_review`;
+   - "Release to production, exclude devices, and use app signing by Google Play"
+     (production tracks) or "Release to testing tracks" (every other track) for
+     `apply_release_change`.
 
    `AppIcons` needs neither an API nor a permission: it reads the public store page.
 
@@ -117,7 +142,8 @@ concurrent reads cannot invalidate each other.
    If the edit-based reads are denied with view-only access, the error is an `Auth`
    that names the app and the service account. Access can take hours to propagate.
 
-*Errors* map onto the existing `StackError` variants (no new variant). A disabled API
+*Errors* map onto the existing `StackError` variants, plus `ReleaseNotFound` (appended
+last) for a release change whose target left the track. A disabled API
 (`SERVICE_DISABLED`, named with its activation URL) or missing access (403, or the 401
 `permissionDenied` the Android Publisher API sends) is `Auth` with an actionable
 message that names the app and the permission. A package Google does not know is

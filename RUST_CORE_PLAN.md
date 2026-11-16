@@ -18,7 +18,7 @@
 | Bindings | **Swift/iOS via UniFFI** (done) + **Dart via flutter_rust_bridge** (active, for the Flutter Android+desktop apps) | Core stays **binding-agnostic** (thin facade per generator); FRB is a *separate* toolchain from UniFFI, added as a second facade behind a `frb` feature — see §11 |
 | Architecture | **Multi-service via plugins** (`Provider` + `registry`) | FFI surface **stable** regardless of how many services exist; new service does not touch core |
 | 1st service | **App Store Connect** | First complete plugin; validates the contract with a real service |
-| 2nd service | **Google Play**: first slice (connect + list apps) in the core | Second plugin on the same contract, with its own authenticator (`auth::oauth_jwt`) |
+| 2nd service | **Google Play**: apps, reviews, app detail, icons and release management in the core | Second plugin on the same contract, with its own authenticator (`auth::oauth_jwt`) |
 | Next | **Firebase** stays native in the iOS app for now → later **AWS, GitHub, …** | Enter as plugins reusing existing or new authenticators |
 | Apple | Client *subset* (~31 endpoint families), not the giant SDK | Avoids porting the 2,411 generated files from `appstoreconnect-swift-sdk` |
 | Persistence | **Native per platform via callback (`BlobStore`)** | Core *stateless*; iOS continues with SwiftData; lower-risk migration |
@@ -330,6 +330,29 @@ becomes a problem.
   - FRB: only the `Capability` codec was regenerated (variant 19); no new wrapper, content
     hash unchanged. Pending: an FRB `AppIcons` wrapper if the Flutter apps need icons;
     host-side caching of the URL (the core does not cache).
+- **Google Play — release status and release management. ✅ IN THE CORE.** Plan:
+  `stack-connect/docs/plans/google-play-releases.md` (C1–C5). `Capability::ReleaseManagement`
+  is appended (variant 20); Google Play reports `capabilities() == [Apps, Reviews,
+  AppDetails, StoreListings, Tracks, AppIcons, ReleaseManagement]`. Everything lives on the
+  existing `Tracks` handle:
+  - `fetch_release_summaries(app_id, track)` (`providers/googleplay/releases.rs`):
+    `GET applications/{package}/tracks/{track}/releases`, the only release read **outside an
+    edit**, so it never cancels a CI upload and is safe on automatic paths. Raw
+    `releaseLifecycleState`; a `404` track is an empty list.
+  - `TrackReleaseInfo.country_targeting` (optional, `serde(default)`), `fetch_bundles`
+    (`edits.bundles.list` in a throwaway edit).
+  - `apply_release_change(app_id, track, ReleaseChange, CommitOptions) -> TrackInfo`
+    (`track_writes.rs` for the I/O, the pure `release_change.rs` for validation and the
+    edit of `releases[]` as raw JSON). One committed edit per change: insert → get →
+    apply → update → validate → commit; any failure deletes the edit and the original
+    error wins. Targeting by version-code set; a missing target is the new
+    `StackError::ReleaseNotFound` (appended, variant 8). Local `Http 400` for documented
+    invalid values before any edit.
+  - FRB: `StackError` and `Capability` codecs regenerated, no new wrapper (the Flutter apps
+    don't read tracks yet). Not validated against a live account: the replacement rules of
+    a new release, whether Google requires `changesNotSentForReview` for a given app
+    state, the 500-character release-notes limit, and whether `releases.list` 404s on an
+    unknown track.
 
 > **Out of scope (for now): Firebase.** It is **not** being migrated to the core at this
 > time — it remains implemented **natively in the iOS app** (`APIProviderFirebase`). If it

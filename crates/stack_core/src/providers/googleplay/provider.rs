@@ -31,7 +31,8 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 /// Google Play implementation of the internal [`ProviderImpl`] contract:
 /// [`Capability::Apps`] (Reporting API), plus [`Capability::Reviews`],
 /// [`Capability::AppDetails`], [`Capability::StoreListings`] and
-/// [`Capability::Tracks`] (Android Publisher API), and [`Capability::AppIcons`]
+/// [`Capability::Tracks`] with [`Capability::ReleaseManagement`] (Android
+/// Publisher API), and [`Capability::AppIcons`]
 /// (the public store page, no credentials). Every other capability accessor
 /// keeps the trait's `None` default.
 ///
@@ -96,6 +97,7 @@ impl ProviderImpl for GooglePlayProvider {
             Capability::StoreListings,
             Capability::Tracks,
             Capability::AppIcons,
+            Capability::ReleaseManagement,
         ]
     }
 
@@ -309,13 +311,14 @@ mod tests {
         GooglePlayProvider::try_new(EMAIL, KID, PKCS8_PEM, None).unwrap()
     }
 
-    const PLAY_CAPABILITIES: [Capability; 6] = [
+    const PLAY_CAPABILITIES: [Capability; 7] = [
         Capability::Apps,
         Capability::Reviews,
         Capability::AppDetails,
         Capability::StoreListings,
         Capability::Tracks,
         Capability::AppIcons,
+        Capability::ReleaseManagement,
     ];
 
     #[test]
@@ -389,6 +392,8 @@ mod tests {
                 Capability::StoreListings => p.store_listings().is_some(),
                 Capability::Tracks => p.tracks().is_some(),
                 Capability::AppIcons => p.app_icons().is_some(),
+                // Release writes live on the Tracks handle.
+                Capability::ReleaseManagement => p.tracks().is_some(),
                 other => panic!("Google Play should not advertise {other:?}"),
             };
             assert!(has_handle, "{capability:?} has no handle");

@@ -158,6 +158,7 @@ fn connect_google_play_reports_kind_and_capabilities() {
             Capability::StoreListings,
             Capability::Tracks,
             Capability::AppIcons,
+            Capability::ReleaseManagement,
         ]
     );
     // The Play handles are present ...

@@ -59,6 +59,12 @@ pub enum Capability {
     Tracks,
     /// Where to load an app's icon from ([`AppIcons`]).
     AppIcons,
+    /// Changing an app's releases: rollout, halt, resume, complete, metadata,
+    /// new release and promotion through
+    /// [`Tracks::apply_release_change`](crate::service::capabilities::tracks::Tracks::apply_release_change),
+    /// plus the bundles a release can be made from. Hosts hide every release
+    /// write on providers without it. Served by the [`Tracks`] handle.
+    ReleaseManagement,
 }
 
 /// Internal, non-exported contract every concrete plugin implements. Kept off the
