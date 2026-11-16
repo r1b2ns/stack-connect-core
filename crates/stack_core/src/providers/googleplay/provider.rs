@@ -8,8 +8,8 @@ use super::store_page::StorePageClient;
 use super::PLAY_SCOPES;
 use crate::auth::oauth_jwt::{ServiceAccountAuthenticator, ServiceAccountKey};
 use crate::domain::{
-    AppDetailsInfo, AppInfo, CustomerReview, CustomerReviewsPage, ReviewResponse, ReviewSubmission,
-    StoreListingInfo, TrackInfo,
+    AppDetailsInfo, AppInfo, CustomerReview, CustomerReviewsPage, ReleaseSummaryInfo,
+    ReviewResponse, ReviewSubmission, StoreListingInfo, TrackInfo,
 };
 use crate::error::StackError;
 use crate::ports::DebugLogger;
@@ -238,7 +238,8 @@ impl StoreListingsImpl for GooglePlayStoreListings {
 }
 
 /// Google Play implementation of the [`TracksImpl`] capability contract
-/// (`edits.tracks` in a throwaway edit). `app_id` is the package name.
+/// (`edits.tracks` in a throwaway edit; release summaries without an edit).
+/// `app_id` is the package name.
 struct GooglePlayTracks {
     client: Arc<GooglePlayClient>,
 }
@@ -247,6 +248,14 @@ struct GooglePlayTracks {
 impl TracksImpl for GooglePlayTracks {
     async fn fetch_tracks(&self, app_id: String) -> Result<Vec<TrackInfo>, StackError> {
         self.client.fetch_tracks(&app_id).await
+    }
+
+    async fn fetch_release_summaries(
+        &self,
+        app_id: String,
+        track: String,
+    ) -> Result<Vec<ReleaseSummaryInfo>, StackError> {
+        self.client.fetch_release_summaries(&app_id, &track).await
     }
 }
 
@@ -531,6 +540,31 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(tracks[0].track, "beta");
+    }
+
+    #[tokio::test]
+    async fn tracks_handle_delegates_release_summaries() {
+        let server = MockServer::start().await;
+        mount_token(&server, "tok-1", 1).await;
+        Mock::given(method("GET"))
+            .and(path(
+                "/androidpublisher/v3/applications/com.example.app/tracks/beta/releases",
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "releases": [{ "releaseLifecycleState": "RELEASE_LIFECYCLE_STATE_PUBLISHED" }]
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let summaries = Tracks::new(Box::new(GooglePlayTracks {
+            client: Arc::new(client(&server)),
+        }))
+        .fetch_release_summaries("com.example.app".into(), "beta".into())
+        .await
+        .unwrap();
+        assert_eq!(summaries.len(), 1);
+        assert_eq!(summaries[0].track, "beta");
     }
 
     #[tokio::test]

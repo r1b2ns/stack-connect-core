@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 
-use crate::domain::TrackInfo;
+use crate::domain::{ReleaseSummaryInfo, TrackInfo};
 use crate::error::StackError;
 
 /// Internal, non-exported contract for the Tracks capability (an app's release
@@ -14,11 +14,19 @@ use crate::error::StackError;
 /// `Send + Sync` so a `Box<dyn TracksImpl>` can live inside an `Arc<Tracks>`
 /// shared across the tokio runtime.
 ///
-/// Read-only today; Google Play is the only provider exposing it.
+/// Google Play is the only provider exposing it.
 #[async_trait]
 pub(crate) trait TracksImpl: Send + Sync {
     /// Lists every release track of `app_id` with its releases.
     async fn fetch_tracks(&self, app_id: String) -> Result<Vec<TrackInfo>, StackError>;
+
+    /// Lists the release summaries (with their review / lifecycle state) of
+    /// one track of `app_id`, without opening an edit.
+    async fn fetch_release_summaries(
+        &self,
+        app_id: String,
+        track: String,
+    ) -> Result<Vec<ReleaseSummaryInfo>, StackError>;
 }
 
 /// UniFFI-exported Tracks capability handle. A thin, binding-friendly wrapper
@@ -54,5 +62,31 @@ impl Tracks {
     /// transport failure.
     pub async fn fetch_tracks(&self, app_id: String) -> Result<Vec<TrackInfo>, StackError> {
         self.inner.fetch_tracks(app_id).await
+    }
+
+    /// Lists the summaries of the releases on `track` of `app_id` (for Google
+    /// Play, `tracks.releases.list`), in the store's order: name, raw
+    /// lifecycle (review) state and version codes. Google returns at most 20
+    /// and leaves out obsolete releases.
+    ///
+    /// **Opens no edit**, unlike [`Self::fetch_tracks`], so it never cancels an
+    /// edit the service account has open elsewhere (e.g. a CI upload) and is
+    /// safe to call automatically. It has no rollout fraction or status: those
+    /// only come from [`Self::fetch_tracks`].
+    ///
+    /// A track Google does not know (`404`) yields an empty list.
+    ///
+    /// # Errors
+    /// [`StackError::Auth`] when Google denies access or the API is disabled,
+    /// [`StackError::Http`] on any other non-2xx response (`404` only for an
+    /// invalid package name, checked locally), [`StackError::Decode`] on
+    /// malformed JSON or a blank / `.` / `..` track name, or
+    /// [`StackError::Network`] on transport failure.
+    pub async fn fetch_release_summaries(
+        &self,
+        app_id: String,
+        track: String,
+    ) -> Result<Vec<ReleaseSummaryInfo>, StackError> {
+        self.inner.fetch_release_summaries(app_id, track).await
     }
 }

@@ -795,3 +795,25 @@ pub struct LocalizedTextInfo {
     pub language: String,
     pub text: String,
 }
+
+/// The summary of one release on a track, as Google Play's edit-free
+/// `tracks.releases.list` returns it. Carries the review / lifecycle state that
+/// [`TrackReleaseInfo`] lacks (and none of its rollout details).
+///
+/// - `track`: the track name the release is on.
+/// - `name`: the release name; `None` when Google has none.
+/// - `lifecycle_state`: Google's raw `releaseLifecycleState`, passed through
+///   verbatim so a state added later still reaches the host:
+///   `RELEASE_LIFECYCLE_STATE_DRAFT`, `…_NOT_SENT_FOR_REVIEW`, `…_IN_REVIEW`,
+///   `…_APPROVED_NOT_PUBLISHED`, `…_NOT_APPROVED`, `…_PUBLISHED` (or
+///   `…_UNSPECIFIED`); `None` when absent.
+/// - `version_codes`: the version codes of the release's active artifacts, as
+///   decimal strings (the same encoding as [`TrackReleaseInfo::version_codes`]).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, uniffi::Record)]
+#[serde(rename_all = "camelCase")]
+pub struct ReleaseSummaryInfo {
+    pub track: String,
+    pub name: Option<String>,
+    pub lifecycle_state: Option<String>,
+    pub version_codes: Vec<String>,
+}
