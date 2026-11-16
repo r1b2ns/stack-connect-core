@@ -8,7 +8,7 @@ use super::store_page::StorePageClient;
 use super::PLAY_SCOPES;
 use crate::auth::oauth_jwt::{ServiceAccountAuthenticator, ServiceAccountKey};
 use crate::domain::{
-    AppDetailsInfo, AppInfo, CustomerReview, CustomerReviewsPage, ReleaseSummaryInfo,
+    AppDetailsInfo, AppInfo, BundleInfo, CustomerReview, CustomerReviewsPage, ReleaseSummaryInfo,
     ReviewResponse, ReviewSubmission, StoreListingInfo, TrackInfo,
 };
 use crate::error::StackError;
@@ -257,6 +257,10 @@ impl TracksImpl for GooglePlayTracks {
     ) -> Result<Vec<ReleaseSummaryInfo>, StackError> {
         self.client.fetch_release_summaries(&app_id, &track).await
     }
+
+    async fn fetch_bundles(&self, app_id: String) -> Result<Vec<BundleInfo>, StackError> {
+        self.client.fetch_bundles(&app_id).await
+    }
 }
 
 /// Google Play implementation of the [`AppIconsImpl`] capability contract: the
@@ -487,7 +491,7 @@ mod tests {
             .respond_with(
                 ResponseTemplate::new(200).set_body_json(serde_json::json!({ "id": "E" })),
             )
-            .expect(3)
+            .expect(4)
             .mount(&server)
             .await;
         for (resource, body) in [
@@ -500,6 +504,10 @@ mod tests {
                 "tracks",
                 serde_json::json!({ "tracks": [{ "track": "beta" }] }),
             ),
+            (
+                "bundles",
+                serde_json::json!({ "bundles": [{ "versionCode": 7 }] }),
+            ),
         ] {
             Mock::given(method("GET"))
                 .and(path(format!("{edits}/E/{resource}")))
@@ -511,7 +519,7 @@ mod tests {
         Mock::given(method("DELETE"))
             .and(path(format!("{edits}/E")))
             .respond_with(ResponseTemplate::new(204))
-            .expect(3)
+            .expect(4)
             .mount(&server)
             .await;
 
@@ -533,13 +541,20 @@ mod tests {
         .unwrap();
         assert_eq!(listings[0].language, "en-US");
 
-        let tracks = Tracks::new(Box::new(GooglePlayTracks {
+        let tracks_handle = Tracks::new(Box::new(GooglePlayTracks {
             client: Arc::clone(&client),
-        }))
-        .fetch_tracks("com.example.app".into())
-        .await
-        .unwrap();
+        }));
+        let tracks = tracks_handle
+            .fetch_tracks("com.example.app".into())
+            .await
+            .unwrap();
         assert_eq!(tracks[0].track, "beta");
+
+        let bundles = tracks_handle
+            .fetch_bundles("com.example.app".into())
+            .await
+            .unwrap();
+        assert_eq!(bundles[0].version_code, "7");
     }
 
     #[tokio::test]

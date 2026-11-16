@@ -40,10 +40,10 @@ pub use domain::{
     AnalyticsReportInstancesPage, AnalyticsReportRequest, AnalyticsReportRequestsPage,
     AnalyticsReportSegment, AnalyticsReportSegmentsPage, AnalyticsReportsPage, AppDetailsInfo,
     AppInfo, AppReviewDetailInfo, AppStoreLocalizationInfo, AppStoreVersionInfo, BetaGroupInfo,
-    BetaTesterInfo, BuildDetailInfo, BuildInfo, BuildsPage, CountryTargetingInfo, CustomerReview,
-    CustomerReviewsPage, LocalizedTextInfo, PhasedReleaseInfo, ReleaseSummaryInfo, ReviewResponse,
-    ReviewSubmission, ScreenshotInfo, ScreenshotSetInfo, StoreListingInfo, TrackInfo,
-    TrackReleaseInfo,
+    BetaTesterInfo, BuildDetailInfo, BuildInfo, BuildsPage, BundleInfo, CountryTargetingInfo,
+    CustomerReview, CustomerReviewsPage, LocalizedTextInfo, PhasedReleaseInfo, ReleaseSummaryInfo,
+    ReviewResponse, ReviewSubmission, ScreenshotInfo, ScreenshotSetInfo, StoreListingInfo,
+    TrackInfo, TrackReleaseInfo,
 };
 pub use error::StackError;
 pub use facade::{available_services, connect, credential_schema, make_sync_service};

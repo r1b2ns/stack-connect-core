@@ -1,6 +1,6 @@
 //! Reads that the Android Publisher API only serves inside an **edit**: app
-//! details (`edits.details`), store listings (`edits.listings`) and release
-//! tracks (`edits.tracks`).
+//! details (`edits.details`), store listings (`edits.listings`), release
+//! tracks (`edits.tracks`) and uploaded bundles (`edits.bundles`).
 //!
 //! Each read runs in a throwaway edit session (insert, read, delete) and never
 //! commits, so nothing changes on the store. It does have one side effect:
@@ -20,8 +20,8 @@ use super::error::{ErrorHints, GoogleApi, Target, PERMISSION_VIEW_APP_INFO};
 use super::non_blank;
 use super::timestamp::Int64;
 use crate::domain::{
-    AppDetailsInfo, CountryTargetingInfo, LocalizedTextInfo, StoreListingInfo, TrackInfo,
-    TrackReleaseInfo,
+    AppDetailsInfo, BundleInfo, CountryTargetingInfo, LocalizedTextInfo, StoreListingInfo,
+    TrackInfo, TrackReleaseInfo,
 };
 use crate::error::StackError;
 
@@ -115,6 +115,34 @@ struct PlayCountryTargeting {
     countries: Vec<String>,
     #[serde(default)]
     include_rest_of_world: bool,
+}
+
+/// `edits.bundles.list`. Proto3 JSON omits an empty `bundles`.
+#[derive(Deserialize)]
+struct BundlesListResponse {
+    #[serde(default)]
+    bundles: Vec<PlayBundle>,
+}
+
+/// A `Bundle` (`versionCode` is int32; a string is accepted as well; `sha1` is
+/// not mapped).
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PlayBundle {
+    #[serde(default)]
+    version_code: Option<Int64>,
+    #[serde(default)]
+    sha256: Option<String>,
+}
+
+impl PlayBundle {
+    /// `None` without a version code: it is what identifies a bundle.
+    fn into_info(self) -> Option<BundleInfo> {
+        Some(BundleInfo {
+            version_code: self.version_code?.into_text(),
+            sha256: non_blank(self.sha256),
+        })
+    }
 }
 
 #[derive(Deserialize)]
@@ -350,6 +378,25 @@ impl GooglePlayClient {
             .tracks
             .into_iter()
             .filter_map(PlayTrack::into_info)
+            .collect())
+    }
+
+    /// The app bundles uploaded to the app (`edits.bundles.list`), in Google's
+    /// order. Bundles without a version code are skipped.
+    ///
+    /// # Errors
+    /// As [`Self::fetch_app_details`].
+    pub(crate) async fn fetch_bundles(
+        &self,
+        package_name: &str,
+    ) -> Result<Vec<BundleInfo>, StackError> {
+        let body = self.read_in_edit(package_name, "bundles").await?;
+        let response: BundlesListResponse = serde_json::from_str(&body)
+            .map_err(|e| StackError::decode(format!("edits.bundles response: {e}")))?;
+        Ok(response
+            .bundles
+            .into_iter()
+            .filter_map(PlayBundle::into_info)
             .collect())
     }
 }
@@ -991,5 +1038,86 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(release.country_targeting, None);
+    }
+
+    #[tokio::test]
+    async fn bundles_map_in_order_and_skip_unkeyed_ones() {
+        let server = MockServer::start().await;
+        mount_token(&server, "tok-1", 1).await;
+        mount_session(
+            &server,
+            "bundles",
+            ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "kind": "androidpublisher#bundlesListResponse",
+                "bundles": [
+                    { "versionCode": 42, "sha1": "aa", "sha256": "abc123" },
+                    { "sha256": "no-version-code" },
+                    { "versionCode": "41", "sha256": " " }
+                ]
+            })),
+            ResponseTemplate::new(204),
+        )
+        .await;
+
+        let bundles = client(&server).fetch_bundles(PACKAGE).await.unwrap();
+        assert_eq!(
+            bundles,
+            vec![
+                BundleInfo {
+                    version_code: "42".into(),
+                    sha256: Some("abc123".into()),
+                },
+                BundleInfo {
+                    version_code: "41".into(),
+                    sha256: None,
+                },
+            ]
+        );
+        // One throwaway session: insert, read, delete. Nothing is committed.
+        assert_eq!(
+            api_calls(&server).await,
+            vec![
+                call("POST", ""),
+                call("GET", "/E1/bundles"),
+                call("DELETE", "/E1")
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn bundles_empty_object_is_empty_and_malformed_is_decode() {
+        let server = MockServer::start().await;
+        mount_token(&server, "tok-1", 1).await;
+        insert()
+            .respond_with(NumberedEdits {
+                next: AtomicUsize::new(0),
+            })
+            .expect(2)
+            .mount(&server)
+            .await;
+        get("E1", "bundles")
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "kind": "androidpublisher#bundlesListResponse"
+            })))
+            .mount(&server)
+            .await;
+        get("E2", "bundles")
+            .respond_with(ResponseTemplate::new(200).set_body_string(r#"{"bundles": {}}"#))
+            .mount(&server)
+            .await;
+        for edit in ["E1", "E2"] {
+            delete(edit)
+                .respond_with(ResponseTemplate::new(204))
+                .expect(1)
+                .mount(&server)
+                .await;
+        }
+
+        let client = client(&server);
+        assert!(client.fetch_bundles(PACKAGE).await.unwrap().is_empty());
+        match client.fetch_bundles(PACKAGE).await.unwrap_err() {
+            StackError::Decode { message } => assert!(message.contains("edits.bundles response")),
+            other => panic!("expected Decode, got {other:?}"),
+        }
     }
 }

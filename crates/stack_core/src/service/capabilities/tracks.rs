@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 
-use crate::domain::{ReleaseSummaryInfo, TrackInfo};
+use crate::domain::{BundleInfo, ReleaseSummaryInfo, TrackInfo};
 use crate::error::StackError;
 
 /// Internal, non-exported contract for the Tracks capability (an app's release
@@ -27,6 +27,9 @@ pub(crate) trait TracksImpl: Send + Sync {
         app_id: String,
         track: String,
     ) -> Result<Vec<ReleaseSummaryInfo>, StackError>;
+
+    /// Lists the app bundles uploaded to `app_id` that can go into a release.
+    async fn fetch_bundles(&self, app_id: String) -> Result<Vec<BundleInfo>, StackError>;
 }
 
 /// UniFFI-exported Tracks capability handle. A thin, binding-friendly wrapper
@@ -88,5 +91,19 @@ impl Tracks {
         track: String,
     ) -> Result<Vec<ReleaseSummaryInfo>, StackError> {
         self.inner.fetch_release_summaries(app_id, track).await
+    }
+
+    /// Lists the app bundles uploaded to `app_id` (for Google Play,
+    /// `edits.bundles.list`), in the store's order: version code and SHA-256.
+    /// These are the bundles a new release can be made from.
+    ///
+    /// Reads through a throwaway edit like [`Self::fetch_tracks`] (insert,
+    /// read, delete; nothing is committed), with the same side effect: it
+    /// invalidates any edit the service account has open for the app elsewhere.
+    ///
+    /// # Errors
+    /// As [`Self::fetch_tracks`].
+    pub async fn fetch_bundles(&self, app_id: String) -> Result<Vec<BundleInfo>, StackError> {
+        self.inner.fetch_bundles(app_id).await
     }
 }

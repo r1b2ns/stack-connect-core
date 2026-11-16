@@ -833,3 +833,18 @@ pub struct ReleaseSummaryInfo {
     pub lifecycle_state: Option<String>,
     pub version_codes: Vec<String>,
 }
+
+/// An Android App Bundle uploaded to a Google Play app (`edits.bundles`), i.e.
+/// one that can go into a release.
+///
+/// - `version_code`: the bundle's version code as a decimal string (the same
+///   encoding as [`TrackReleaseInfo::version_codes`]).
+/// - `sha256`: Google's hex SHA-256 of the uploaded file; `None` when absent.
+///
+/// The API has no upload date and no version name for a bundle.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, uniffi::Record)]
+#[serde(rename_all = "camelCase")]
+pub struct BundleInfo {
+    pub version_code: String,
+    pub sha256: Option<String>,
+}
