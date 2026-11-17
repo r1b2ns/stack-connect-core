@@ -4,6 +4,7 @@ use tokio::sync::Mutex;
 
 use super::token::{needs_refresh, unix_now, CachedToken};
 use crate::error::StackError;
+use crate::logging::{self, target};
 
 /// App Store Connect requires `aud = "appstoreconnect-v1"`.
 const AUDIENCE: &str = "appstoreconnect-v1";
@@ -133,7 +134,15 @@ impl AppStoreAuthenticator {
             }
         }
 
-        let token = sign_team_token(&self.issuer_id, &self.key_id, &self.private_key_p8, now)?;
+        let token = sign_team_token(&self.issuer_id, &self.key_id, &self.private_key_p8, now)
+            .inspect_err(|err| {
+                logging::warn(target::AUTH, || {
+                    format!("App Store Connect: signing the team JWT failed: {err}")
+                });
+            })?;
+        logging::debug(target::AUTH, || {
+            format!("App Store Connect: signed a new team JWT, valid for {TTL_SECS} s")
+        });
         *cache = Some(CachedToken {
             token: token.clone(),
             expires_at: now + TTL_SECS,
@@ -242,5 +251,25 @@ mod tests {
         let second = auth.bearer_token().await.unwrap();
         // Same `now` second → identical signed token served from cache.
         assert_eq!(first, second);
+    }
+
+    #[tokio::test]
+    async fn host_log_notes_each_signed_token_without_the_token() {
+        let logs = crate::logging::testing::capture_logs();
+        let auth = AppStoreAuthenticator::new(
+            "issuer".to_string(),
+            "KEYID".to_string(),
+            PRIVATE_P8.to_vec(),
+        );
+        let token = auth.bearer_token().await.unwrap();
+        auth.bearer_token().await.unwrap();
+
+        assert_eq!(
+            logs.messages(crate::logging::LogLevel::Debug, "auth"),
+            [format!(
+                "App Store Connect: signed a new team JWT, valid for {TTL_SECS} s"
+            )]
+        );
+        assert!(!logs.all_text().contains(&token));
     }
 }

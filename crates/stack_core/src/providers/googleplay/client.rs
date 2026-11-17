@@ -9,6 +9,7 @@ use crate::auth::oauth_jwt::ServiceAccountAuthenticator;
 use crate::domain::AppInfo;
 use crate::error::StackError;
 use crate::http_debug::send_and_read;
+use crate::logging::{self, target};
 use crate::ports::DebugLogger;
 
 /// Play Developer Reporting API: lists apps (`apps:search`).
@@ -301,6 +302,9 @@ impl GooglePlayClient {
     {
         let (mut status, mut body) = self.send_authorized(&build).await?;
         if status == reqwest::StatusCode::UNAUTHORIZED {
+            logging::info(target::AUTH, || {
+                "Google answered HTTP 401; retrying once with a new access token".to_string()
+            });
             self.auth.invalidate().await;
             (status, body) = self.send_authorized(&build).await?;
         }
@@ -618,8 +622,21 @@ mod tests {
             .mount(&server)
             .await;
 
+        let logs = crate::logging::testing::capture_logs();
         let apps = client(&server).fetch_apps().await.unwrap();
         assert_eq!(apps, vec![android("com.example.one", "One")]);
+
+        // The retry is visible in the host log, in order, with no token.
+        let infos = logs.messages(crate::logging::LogLevel::Info, "auth");
+        assert_eq!(
+            infos,
+            [
+                "Google answered HTTP 401; retrying once with a new access token",
+                "Google: cached access token dropped; the next call exchanges a new one",
+            ]
+        );
+        let text = logs.all_text();
+        assert!(!text.contains("tok-1") && !text.contains("tok-2"), "{text}");
     }
 
     #[tokio::test]

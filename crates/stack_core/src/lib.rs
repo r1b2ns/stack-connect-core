@@ -15,6 +15,7 @@ mod domain;
 mod error;
 mod facade;
 mod http_debug;
+mod logging;
 mod ports;
 mod providers;
 mod service;
@@ -47,8 +48,11 @@ pub use domain::{
     ScreenshotSetInfo, StoreListingInfo, TrackInfo, TrackReleaseInfo,
 };
 pub use error::StackError;
-pub use facade::{available_services, connect, credential_schema, make_sync_service};
-pub use ports::{BlobStore, CredentialStore};
+pub use facade::{
+    available_services, connect, credential_schema, make_sync_service, set_core_logger,
+};
+pub use logging::LogLevel;
+pub use ports::{BlobStore, CoreLogger, CredentialStore};
 pub use service::capabilities::analytics::Analytics;
 pub use service::capabilities::app_details::AppDetails;
 pub use service::capabilities::app_icons::AppIcons;

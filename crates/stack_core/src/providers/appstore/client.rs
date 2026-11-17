@@ -20,7 +20,7 @@ use crate::domain::{
     ReviewResponse, ReviewSubmission, ScreenshotInfo, ScreenshotSetInfo, TeamMemberInfo, UserInfo,
 };
 use crate::error::StackError;
-use crate::http_debug::render_response;
+use crate::http_debug::{render_response, send_unbuffered};
 use crate::ports::DebugLogger;
 
 const DEFAULT_BASE_URL: &str = "https://api.appstoreconnect.apple.com";
@@ -5881,15 +5881,10 @@ impl AppStoreClient {
             builder = builder.header(&header.name, &header.value);
         }
 
-        let response = builder
-            .send()
-            .await
-            .map_err(|e| StackError::network(e.to_string()))?;
-        let status = response.status();
-        let body = response
-            .text()
-            .await
-            .map_err(|e| StackError::network(e.to_string()))?;
+        // The opt-in trace already has its one redacted line above.
+        let sent = send_unbuffered(builder, |_| {}).await?;
+        let status = sent.status();
+        let body = sent.text().await?;
 
         if let Some(logger) = &self.debug_logger {
             // Status only — the upload response body is not JSON worth pretty-printing.
@@ -7655,13 +7650,9 @@ impl AppStoreClient {
             ));
         }
 
-        // Pre-signed URL: deliberately NO `bearer_auth`.
-        let mut response = self
-            .http
-            .get(url)
-            .send()
-            .await
-            .map_err(|e| StackError::network(e.to_string()))?;
+        // Pre-signed URL: deliberately NO `bearer_auth`. The host log line
+        // carries the path only, never the signed query.
+        let mut response = send_unbuffered(self.http.get(url), |_| {}).await?;
         let status = response.status();
 
         if let Some(logger) = &self.debug_logger {
@@ -7679,10 +7670,7 @@ impl AppStoreClient {
         }
 
         if !status.is_success() {
-            let body = response
-                .text()
-                .await
-                .map_err(|e| StackError::network(e.to_string()))?;
+            let body = response.text().await?;
             if let Some(err) = pending_agreements_error(status.as_u16(), &body) {
                 return Err(err);
             }
@@ -7695,11 +7683,7 @@ impl AppStoreClient {
         // Stream the body, enforcing `max_bytes` as we go so a missing/under-
         // reported `Content-Length` cannot make us buffer an unbounded response.
         let mut compressed: Vec<u8> = Vec::new();
-        while let Some(chunk) = response
-            .chunk()
-            .await
-            .map_err(|e| StackError::network(e.to_string()))?
-        {
+        while let Some(chunk) = response.chunk().await? {
             if compressed.len() as u64 + chunk.len() as u64 > max_bytes {
                 return Err(StackError::unsupported(
                     "analytics segment exceeds max_bytes; download via URL directly",

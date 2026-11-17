@@ -5,7 +5,8 @@
 use std::sync::Arc;
 
 use crate::error::StackError;
-use crate::ports::{BlobStore, CredentialStore, DebugLogger};
+use crate::logging::{self, LogLevel};
+use crate::ports::{BlobStore, CoreLogger, CredentialStore, DebugLogger};
 use crate::service::kind::{CredentialField, ServiceKind};
 use crate::service::provider::Provider;
 use crate::service::registry;
@@ -68,4 +69,16 @@ pub fn make_sync_service(
     account_id: String,
 ) -> Arc<SyncService> {
     SyncService::new(provider, store, account_id)
+}
+
+/// Installs the process-wide diagnostic log sink (`Some`) or removes it
+/// (`None`), receiving `min_level` and every more severe level.
+///
+/// Independent of `connect`'s `debug_logger`: install it once at startup and
+/// it covers every provider, including those connected earlier. Messages are
+/// redacted before they reach `logger` (see [`CoreLogger`]). Without a sink the
+/// core formats nothing. Call again to change the level.
+#[uniffi::export]
+pub fn set_core_logger(logger: Option<Arc<dyn CoreLogger>>, min_level: LogLevel) {
+    logging::install(logger, min_level);
 }

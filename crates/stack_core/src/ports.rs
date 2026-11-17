@@ -49,3 +49,19 @@ pub trait DebugLogger: Send + Sync {
     /// Emits one already-formatted, possibly multi-line debug message.
     fn log(&self, message: String);
 }
+
+/// Process-wide diagnostic log sink, installed with
+/// [`crate::facade::set_core_logger`]. Unlike [`DebugLogger`], it is meant to
+/// stay on in release builds: every message is **redacted** before it gets
+/// here (no access token, `Authorization` header, private key, JSON key or
+/// JWT; user e-mails masked as `d***@agency.example`), and lines are leveled so
+/// the host can filter and route them (iOS: one `os.Logger` per `target`).
+///
+/// Called synchronously on whichever thread the core is running; implement it
+/// as a cheap, non-blocking hand-off (e.g. `Logger.log`).
+#[uniffi::export(with_foreign)]
+pub trait CoreLogger: Send + Sync {
+    /// Emits one single-line message. `target` names the area (`http`,
+    /// `auth`, `googleplay.users`, …; see the README's *Logging* section).
+    fn log(&self, level: crate::logging::LogLevel, target: String, message: String);
+}

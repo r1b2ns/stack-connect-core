@@ -15,6 +15,7 @@ use tokio::sync::Mutex;
 use super::token::{needs_refresh, unix_now, CachedToken};
 use crate::error::StackError;
 use crate::http_debug::send_and_read;
+use crate::logging::{self, target};
 use crate::ports::DebugLogger;
 
 /// Google's OAuth2 token endpoint. Also the assertion's `aud`: Google requires
@@ -518,19 +519,37 @@ impl ServiceAccountAuthenticator {
         // a slow exchange would otherwise sign with a stale `iat` and judge the
         // cache against a stale `now`.
         let now = unix_now();
-        if let Some(cached) = cache.as_ref() {
-            if !needs_refresh(cached.expires_at, now) {
+        let reason = match cache.as_ref() {
+            Some(cached) if !needs_refresh(cached.expires_at, now) => {
                 return Ok(cached.token.clone());
             }
-        }
+            Some(_) => "the cached one expires within the refresh margin",
+            None => "none is cached",
+        };
 
+        logging::debug(target::AUTH, || {
+            format!(
+                "Google: requesting an access token for {} ({reason})",
+                self.key.client_email()
+            )
+        });
         let assertion = sign_assertion(&self.key, self.scope, &self.token_url, now)?;
         let request = self.http.post(&self.token_url).form(&[
             ("grant_type", JWT_BEARER_GRANT_TYPE),
             ("assertion", assertion.as_str()),
         ]);
         let (status, body) = send_and_read(request, self.debug_logger.as_deref()).await?;
-        let (token, expires_in) = map_token_response(status, &body)?;
+        let (token, expires_in) = map_token_response(status, &body).inspect_err(|err| {
+            logging::warn(target::AUTH, || {
+                format!(
+                    "Google: token exchange for {} failed: {err}",
+                    self.key.client_email()
+                )
+            });
+        })?;
+        logging::debug(target::AUTH, || {
+            format!("Google: access token obtained, expires in {expires_in} s")
+        });
 
         // `now` predates the exchange, so the cached expiry errs early.
         *cache = Some(CachedToken {
@@ -545,7 +564,11 @@ impl ServiceAccountAuthenticator {
     /// disabled service account, a wall-clock jump), so a cached token can die
     /// before its `expires_in`; callers invalidate on a 401.
     pub(crate) async fn invalidate(&self) {
-        *self.cache.lock().await = None;
+        if self.cache.lock().await.take().is_some() {
+            logging::info(target::AUTH, || {
+                "Google: cached access token dropped; the next call exchanges a new one".to_string()
+            });
+        }
     }
 }
 
@@ -558,6 +581,8 @@ mod tests {
 
     use jsonwebtoken::{decode, decode_header, DecodingKey, Validation};
     use wiremock::matchers::{body_string_contains, header, method, path};
+
+    use crate::logging::testing::capture_logs;
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     const PKCS8_PEM: &str = include_str!("../../tests/fixtures/test_rsa_private_pkcs8.pem");
@@ -1365,5 +1390,87 @@ mod tests {
         assert!(messages[0].contains("-d 'grant_type=urn%3Aietf"));
         assert!(messages[1].starts_with("[RustCore] ← 200"));
         assert!(messages[1].contains("\"access_token\": \"tok-1\""));
+    }
+
+    #[tokio::test]
+    async fn host_log_follows_the_token_lifecycle_without_secrets() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/token"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(token_json("ya29.live-token", 3600)),
+            )
+            .expect(2)
+            .mount(&server)
+            .await;
+
+        let logs = capture_logs();
+        let auth = authenticator(&server);
+        auth.bearer_token().await.unwrap();
+        // Served from the cache: no new line.
+        auth.bearer_token().await.unwrap();
+        auth.invalidate().await;
+        // Nothing cached any more: no second "dropped" line.
+        auth.invalidate().await;
+        auth.bearer_token().await.unwrap();
+
+        let auth_lines: Vec<String> = logs
+            .records()
+            .into_iter()
+            .filter(|r| r.target == "auth")
+            .map(|r| format!("{:?} {}", r.level, r.message))
+            .collect();
+        assert_eq!(
+            auth_lines,
+            [
+                "Debug Google: requesting an access token for \
+                 p***@my-project.iam.gserviceaccount.com (none is cached)",
+                "Debug Google: access token obtained, expires in 3600 s",
+                "Info Google: cached access token dropped; the next call exchanges a new one",
+                "Debug Google: requesting an access token for \
+                 p***@my-project.iam.gserviceaccount.com (none is cached)",
+                "Debug Google: access token obtained, expires in 3600 s",
+            ]
+        );
+        let text = logs.all_text();
+        for secret in ["ya29.live-token", "eyJ", "BEGIN", "play-bot@"] {
+            assert!(!text.contains(secret), "{secret} leaked: {text}");
+        }
+    }
+
+    #[tokio::test]
+    async fn host_log_warns_when_the_token_exchange_is_rejected() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/token"))
+            .respond_with(ResponseTemplate::new(400).set_body_json(serde_json::json!({
+                "error": "invalid_grant",
+                "error_description": "Invalid JWT Signature."
+            })))
+            .mount(&server)
+            .await;
+
+        let logs = capture_logs();
+        assert!(matches!(
+            authenticator(&server).bearer_token().await,
+            Err(StackError::Auth { .. })
+        ));
+
+        let warns = logs.messages(crate::logging::LogLevel::Warn, "auth");
+        assert_eq!(warns.len(), 1, "{warns:?}");
+        assert!(
+            warns[0].starts_with(
+                "Google: token exchange for p***@my-project.iam.gserviceaccount.com failed: \
+                 authentication failed: Google OAuth token exchange failed (invalid_grant): \
+                 Invalid JWT Signature"
+            ),
+            "{}",
+            warns[0]
+        );
+        // The HTTP line carries the OAuth error, never the assertion.
+        let http = logs.messages(crate::logging::LogLevel::Warn, "http");
+        assert_eq!(http.len(), 1, "{http:?}");
+        assert!(http[0].contains("oauth error: invalid_grant (Invalid JWT Signature.)"));
+        assert!(!logs.all_text().contains("eyJ"));
     }
 }

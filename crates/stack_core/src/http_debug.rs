@@ -5,47 +5,95 @@
 //! perform HTTP — e.g. an OAuth token exchange — and must trace through the same
 //! function, while `auth` must not depend on `providers`.
 
+use std::time::{Duration, Instant};
+
 use crate::error::StackError;
+use crate::logging::http::{
+    millis, request_id, summarize_error_body, transport_failure, RequestInfo,
+};
+use crate::logging::{self, target, LogLevel};
 use crate::ports::DebugLogger;
 
-/// Sends `builder`, returning the response status and body text. When a
-/// `logger` is present, logs the outgoing request as a runnable cURL (with
-/// pretty-printed JSON body) before sending and the response (status +
-/// pretty-printed JSON body) after.
+/// A finished HTTP exchange.
+pub(crate) struct HttpReply {
+    pub(crate) status: reqwest::StatusCode,
+    pub(crate) body: String,
+}
+
+/// Sends `builder` and reads the whole body.
+///
+/// Logs, in this order:
+/// - to the opt-in `logger` ([`DebugLogger`], unredacted): the request as a
+///   runnable cURL before sending, the status and pretty-printed body after;
+/// - to the host log sink ([`crate::logging`], redacted): one line per request
+///   with method, host, path (never the query), status and duration —
+///   `Debug` for a 2xx, `Warn` for a 4xx, `Error` for a 5xx or a transport
+///   failure. A non-2xx line also carries the response's request id and a
+///   summary of the error body (Google's `code` / `status` / `message` /
+///   `details[]`, an OAuth error, App Store Connect `errors[]`).
 ///
 /// This is the single choke point every HTTP call routes through, so logging
 /// lives in one place and the send/read boilerplate is not duplicated.
 ///
 /// # Errors
-/// [`StackError::Network`] on transport failure (sending or reading the body).
-pub(crate) async fn send_and_read(
+/// [`StackError::Network`] on transport failure (building, sending or reading
+/// the body).
+pub(crate) async fn send(
     builder: reqwest::RequestBuilder,
     logger: Option<&dyn DebugLogger>,
-) -> Result<(reqwest::StatusCode, String), StackError> {
-    trace_request(&builder, logger);
+) -> Result<HttpReply, StackError> {
+    let (client, request) = builder.build_split();
+    let request = request.map_err(|e| StackError::network(e.to_string()))?;
+    if let Some(logger) = logger {
+        logger.log(render_curl(&request));
+    }
+    let info = RequestInfo::of(&request);
+    let started = Instant::now();
 
-    let response = builder
-        .send()
-        .await
-        .map_err(|e| StackError::network(e.to_string()))?;
+    let response = match client.execute(request).await {
+        Ok(response) => response,
+        Err(err) => return Err(transport_error(&info, started.elapsed(), err)),
+    };
     let status = response.status();
-    let body = response
-        .text()
-        .await
-        .map_err(|e| StackError::network(e.to_string()))?;
+    let request_id = request_id(response.headers());
+    let body = match response.text().await {
+        Ok(body) => body,
+        Err(err) => return Err(transport_error(&info, started.elapsed(), err)),
+    };
 
     if let Some(logger) = logger {
         logger.log(render_response(status, &body));
     }
+    log_response(
+        &info,
+        status,
+        started.elapsed(),
+        request_id.as_deref(),
+        Some(&body),
+    );
 
-    Ok((status, body))
+    Ok(HttpReply { status, body })
+}
+
+/// [`send`], returning only the status and body.
+///
+/// # Errors
+/// As [`send`].
+pub(crate) async fn send_and_read(
+    builder: reqwest::RequestBuilder,
+    logger: Option<&dyn DebugLogger>,
+) -> Result<(reqwest::StatusCode, String), StackError> {
+    send(builder, logger)
+        .await
+        .map(|reply| (reply.status, reply.body))
 }
 
 /// Like [`send_and_read`], for a response that is large and not worth tracing,
 /// such as an HTML page: at most `max_bytes` of the body are read (the rest is
 /// left unread, so a huge or endless body costs bounded memory), the bytes are
 /// decoded as lossy UTF-8, and the response trace carries only the status and
-/// how many bytes were read, never the body.
+/// how many bytes were read, never the body. The host log line carries no body
+/// summary either.
 ///
 /// # Errors
 /// [`StackError::Network`] on transport failure (sending or reading the body).
@@ -54,21 +102,17 @@ pub(crate) async fn send_and_read_capped(
     logger: Option<&dyn DebugLogger>,
     max_bytes: usize,
 ) -> Result<(reqwest::StatusCode, String), StackError> {
-    trace_request(&builder, logger);
-
-    let mut response = builder
-        .send()
-        .await
-        .map_err(|e| StackError::network(e.to_string()))?;
-    let status = response.status();
+    let mut sent = send_unbuffered(builder, |request| {
+        if let Some(logger) = logger {
+            logger.log(render_curl(request));
+        }
+    })
+    .await?;
+    let status = sent.status();
 
     let mut body: Vec<u8> = Vec::new();
     let mut truncated = false;
-    while let Some(chunk) = response
-        .chunk()
-        .await
-        .map_err(|e| StackError::network(e.to_string()))?
-    {
+    while let Some(chunk) = sent.chunk().await? {
         // `body.len() <= max_bytes` holds on every iteration.
         let room = max_bytes.saturating_sub(body.len());
         if chunk.len() > room {
@@ -91,16 +135,133 @@ pub(crate) async fn send_and_read_capped(
     Ok((status, String::from_utf8_lossy(&body).into_owned()))
 }
 
-/// Logs the request `builder` would send as a runnable cURL, if a `logger` is
-/// present.
-fn trace_request(builder: &reqwest::RequestBuilder, logger: Option<&dyn DebugLogger>) {
-    if let Some(logger) = logger {
-        // `try_clone` fails only for streaming bodies; callers use in-memory
-        // `.json()`/`.form()`/empty bodies, so this clones in practice.
-        if let Some(req) = builder.try_clone().and_then(|b| b.build().ok()) {
-            logger.log(render_curl(&req));
+/// A response whose body the caller streams itself (an HTML page, a binary
+/// download or upload answer), sent through [`send_unbuffered`]. Its host log
+/// line (status, duration, request id; never a body summary) is already
+/// written; reading the body through it logs a failure the same way [`send`]
+/// does.
+pub(crate) struct Unbuffered {
+    response: reqwest::Response,
+    info: RequestInfo,
+    started: Instant,
+}
+
+impl Unbuffered {
+    pub(crate) fn status(&self) -> reqwest::StatusCode {
+        self.response.status()
+    }
+
+    pub(crate) fn content_length(&self) -> Option<u64> {
+        self.response.content_length()
+    }
+
+    /// The next body chunk, `None` at the end.
+    ///
+    /// # Errors
+    /// [`StackError::Network`] when reading fails.
+    pub(crate) async fn chunk(
+        &mut self,
+    ) -> Result<Option<impl std::ops::Deref<Target = [u8]>>, StackError> {
+        match self.response.chunk().await {
+            Ok(chunk) => Ok(chunk),
+            Err(err) => Err(transport_error(&self.info, self.started.elapsed(), err)),
         }
     }
+
+    /// The rest of the body as text.
+    ///
+    /// # Errors
+    /// [`StackError::Network`] when reading fails.
+    pub(crate) async fn text(self) -> Result<String, StackError> {
+        let Self {
+            response,
+            info,
+            started,
+        } = self;
+        response
+            .text()
+            .await
+            .map_err(|err| transport_error(&info, started.elapsed(), err))
+    }
+}
+
+/// Sends `builder` without reading the body, for callers that stream it.
+/// `trace` sees the built request first (the opt-in debug trace decides what
+/// of it to print: never a binary body). The host log line is written as soon
+/// as the status arrives.
+///
+/// # Errors
+/// [`StackError::Network`] on transport failure (building or sending).
+pub(crate) async fn send_unbuffered(
+    builder: reqwest::RequestBuilder,
+    trace: impl FnOnce(&reqwest::Request),
+) -> Result<Unbuffered, StackError> {
+    let (client, request) = builder.build_split();
+    let request = request.map_err(|e| StackError::network(e.to_string()))?;
+    trace(&request);
+    let info = RequestInfo::of(&request);
+    let started = Instant::now();
+
+    let response = match client.execute(request).await {
+        Ok(response) => response,
+        Err(err) => return Err(transport_error(&info, started.elapsed(), err)),
+    };
+    log_response(
+        &info,
+        response.status(),
+        started.elapsed(),
+        request_id(response.headers()).as_deref(),
+        None,
+    );
+    Ok(Unbuffered {
+        response,
+        info,
+        started,
+    })
+}
+
+/// Logs a transport failure (without the URL's query) and maps it to
+/// [`StackError::Network`], whose message is unchanged: reqwest's own text.
+fn transport_error(info: &RequestInfo, elapsed: Duration, err: reqwest::Error) -> StackError {
+    logging::error(target::HTTP, || {
+        format!(
+            "{} failed after {}: {}; no response from the server",
+            info.line(),
+            millis(elapsed),
+            transport_failure(&err)
+        )
+    });
+    StackError::network(err.to_string())
+}
+
+/// The host log line for a response (see [`send`]). `body` is summarized on a
+/// non-2xx when given.
+fn log_response(
+    info: &RequestInfo,
+    status: reqwest::StatusCode,
+    elapsed: Duration,
+    request_id: Option<&str>,
+    body: Option<&str>,
+) {
+    let level = if status.is_server_error() {
+        LogLevel::Error
+    } else if status.is_success() || status.is_informational() || status.is_redirection() {
+        LogLevel::Debug
+    } else {
+        LogLevel::Warn
+    };
+    logging::log(level, target::HTTP, || {
+        let mut line = format!("{} → {status} ({})", info.line(), millis(elapsed));
+        if level != LogLevel::Debug {
+            if let Some(id) = request_id {
+                line.push_str(&format!(" [{id}]"));
+            }
+            if let Some(body) = body {
+                line.push_str(&format!("; {}", summarize_error_body(body)));
+            }
+        }
+        line
+    });
 }
 
 /// Renders a `reqwest::Request` as a runnable, multi-line cURL command for the
@@ -147,6 +308,7 @@ pub(crate) fn pretty_json(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::logging::testing::capture_logs;
     use std::sync::Mutex;
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -279,6 +441,194 @@ mod tests {
         let messages = logger.messages();
         assert_eq!(messages.len(), 1);
         assert!(messages[0].starts_with("[RustCore] → request"));
+    }
+
+    /// Strips the variable duration so lines compare exactly.
+    fn without_duration(line: &str) -> String {
+        let Some(open) = line.find(" (") else {
+            return line.to_string();
+        };
+        let Some(close) = line[open..].find(" ms)") else {
+            return line.to_string();
+        };
+        format!("{} (N ms){}", &line[..open], &line[open + close + 4..])
+    }
+
+    fn host(server: &MockServer) -> String {
+        server.uri().trim_start_matches("http://").to_string()
+    }
+
+    #[tokio::test]
+    async fn host_log_has_one_debug_line_per_successful_request_without_query_or_token() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v1/apps"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("{}"))
+            .mount(&server)
+            .await;
+
+        let logs = capture_logs();
+        let builder = reqwest::Client::new()
+            .get(format!("{}/v1/apps?pageToken=page-secret", server.uri()))
+            .bearer_auth("tok-123");
+        send_and_read(builder, None).await.unwrap();
+
+        let records = logs.records();
+        assert_eq!(records.len(), 1, "{records:?}");
+        assert_eq!(records[0].level, LogLevel::Debug);
+        assert_eq!(records[0].target, "http");
+        assert_eq!(
+            without_duration(&records[0].message),
+            format!("GET {}/v1/apps → 200 OK (N ms)", host(&server))
+        );
+        let text = logs.all_text();
+        assert!(
+            !text.contains("tok-123") && !text.contains("page-secret"),
+            "{text}"
+        );
+    }
+
+    #[tokio::test]
+    async fn host_log_warns_on_4xx_with_request_id_and_google_error_summary() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/androidpublisher/v3/developers/5374/users"))
+            .respond_with(
+                ResponseTemplate::new(404)
+                    .insert_header("x-goog-request-id", "req-42")
+                    .set_body_string(
+                        r#"{"error":{"code":404,"message":"Requested entity was not found.","status":"NOT_FOUND"}}"#,
+                    ),
+            )
+            .mount(&server)
+            .await;
+
+        let logs = capture_logs();
+        let builder = reqwest::Client::new().get(format!(
+            "{}/androidpublisher/v3/developers/5374/users",
+            server.uri()
+        ));
+        let (status, _) = send_and_read(builder, None).await.unwrap();
+        assert_eq!(status, reqwest::StatusCode::NOT_FOUND);
+
+        assert_eq!(
+            logs.messages(LogLevel::Warn, "http")
+                .iter()
+                .map(|m| without_duration(m))
+                .collect::<Vec<_>>(),
+            [format!(
+                "GET {}/androidpublisher/v3/developers/5374/users → 404 Not Found (N ms) \
+                 [x-goog-request-id: req-42]; google error: code=404 status=NOT_FOUND \
+                 message=\"Requested entity was not found.\"",
+                host(&server)
+            )]
+        );
+    }
+
+    #[tokio::test]
+    async fn host_log_reports_5xx_as_error_and_masks_emails_in_the_path() {
+        let server = MockServer::start().await;
+        Mock::given(method("DELETE"))
+            .respond_with(ResponseTemplate::new(503).set_body_string("upstream down"))
+            .mount(&server)
+            .await;
+
+        let logs = capture_logs();
+        let builder = reqwest::Client::new().delete(format!(
+            "{}/androidpublisher/v3/developers/5374/users/dev%40agency.example",
+            server.uri()
+        ));
+        send_and_read(builder, None).await.unwrap();
+
+        let errors = logs.messages(LogLevel::Error, "http");
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        assert_eq!(
+            without_duration(&errors[0]),
+            format!(
+                "DELETE {}/androidpublisher/v3/developers/5374/users/d***@agency.example \
+                 → 503 Service Unavailable (N ms); body (13 bytes): upstream down",
+                host(&server)
+            )
+        );
+        assert!(!logs.all_text().contains("dev@"));
+    }
+
+    #[tokio::test]
+    async fn host_log_reports_a_transport_failure_without_the_query() {
+        let logs = capture_logs();
+        let builder = reqwest::Client::new().get("http://127.0.0.1:1/unreachable?token=abc");
+        let result = send_and_read(builder, None).await;
+        assert!(matches!(result, Err(StackError::Network { .. })));
+
+        let errors = logs.messages(LogLevel::Error, "http");
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        assert!(
+            errors[0].starts_with("GET 127.0.0.1:1/unreachable failed after "),
+            "{}",
+            errors[0]
+        );
+        assert!(errors[0].contains("connection failed"), "{}", errors[0]);
+        assert!(errors[0].ends_with("; no response from the server"));
+        assert!(!errors[0].contains("token=abc"));
+    }
+
+    #[tokio::test]
+    async fn host_log_for_a_capped_read_never_summarizes_the_body() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(404).set_body_string("<html>secret page</html>"))
+            .mount(&server)
+            .await;
+
+        let logs = capture_logs();
+        let builder = reqwest::Client::new().get(format!("{}/store/apps/details", server.uri()));
+        send_and_read_capped(builder, None, 1024).await.unwrap();
+
+        let warns = logs.messages(LogLevel::Warn, "http");
+        assert_eq!(
+            warns
+                .iter()
+                .map(|m| without_duration(m))
+                .collect::<Vec<_>>(),
+            [format!(
+                "GET {}/store/apps/details → 404 Not Found (N ms)",
+                host(&server)
+            )]
+        );
+        assert!(!logs.all_text().contains("secret page"));
+    }
+
+    #[tokio::test]
+    async fn unbuffered_logs_on_arrival_and_reads_text() {
+        let server = MockServer::start().await;
+        Mock::given(method("PUT"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("done"))
+            .mount(&server)
+            .await;
+
+        let logs = capture_logs();
+        let mut traced = None;
+        let sent = send_unbuffered(
+            reqwest::Client::new()
+                .put(format!("{}/upload?X-Amz-Signature=sig", server.uri()))
+                .body(vec![0u8; 8]),
+            |request| traced = Some(request.method().clone()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(traced, Some(reqwest::Method::PUT));
+        assert_eq!(sent.status(), reqwest::StatusCode::OK);
+        assert_eq!(sent.text().await.unwrap(), "done");
+
+        let debug = logs.messages(LogLevel::Debug, "http");
+        assert_eq!(
+            debug
+                .iter()
+                .map(|m| without_duration(m))
+                .collect::<Vec<_>>(),
+            [format!("PUT {}/upload → 200 OK (N ms)", host(&server))]
+        );
+        assert!(!logs.all_text().contains("Signature"));
     }
 
     #[tokio::test]
