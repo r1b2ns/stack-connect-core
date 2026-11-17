@@ -15,7 +15,7 @@ use std::future::Future;
 use serde::Deserialize;
 use serde_json::json;
 
-use super::client::GooglePlayClient;
+use super::client::{decode_list_body, GooglePlayClient};
 use super::error::{ErrorHints, GoogleApi, Target, PERMISSION_VIEW_APP_INFO};
 use super::non_blank;
 use super::timestamp::Int64;
@@ -50,8 +50,9 @@ struct PlayAppDetails {
     contact_website: Option<String>,
 }
 
-/// `edits.listings.list`. Proto3 JSON omits an empty `listings`.
-#[derive(Deserialize)]
+/// `edits.listings.list`. Proto3 JSON omits an empty `listings`; an empty
+/// body (`204 No Content`) is the empty default.
+#[derive(Deserialize, Default)]
 struct ListingsListResponse {
     #[serde(default)]
     listings: Vec<PlayListing>,
@@ -72,8 +73,9 @@ struct PlayListing {
     video: Option<String>,
 }
 
-/// `edits.tracks.list`. Proto3 JSON omits an empty `tracks`.
-#[derive(Deserialize)]
+/// `edits.tracks.list`. Proto3 JSON omits an empty `tracks`; an empty body
+/// (`204 No Content`) is the empty default.
+#[derive(Deserialize, Default)]
 struct TracksListResponse {
     #[serde(default)]
     tracks: Vec<PlayTrack>,
@@ -118,8 +120,10 @@ struct PlayCountryTargeting {
     include_rest_of_world: bool,
 }
 
-/// `edits.bundles.list`. Proto3 JSON omits an empty `bundles`.
-#[derive(Deserialize)]
+/// `edits.bundles.list`. Proto3 JSON omits an empty `bundles`; an empty body
+/// (`204 No Content`, e.g. an app with no bundle uploaded yet) is the empty
+/// default.
+#[derive(Deserialize, Default)]
 struct BundlesListResponse {
     #[serde(default)]
     bundles: Vec<PlayBundle>,
@@ -431,8 +435,8 @@ impl GooglePlayClient {
         package_name: &str,
     ) -> Result<Vec<StoreListingInfo>, StackError> {
         let body = self.read_in_edit(package_name, "listings").await?;
-        let response: ListingsListResponse = serde_json::from_str(&body)
-            .map_err(|e| StackError::decode(format!("edits.listings response: {e}")))?;
+        let response: ListingsListResponse =
+            decode_list_body(&body, "edits.listings", target::PLAY_EDITS)?;
         Ok(response
             .listings
             .into_iter()
@@ -451,8 +455,8 @@ impl GooglePlayClient {
         package_name: &str,
     ) -> Result<Vec<TrackInfo>, StackError> {
         let body = self.read_in_edit(package_name, "tracks").await?;
-        let response: TracksListResponse = serde_json::from_str(&body)
-            .map_err(|e| StackError::decode(format!("edits.tracks response: {e}")))?;
+        let response: TracksListResponse =
+            decode_list_body(&body, "edits.tracks", target::PLAY_EDITS)?;
         Ok(response
             .tracks
             .into_iter()
@@ -470,8 +474,8 @@ impl GooglePlayClient {
         package_name: &str,
     ) -> Result<Vec<BundleInfo>, StackError> {
         let body = self.read_in_edit(package_name, "bundles").await?;
-        let response: BundlesListResponse = serde_json::from_str(&body)
-            .map_err(|e| StackError::decode(format!("edits.bundles response: {e}")))?;
+        let response: BundlesListResponse =
+            decode_list_body(&body, "edits.bundles", target::PLAY_EDITS)?;
         Ok(response
             .bundles
             .into_iter()
@@ -1201,6 +1205,68 @@ mod tests {
         assert!(client.fetch_bundles(PACKAGE).await.unwrap().is_empty());
         match client.fetch_bundles(PACKAGE).await.unwrap_err() {
             StackError::Decode { message } => assert!(message.contains("edits.bundles response")),
+            other => panic!("expected Decode, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn no_content_204_lists_are_empty() {
+        for resource in ["listings", "tracks", "bundles"] {
+            let server = MockServer::start().await;
+            mount_token(&server, "tok-1", 1).await;
+            mount_session(
+                &server,
+                resource,
+                ResponseTemplate::new(204),
+                ResponseTemplate::new(204),
+            )
+            .await;
+
+            let logs = crate::logging::testing::capture_logs();
+            let client = client(&server);
+            let empty = match resource {
+                "listings" => client
+                    .fetch_store_listings(PACKAGE)
+                    .await
+                    .unwrap()
+                    .is_empty(),
+                "tracks" => client.fetch_tracks(PACKAGE).await.unwrap().is_empty(),
+                _ => client.fetch_bundles(PACKAGE).await.unwrap().is_empty(),
+            };
+            assert!(empty, "{resource}");
+            assert_eq!(
+                logs.messages(LogLevel::Debug, "googleplay.edits")
+                    .into_iter()
+                    .filter(|m| m.contains("empty response body"))
+                    .collect::<Vec<_>>(),
+                [format!(
+                    "edits.{resource}: empty response body, read as an empty list"
+                )]
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn no_content_204_details_is_still_decode() {
+        // A single resource is never "empty": a blank body there is an error.
+        let server = MockServer::start().await;
+        mount_token(&server, "tok-1", 1).await;
+        mount_session(
+            &server,
+            "details",
+            ResponseTemplate::new(204),
+            ResponseTemplate::new(204),
+        )
+        .await;
+
+        match client(&server)
+            .fetch_app_details(PACKAGE)
+            .await
+            .unwrap_err()
+        {
+            StackError::Decode { message } => {
+                assert!(message.starts_with("edits.details response: "), "{message}")
+            }
             other => panic!("expected Decode, got {other:?}"),
         }
     }

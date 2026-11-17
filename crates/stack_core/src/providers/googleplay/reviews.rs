@@ -17,7 +17,7 @@ use std::collections::HashSet;
 use serde::Deserialize;
 use serde_json::json;
 
-use super::client::{is_valid_package_name, GooglePlayClient};
+use super::client::{decode_list_body, is_valid_package_name, GooglePlayClient};
 use super::error::{
     ErrorHints, GoogleApi, Target, PERMISSION_REPLY_TO_REVIEWS, PERMISSION_VIEW_APP_INFO,
 };
@@ -42,8 +42,9 @@ const REVIEW_ID_SEPARATOR: char = '/';
 const NATIVE_SORTS: [&str; 2] = ["", "-createdDate"];
 
 /// One `reviews.list` page. Proto3 JSON omits empty fields: an app without
-/// recent reviews answers `{}`, and the last page has no `tokenPagination`.
-#[derive(Deserialize)]
+/// recent reviews answers `{}`, and the last page has no `tokenPagination`; an
+/// empty body (`204 No Content`) is the empty default too.
+#[derive(Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 struct ReviewsListResponse {
     #[serde(default)]
@@ -303,8 +304,7 @@ impl GooglePlayClient {
                 &list_hints(package_name),
             )
             .await?;
-        serde_json::from_str(&body)
-            .map_err(|e| StackError::decode(format!("reviews response: {e}")))
+        decode_list_body(&body, "reviews", target::PLAY_REVIEWS)
     }
 
     /// Lists the app's recent reviews (see the module docs for Google's
@@ -823,6 +823,27 @@ mod tests {
             .await
             .unwrap();
         assert!(reviews.is_empty());
+    }
+
+    #[tokio::test]
+    async fn fetch_customer_reviews_no_content_204_is_empty() {
+        let server = MockServer::start().await;
+        mount_token(&server, "tok-1", 1).await;
+        list()
+            .respond_with(ResponseTemplate::new(204))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let logs = crate::logging::testing::capture_logs();
+        let reviews = client(&server)
+            .fetch_customer_reviews(PACKAGE)
+            .await
+            .unwrap();
+        assert!(reviews.is_empty());
+        assert!(logs
+            .messages(crate::logging::LogLevel::Debug, "googleplay.reviews")
+            .contains(&"reviews: empty response body, read as an empty list".to_string()));
     }
 
     #[tokio::test]

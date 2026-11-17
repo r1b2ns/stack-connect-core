@@ -12,7 +12,7 @@ use std::collections::HashSet;
 use serde::Deserialize;
 use serde_json::{json, Map};
 
-use super::client::{is_valid_package_name, GooglePlayClient};
+use super::client::{decode_list_body, is_valid_package_name, GooglePlayClient};
 use super::error::{local_rejection, ErrorHints, GoogleApi, Target, PERMISSION_ADMIN};
 use super::non_blank;
 use crate::domain::{PlayGrantInfo, PlayUserInfo};
@@ -37,8 +37,9 @@ const USER_UPDATE_MASK: &str = "developerAccountPermissions,expirationTime";
 /// `grants.patch` replaces exactly this field.
 const GRANT_UPDATE_MASK: &str = "appLevelPermissions";
 
-/// `ListUsersResponse`. Proto3 JSON omits empty fields.
-#[derive(Deserialize)]
+/// `ListUsersResponse`. Proto3 JSON omits empty fields; an empty body
+/// (`204 No Content`) is the empty default (no users, no next page).
+#[derive(Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 struct ListUsersResponse {
     #[serde(default)]
@@ -240,8 +241,8 @@ impl GooglePlayClient {
                     &hints,
                 )
                 .await?;
-            let page: ListUsersResponse = serde_json::from_str(&body)
-                .map_err(|e| StackError::decode(format!("users.list response: {e}")))?;
+            let page: ListUsersResponse =
+                decode_list_body(&body, "users.list", target::PLAY_USERS)?;
             let received = page.users.len();
             users.extend(page.users.into_iter().filter_map(PlayUser::into_info));
             let next = page.next_page_token.filter(|t| !t.trim().is_empty());
@@ -782,6 +783,20 @@ mod tests {
         Mock::given(method("GET"))
             .and(path(USERS_PATH))
             .respond_with(ResponseTemplate::new(200).set_body_string("{}"))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        assert!(client(&server).fetch_users(DEV).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn fetch_users_no_content_204_is_empty() {
+        let server = MockServer::start().await;
+        mount_token(&server, "tok-1", 1).await;
+        Mock::given(method("GET"))
+            .and(path(USERS_PATH))
+            .respond_with(ResponseTemplate::new(204))
             .expect(1)
             .mount(&server)
             .await;

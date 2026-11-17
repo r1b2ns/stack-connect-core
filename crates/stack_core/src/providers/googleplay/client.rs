@@ -35,8 +35,9 @@ const MAX_PAGES: usize = 100;
 const PLATFORM_ANDROID: &str = "ANDROID";
 
 /// One `apps:search` page. Proto3 JSON omits empty fields, so an empty result
-/// is `{}` and the last page has no `nextPageToken`.
-#[derive(Deserialize)]
+/// is `{}` and the last page has no `nextPageToken`; an empty body
+/// (`204 No Content`) is the empty default too.
+#[derive(Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 struct SearchAppsResponse {
     #[serde(default)]
@@ -436,9 +437,7 @@ impl GooglePlayClient {
     /// on a malformed body, or [`StackError::Network`] on transport failure.
     pub(crate) async fn validate(&self) -> Result<(), StackError> {
         let body = self.search_apps(VALIDATE_PAGE_SIZE, None).await?;
-        serde_json::from_str::<SearchAppsResponse>(&body)
-            .map(|_| ())
-            .map_err(|e| StackError::decode(format!("apps:search response: {e}")))
+        decode_list_body::<SearchAppsResponse>(&body, "apps:search", target::PLAY).map(|_| ())
     }
 
     /// Lists every app visible to the service account, following
@@ -458,8 +457,7 @@ impl GooglePlayClient {
             let body = self
                 .search_apps(FETCH_PAGE_SIZE, page_token.as_deref())
                 .await?;
-            let page: SearchAppsResponse = serde_json::from_str(&body)
-                .map_err(|e| StackError::decode(format!("apps:search response: {e}")))?;
+            let page: SearchAppsResponse = decode_list_body(&body, "apps:search", target::PLAY)?;
             logging::debug(target::PLAY, || {
                 format!(
                     "apps:search page {page_number}: {} apps, next page: {}",
@@ -626,6 +624,19 @@ mod tests {
         mount_token(&server, "tok-1", 1).await;
         search()
             .respond_with(ResponseTemplate::new(200).set_body_string("{}"))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        client(&server).validate().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn validate_ok_on_no_content_204() {
+        let server = MockServer::start().await;
+        mount_token(&server, "tok-1", 1).await;
+        search()
+            .respond_with(ResponseTemplate::new(204))
             .expect(1)
             .mount(&server)
             .await;
@@ -954,6 +965,19 @@ mod tests {
         mount_token(&server, "tok-1", 1).await;
         search()
             .respond_with(ResponseTemplate::new(200).set_body_string("{}"))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        assert!(client(&server).fetch_apps().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn fetch_apps_no_content_204_is_empty_vec() {
+        let server = MockServer::start().await;
+        mount_token(&server, "tok-1", 1).await;
+        search()
+            .respond_with(ResponseTemplate::new(204))
             .expect(1)
             .mount(&server)
             .await;
