@@ -8,8 +8,8 @@ use std::sync::Mutex;
 use std::collections::HashMap;
 
 use stack_core::{
-    available_services, connect, credential_schema, Capability, CredentialStore, Provider,
-    ServiceKind, StackError,
+    available_services, connect, credential_schema, set_core_logger, Capability, CoreLogger,
+    CredentialStore, LogLevel, Provider, ServiceKind, StackError,
 };
 
 #[test]
@@ -200,4 +200,64 @@ async fn google_play_app_icons_answer_an_invalid_package_offline() {
     };
     let icon = icons.fetch_icon_url("not a package".to_string()).await;
     assert!(matches!(icon, Ok(None)), "{icon:?}");
+}
+
+/// A host log sink that keeps every line.
+#[derive(Default)]
+struct RecordingLogger {
+    lines: Mutex<Vec<(LogLevel, String, String)>>,
+}
+
+impl CoreLogger for RecordingLogger {
+    fn log(&self, level: LogLevel, target: String, message: String) {
+        self.lines.lock().unwrap().push((level, target, message));
+    }
+}
+
+#[tokio::test]
+async fn core_logger_receives_a_local_rejection_through_the_public_api() {
+    // The only test in this binary that installs the process-wide sink.
+    let logger = Arc::new(RecordingLogger::default());
+    set_core_logger(Some(logger.clone()), LogLevel::Debug);
+
+    let provider = match connect_play(PLAY_PKCS8_PEM) {
+        Ok(provider) => provider,
+        Err(err) => panic!("expected a Google Play provider, got {err:?}"),
+    };
+    let users = match provider.play_users() {
+        Some(users) => users,
+        None => panic!("Google Play should expose PlayUsers"),
+    };
+    // Not a number: rejected locally, so no network is needed.
+    let err = users.fetch_users("abc".to_string()).await.unwrap_err();
+    set_core_logger(None, LogLevel::Info);
+
+    let expected = "local validation failed: developer ID \"abc\" is not numeric \
+                    (3 chars: letters); it is the number after /developers/ in a Play \
+                    Console URL; request not sent to Google";
+    match err {
+        StackError::Http { status, message } => {
+            assert_eq!(status, 404);
+            assert_eq!(message, expected);
+        }
+        other => panic!("expected the local Http 404, got {other:?}"),
+    }
+    let lines = logger.lines.lock().unwrap().clone();
+    assert!(
+        lines.contains(&(
+            LogLevel::Warn,
+            "googleplay.users".to_string(),
+            expected.to_string()
+        )),
+        "{lines:?}"
+    );
+    // Nothing reached the network, so there is no HTTP line, and the key never
+    // shows up anywhere.
+    assert!(
+        lines.iter().all(|(_, target, _)| target != "http"),
+        "{lines:?}"
+    );
+    assert!(lines
+        .iter()
+        .all(|(_, _, message)| !message.contains("PRIVATE KEY")));
 }

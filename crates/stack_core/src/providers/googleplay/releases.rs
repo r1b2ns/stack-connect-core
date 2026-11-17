@@ -325,7 +325,10 @@ mod tests {
         {
             StackError::Http { status, message } => {
                 assert_eq!(status, 500);
-                assert_eq!(message, "boom");
+                assert_eq!(
+                    message,
+                    "boom (HTTP 500 on GET applications/com.example.app/tracks/production/releases)"
+                );
             }
             other => panic!("expected Http 500, got {other:?}"),
         }

@@ -10,10 +10,13 @@
 //! value names the API, the Play Console permission the call needs and, for
 //! calls scoped to one app, the package a 404 refers to.
 
+use std::fmt::Display;
+
 use serde::Deserialize;
 use serde_json::Value;
 
 use crate::error::StackError;
+use crate::logging::{self, http::RequestInfo};
 
 /// The API is not enabled in the service account's Google Cloud project.
 const REASON_SERVICE_DISABLED: &str = "SERVICE_DISABLED";
@@ -269,6 +272,41 @@ pub(super) fn map_google_error(
             message: google_msg,
         },
     }
+}
+
+/// Appends what was called to a [`map_google_error`] result, so the error
+/// alone says the request reached Google, what it answered and which
+/// resource it was: `… Google said: Not found. [NOT_FOUND] (HTTP 404 on GET
+/// developers/5374/users)`. Google's own text stays first and verbatim.
+/// Only [`StackError::Http`] and [`StackError::Auth`] carry Google's answer;
+/// other variants are returned unchanged.
+pub(super) fn with_request_context(
+    err: StackError,
+    status: u16,
+    request: &RequestInfo,
+) -> StackError {
+    let context = format!(" (HTTP {status} on {})", request.resource());
+    match err {
+        StackError::Http { status, message } => StackError::Http {
+            status,
+            message: message + &context,
+        },
+        StackError::Auth { message } => StackError::Auth {
+            message: message + &context,
+        },
+        other => other,
+    }
+}
+
+/// A request the core refused to send because an argument cannot be valid:
+/// [`StackError::Http`] with `status` (what Google answers for the same
+/// mistake, so hosts handle both in one place), a message that starts with
+/// `local validation failed:` and ends with `request not sent to Google`, and
+/// a `Warn` line under `target`. `detail` must not carry an unmasked e-mail.
+pub(super) fn local_rejection(status: u16, target: &str, detail: impl Display) -> StackError {
+    let message = format!("local validation failed: {detail}; request not sent to Google");
+    logging::warn(target, || message.clone());
+    StackError::Http { status, message }
 }
 
 /// The 403 branch of [`map_google_error`].
@@ -751,6 +789,68 @@ mod tests {
                  said: The caller does not have the CAN_MANAGE_PERMISSIONS_GLOBAL \
                  permission. [PERMISSION_DENIED]"
             )
+        );
+    }
+
+    fn users_request() -> RequestInfo {
+        RequestInfo::new(
+            reqwest::Method::GET,
+            reqwest::Url::parse(
+                "https://androidpublisher.googleapis.com/androidpublisher/v3/developers/5374/users?pageSize=100",
+            )
+            .unwrap(),
+        )
+    }
+
+    #[test]
+    fn request_context_is_appended_to_googles_answer_only() {
+        let request = users_request();
+        match with_request_context(
+            StackError::Http {
+                status: 404,
+                message: "Not found. [NOT_FOUND]".into(),
+            },
+            404,
+            &request,
+        ) {
+            StackError::Http { status, message } => {
+                assert_eq!(status, 404);
+                assert_eq!(
+                    message,
+                    "Not found. [NOT_FOUND] (HTTP 404 on GET developers/5374/users)"
+                );
+            }
+            other => panic!("expected Http, got {other:?}"),
+        }
+        match with_request_context(StackError::auth("denied"), 403, &request) {
+            StackError::Auth { message } => {
+                assert_eq!(message, "denied (HTTP 403 on GET developers/5374/users)")
+            }
+            other => panic!("expected Auth, got {other:?}"),
+        }
+        // Not Google's answer: untouched.
+        match with_request_context(StackError::decode("bad json"), 200, &request) {
+            StackError::Decode { message } => assert_eq!(message, "bad json"),
+            other => panic!("expected Decode, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn local_rejection_is_worded_as_local_and_logged_as_a_warning() {
+        let logs = crate::logging::testing::capture_logs();
+        match local_rejection(400, "test.target", "x is wrong") {
+            StackError::Http { status, message } => {
+                assert_eq!(status, 400);
+                assert_eq!(
+                    message,
+                    "local validation failed: x is wrong; request not sent to Google"
+                );
+            }
+            other => panic!("expected Http, got {other:?}"),
+        }
+        assert_eq!(
+            logs.messages(crate::logging::LogLevel::Warn, "test.target"),
+            ["local validation failed: x is wrong; request not sent to Google"]
         );
     }
 }

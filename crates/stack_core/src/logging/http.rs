@@ -10,6 +10,11 @@ use serde_json::Value;
 
 use super::redact;
 
+/// Path prefix of every Android Publisher API resource; dropped from
+/// [`RequestInfo::resource`] so a resource reads as in Google's docs
+/// (`developers/{id}/users`).
+const PUBLISHER_PREFIX: &str = "/androidpublisher/v3/";
+
 /// Response headers that carry a server-side request id, in lookup order.
 /// Quoting one lets a support request point at the exact call.
 const REQUEST_ID_HEADERS: [&str; 4] = [
@@ -53,6 +58,17 @@ impl RequestInfo {
             self.method,
             redact::scrub(&decoded_path(&self.url))
         )
+    }
+
+    /// The API-relative resource, as error messages name it:
+    /// `GET developers/5374/users/a***@example.com` (Android Publisher prefix
+    /// dropped, percent-decoded, e-mails masked).
+    pub(crate) fn resource(&self) -> String {
+        let path = decoded_path(&self.url);
+        let relative = path
+            .strip_prefix(PUBLISHER_PREFIX)
+            .unwrap_or_else(|| path.trim_start_matches('/'));
+        format!("{} {}", self.method, redact::scrub(relative))
     }
 }
 
@@ -245,6 +261,10 @@ mod tests {
         assert_eq!(
             request.line(),
             "PATCH androidpublisher.googleapis.com/androidpublisher/v3/developers/5374/users/a***@agency.example"
+        );
+        assert_eq!(
+            request.resource(),
+            "PATCH developers/5374/users/a***@agency.example"
         );
     }
 

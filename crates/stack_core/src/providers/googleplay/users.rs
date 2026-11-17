@@ -13,10 +13,12 @@ use serde::Deserialize;
 use serde_json::{json, Map};
 
 use super::client::{is_valid_package_name, GooglePlayClient};
-use super::error::{ErrorHints, GoogleApi, Target, PERMISSION_ADMIN};
+use super::error::{local_rejection, ErrorHints, GoogleApi, Target, PERMISSION_ADMIN};
 use super::non_blank;
 use crate::domain::{PlayGrantInfo, PlayUserInfo};
 use crate::error::StackError;
+use crate::logging::redact::{mask_email, quoted, shape};
+use crate::logging::target;
 
 /// The `users` collection under a developer account.
 const USERS: &str = "users";
@@ -114,16 +116,15 @@ impl PlayGrant {
     }
 }
 
-/// A locally rejected argument, as [`StackError::Http`] `400`.
-fn invalid(message: impl std::fmt::Display) -> StackError {
-    StackError::Http {
-        status: 400,
-        message: format!("{message} (checked locally; nothing was sent to Google)."),
-    }
+/// A locally rejected argument, as [`StackError::Http`] `400` (see
+/// [`local_rejection`]).
+fn invalid(detail: impl std::fmt::Display) -> StackError {
+    local_rejection(400, target::PLAY_USERS, detail)
 }
 
 /// An e-mail that can address a user: something on both sides of an `@`, no
-/// whitespace and no `/` (it becomes a path segment).
+/// whitespace and no `/` (it becomes a path segment). The rejection names the
+/// address masked.
 fn ensure_email(email: &str) -> Result<(), StackError> {
     let valid = email
         .split_once('@')
@@ -132,7 +133,11 @@ fn ensure_email(email: &str) -> Result<(), StackError> {
     if valid {
         Ok(())
     } else {
-        Err(invalid(format!("{email:?} is not a valid e-mail address")))
+        Err(invalid(format!(
+            "{} is not a valid e-mail address ({})",
+            quoted(&mask_email(email)),
+            shape(email)
+        )))
     }
 }
 
@@ -143,7 +148,9 @@ fn ensure_grant_app(package_name: &str) -> Result<(), StackError> {
         Ok(())
     } else {
         Err(invalid(format!(
-            "{package_name:?} is not a valid Android package name"
+            "grant package name {} is not a valid Android package name ({})",
+            quoted(package_name),
+            shape(package_name)
         )))
     }
 }
@@ -443,7 +450,11 @@ impl GooglePlayClient {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::providers::googleplay::test_support::{client, mount_token, CapturingLogger};
+    use crate::logging::testing::capture_logs;
+    use crate::logging::LogLevel;
+    use crate::providers::googleplay::test_support::{
+        client, mount_token, CapturingLogger, EMAIL as SA_EMAIL,
+    };
     use std::sync::Arc;
     use wiremock::matchers::{body_json, method, path, query_param, query_param_is_missing};
     use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -622,7 +633,9 @@ mod tests {
                 assert_eq!(status, 404);
                 assert!(message
                     .starts_with("Google Play found no developer account with ID 5374 (HTTP 404)"));
-                assert!(message.ends_with("Google said: Developer not found. [X]"));
+                assert!(message.ends_with(
+                    "Google said: Developer not found. [X] (HTTP 404 on GET developers/5374/users)"
+                ));
             }
             other => panic!("expected Http 404, got {other:?}"),
         }
@@ -647,10 +660,180 @@ mod tests {
                 assert!(message.contains("\"Admin (all permissions)\""));
                 assert!(message.ends_with(
                     "Google said: The caller does not have permission \
-                     CAN_MANAGE_PERMISSIONS_GLOBAL. [X]"
+                     CAN_MANAGE_PERMISSIONS_GLOBAL. [X] (HTTP 403 on GET developers/5374/users)"
                 ));
             }
             other => panic!("expected Auth, got {other:?}"),
+        }
+    }
+
+    /// The `Http` status and message of `err`.
+    fn http(err: StackError) -> (u16, String) {
+        match err {
+            StackError::Http { status, message } => (status, message),
+            other => panic!("expected Http, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn local_rejections_say_so_log_a_warning_and_mask_the_email() {
+        let server = MockServer::start().await;
+        mount_token(&server, "tok-1", 0).await;
+        let client = client(&server);
+        let logs = capture_logs();
+
+        let (status, message) = http(client.fetch_users("abc").await.unwrap_err());
+        assert_eq!(status, 404);
+        assert_eq!(
+            message,
+            "local validation failed: developer ID \"abc\" is not numeric (3 chars: \
+             letters); it is the number after /developers/ in a Play Console URL; request \
+             not sent to Google"
+        );
+        let (_, message) = http(client.fetch_users("").await.unwrap_err());
+        assert!(
+            message.starts_with("local validation failed: developer ID \"\" is empty (0 chars)"),
+            "{message}"
+        );
+
+        let (status, message) = http(
+            client
+                .delete_user(DEV, "dev@agency example")
+                .await
+                .unwrap_err(),
+        );
+        assert_eq!(status, 400);
+        assert_eq!(
+            message,
+            "local validation failed: \"d***@agency example\" is not a valid e-mail address \
+             (18 chars: letters, whitespace, '@'); request not sent to Google"
+        );
+
+        let (_, message) = http(
+            client
+                .set_grant(DEV, EMAIL, "com..app", &[])
+                .await
+                .unwrap_err(),
+        );
+        assert_eq!(
+            message,
+            "local validation failed: grant package name \"com..app\" is not a valid Android \
+             package name (8 chars: letters, '.'); request not sent to Google"
+        );
+
+        // Each rejection is one Warn line carrying the same text, and none
+        // reached the network.
+        let warns = logs.messages(LogLevel::Warn, "googleplay.users");
+        assert_eq!(warns.len(), 4, "{warns:?}");
+        assert!(warns
+            .iter()
+            .all(|w| w.starts_with("local validation failed:")));
+        assert!(logs.messages(LogLevel::Debug, "http").is_empty());
+        assert!(!logs.all_text().contains("dev@"));
+        assert!(server.received_requests().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn google_404_on_the_users_list_names_the_resource_and_keeps_googles_words() {
+        let server = MockServer::start().await;
+        mount_token(&server, "tok-1", 1).await;
+        Mock::given(method("GET"))
+            .and(path(USERS_PATH))
+            .respond_with(
+                ResponseTemplate::new(404)
+                    .insert_header("x-goog-request-id", "goog-404")
+                    .set_body_json(serde_json::json!({
+                        "error": {
+                            "code": 404,
+                            "message": "Requested entity was not found.",
+                            "status": "NOT_FOUND"
+                        }
+                    })),
+            )
+            .mount(&server)
+            .await;
+
+        let logs = capture_logs();
+        let (status, message) = http(client(&server).fetch_users(DEV).await.unwrap_err());
+        assert_eq!(status, 404);
+        assert_eq!(
+            message,
+            "Google Play found no developer account with ID 5374 (HTTP 404): check the \
+             developer ID. Google said: Requested entity was not found. [NOT_FOUND] \
+             (HTTP 404 on GET developers/5374/users)"
+        );
+
+        let warns = logs.messages(LogLevel::Warn, "http");
+        assert_eq!(warns.len(), 1, "{warns:?}");
+        assert!(
+            warns[0].starts_with("GET 127.0.0.1:")
+                && warns[0]
+                    .contains("/androidpublisher/v3/developers/5374/users → 404 Not Found (")
+                && warns[0].ends_with(
+                    " ms) [x-goog-request-id: goog-404]; google error: code=404 \
+                     status=NOT_FOUND message=\"Requested entity was not found.\""
+                ),
+            "{}",
+            warns[0]
+        );
+    }
+
+    #[tokio::test]
+    async fn google_403_without_admin_is_auth_naming_the_permission_and_logs_no_secret() {
+        let server = MockServer::start().await;
+        mount_token(&server, "ya29.secret-access-token", 1).await;
+        Mock::given(method("GET"))
+            .and(path(USERS_PATH))
+            .respond_with(ResponseTemplate::new(403).set_body_json(serde_json::json!({
+                "error": {
+                    "code": 403,
+                    "message": "The caller does not have permission",
+                    "status": "PERMISSION_DENIED",
+                    "details": [{
+                        "@type": "type.googleapis.com/google.rpc.ErrorInfo",
+                        "reason": "CALLER_LACKS_PERMISSION",
+                        "domain": "androidpublisher.googleapis.com"
+                    }]
+                }
+            })))
+            .mount(&server)
+            .await;
+
+        let logs = capture_logs();
+        let message = match client(&server).fetch_users(DEV).await.unwrap_err() {
+            StackError::Auth { message } => message,
+            other => panic!("expected Auth, got {other:?}"),
+        };
+        assert_eq!(
+            message,
+            format!(
+                "The service account {SA_EMAIL} cannot access the developer account 5374. Invite \
+                 it in Play Console > Users and permissions with at least \"Admin (all \
+                 permissions)\"; new access can take a while to propagate. Google said: The \
+                 caller does not have permission [PERMISSION_DENIED] (HTTP 403 on GET \
+                 developers/5374/users)"
+            )
+        );
+
+        let warns = logs.messages(LogLevel::Warn, "http");
+        assert_eq!(warns.len(), 1, "{warns:?}");
+        assert!(
+            warns[0].ends_with(
+                "google error: code=403 status=PERMISSION_DENIED message=\"The caller does \
+                 not have permission\" details=[ErrorInfo reason=CALLER_LACKS_PERMISSION \
+                 domain=androidpublisher.googleapis.com]"
+            ),
+            "{}",
+            warns[0]
+        );
+        let text = logs.all_text();
+        for secret in [
+            "ya29.secret-access-token",
+            "eyJ",
+            "PRIVATE KEY",
+            "play-bot@",
+        ] {
+            assert!(!text.contains(secret), "{secret} leaked: {text}");
         }
     }
 
@@ -833,7 +1016,11 @@ mod tests {
         match err {
             StackError::Http { status, message } => {
                 assert_eq!(status, 400);
-                assert_eq!(message, "Unknown package com.example.gone. [X]");
+                assert_eq!(
+                    message,
+                    "Unknown package com.example.gone. [X] \
+                     (HTTP 400 on POST developers/5374/users/a***@example.com/grants)"
+                );
             }
             other => panic!("expected the grant's Http 400, got {other:?}"),
         }
@@ -923,7 +1110,10 @@ mod tests {
         {
             StackError::Http { status, message } => {
                 assert_eq!(status, 404);
-                assert_eq!(message, "User not found. [X]");
+                assert_eq!(
+                    message,
+                    "User not found. [X] (HTTP 404 on PATCH developers/5374/users/a***@example.com)"
+                );
             }
             other => panic!("expected Http 404, got {other:?}"),
         }

@@ -36,6 +36,9 @@ const SECRET_KEYS: [&str; 9] = [
     "secret",
 ];
 
+/// At most this many characters of a value are echoed by [`quoted`].
+const MAX_ECHO_CHARS: usize = 64;
+
 /// Applies every redaction rule (see the module docs) to `text`.
 pub(crate) fn scrub(text: &str) -> String {
     let text = redact_pem_blocks(text);
@@ -43,6 +46,64 @@ pub(crate) fn scrub(text: &str) -> String {
     let text = redact_secret_values(&text);
     let text = redact_tokens(&text);
     mask_emails(&text)
+}
+
+/// `ana@example.com` → `a***@example.com`. A string without an `@` keeps only
+/// its first character (`a***`); an empty one is `""`.
+pub(crate) fn mask_email(email: &str) -> String {
+    match email.split_once('@') {
+        Some((local, domain)) => format!("{}***@{domain}", first_char(local)),
+        None if email.is_empty() => "\"\"".to_string(),
+        None => format!("{}***", first_char(email)),
+    }
+}
+
+/// `value` Debug-quoted, cut to [`MAX_ECHO_CHARS`] characters (`…` marks a
+/// cut), for echoing a rejected input in a message.
+pub(crate) fn quoted(value: &str) -> String {
+    let mut chars = value.chars();
+    let head: String = chars.by_ref().take(MAX_ECHO_CHARS).collect();
+    if chars.next().is_some() {
+        format!("{head:?}…")
+    } else {
+        format!("{head:?}")
+    }
+}
+
+/// The shape of `value` without its content: length and which kinds of
+/// characters it holds, e.g. `3 chars: letters` or
+/// `12 chars: digits, whitespace, '/'`. Tells "pasted a URL" or "trailing
+/// space" apart without echoing anything sensitive.
+pub(crate) fn shape(value: &str) -> String {
+    let count = value.chars().count();
+    let unit = if count == 1 { "char" } else { "chars" };
+    let mut kinds: Vec<String> = Vec::new();
+    if value.chars().any(|c| c.is_ascii_digit()) {
+        kinds.push("digits".to_string());
+    }
+    if value.chars().any(char::is_alphabetic) {
+        kinds.push("letters".to_string());
+    }
+    if value.chars().any(char::is_whitespace) {
+        kinds.push("whitespace".to_string());
+    }
+    let mut symbols: Vec<char> = Vec::new();
+    for c in value.chars() {
+        let symbol = !(c.is_ascii_digit() || c.is_alphabetic() || c.is_whitespace());
+        if symbol && !symbols.contains(&c) {
+            symbols.push(c);
+        }
+    }
+    kinds.extend(symbols.iter().take(5).map(|c| format!("{c:?}")));
+    if symbols.len() > 5 {
+        kinds.push("…".to_string());
+    }
+
+    if kinds.is_empty() {
+        format!("{count} {unit}")
+    } else {
+        format!("{count} {unit}: {}", kinds.join(", "))
+    }
 }
 
 fn first_char(s: &str) -> String {
@@ -282,6 +343,16 @@ mod tests {
     const JWT: &str = "eyJhbGciOiJSUzI1NiJ9.eyJpc3MiOiJ4In0.c2lnbmF0dXJl";
 
     #[test]
+    fn mask_email_keeps_first_char_and_domain() {
+        assert_eq!(mask_email("dev@agency.example"), "d***@agency.example");
+        assert_eq!(mask_email("@agency.example"), "***@agency.example");
+        assert_eq!(mask_email("not-an-email"), "n***");
+        assert_eq!(mask_email(""), "\"\"");
+        // A multi-byte first character is kept whole.
+        assert_eq!(mask_email("élodie@x.fr"), "é***@x.fr");
+    }
+
+    #[test]
     fn scrub_masks_every_email_and_is_idempotent() {
         let text = "invite ana.b+ci@agency.example and play-bot@proj.iam.gserviceaccount.com";
         let once = scrub(text);
@@ -370,5 +441,29 @@ mod tests {
         assert_eq!(scrub("Ünïcødé — ok"), "Ünïcødé — ok");
         assert_eq!(scrub("café ana@exämple.com"), "café a***@exämple.com");
         assert_eq!(scrub("— élodie@x.fr —"), "— é***@x.fr —");
+    }
+
+    #[test]
+    fn quoted_cuts_long_values() {
+        assert_eq!(quoted("abc"), "\"abc\"");
+        let long = "x".repeat(70);
+        assert_eq!(quoted(&long), format!("\"{}\"…", "x".repeat(64)));
+        assert_eq!(quoted(&"x".repeat(64)), format!("\"{}\"", "x".repeat(64)));
+    }
+
+    #[test]
+    fn shape_names_length_and_character_kinds() {
+        assert_eq!(shape(""), "0 chars");
+        assert_eq!(shape("7"), "1 char: digits");
+        assert_eq!(shape("abc"), "3 chars: letters");
+        assert_eq!(shape(" 5374 "), "6 chars: digits, whitespace");
+        assert_eq!(
+            shape("https://play.google.com/console/developers/5374"),
+            "47 chars: digits, letters, ':', '/', '.'"
+        );
+        assert_eq!(
+            shape("a!@#$%^&"),
+            "8 chars: letters, '!', '@', '#', '$', '%', …"
+        );
     }
 }

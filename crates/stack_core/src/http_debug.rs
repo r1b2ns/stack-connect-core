@@ -14,10 +14,12 @@ use crate::logging::http::{
 use crate::logging::{self, target, LogLevel};
 use crate::ports::DebugLogger;
 
-/// A finished HTTP exchange.
+/// A finished HTTP exchange: what came back, and what was sent (for error
+/// messages).
 pub(crate) struct HttpReply {
     pub(crate) status: reqwest::StatusCode,
     pub(crate) body: String,
+    pub(crate) request: RequestInfo,
 }
 
 /// Sends `builder` and reads the whole body.
@@ -72,7 +74,11 @@ pub(crate) async fn send(
         Some(&body),
     );
 
-    Ok(HttpReply { status, body })
+    Ok(HttpReply {
+        status,
+        body,
+        request: info,
+    })
 }
 
 /// [`send`], returning only the status and body.

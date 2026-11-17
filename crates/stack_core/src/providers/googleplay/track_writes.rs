@@ -571,7 +571,11 @@ mod tests {
         {
             StackError::Http { status, message } => {
                 assert_eq!(status, 400);
-                assert_eq!(message, "Release notes for language en-US are too long.");
+                assert_eq!(
+                    message,
+                    "Release notes for language en-US are too long. \
+                     (HTTP 400 on POST applications/com.example.app/edits/E1:validate)"
+                );
             }
             other => panic!("expected Google's Http 400, got {other:?}"),
         }

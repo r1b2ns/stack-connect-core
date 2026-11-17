@@ -10,11 +10,13 @@ use std::collections::BTreeSet;
 
 use serde_json::{json, Map, Value};
 
+use super::error::local_rejection;
 use crate::domain::{
     CountryTargetingInfo, LocalizedTextInfo, NewRelease, NewReleaseStatus, ReleaseChange,
     ReleaseMetadataUpdate,
 };
 use crate::error::StackError;
+use crate::logging::target;
 
 /// One `TrackRelease`, exactly as Google sent it (plus the core's edits).
 pub(super) type Release = Map<String, Value>;
@@ -37,12 +39,10 @@ const PRIORITY_RANGE: std::ops::RangeInclusive<i32> = 0..=5;
 
 /// A locally rejected change, worded like the other local checks: reported as
 /// [`StackError::Http`] `400` (what Google answers for an invalid argument), so
-/// hosts handle it with Google's own validation errors.
+/// hosts handle it with Google's own validation errors (see
+/// [`local_rejection`]).
 fn invalid(message: impl std::fmt::Display) -> StackError {
-    StackError::Http {
-        status: 400,
-        message: format!("{message} (checked locally; nothing was sent to Google)."),
-    }
+    local_rejection(400, target::PLAY_TRACKS, message)
 }
 
 /// The set of version codes that identifies a release.
@@ -491,7 +491,8 @@ mod tests {
                 status: 400,
                 message,
             } => {
-                assert!(message.ends_with("(checked locally; nothing was sent to Google)."));
+                assert!(message.starts_with("local validation failed: "));
+                assert!(message.ends_with("; request not sent to Google"));
                 message
             }
             other => panic!("expected a local Http 400, got {other:?}"),

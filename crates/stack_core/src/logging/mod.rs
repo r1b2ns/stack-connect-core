@@ -61,6 +61,13 @@ pub(crate) mod target {
     pub(crate) const HTTP: &str = "http";
     /// Access tokens: minting, caching, invalidation (both services).
     pub(crate) const AUTH: &str = "auth";
+    /// Google Play: transport-level checks shared by every call (package
+    /// names), and the apps listing (`apps:search`).
+    pub(crate) const PLAY: &str = "googleplay";
+    /// Google Play: track reads, release summaries and release changes.
+    pub(crate) const PLAY_TRACKS: &str = "googleplay.tracks";
+    /// Google Play: developer-account users and grants.
+    pub(crate) const PLAY_USERS: &str = "googleplay.users";
 }
 
 /// The installed host sink. Read on every emitted line; written only by

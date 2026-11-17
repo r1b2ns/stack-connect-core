@@ -1170,7 +1170,11 @@ mod tests {
         {
             StackError::Http { status, message } => {
                 assert_eq!(status, 400);
-                assert_eq!(message, "Reply text is too long. [INVALID_ARGUMENT]");
+                assert_eq!(
+                    message,
+                    "Reply text is too long. [INVALID_ARGUMENT] \
+                     (HTTP 400 on POST applications/com.example.app/reviews/gp:1:reply)"
+                );
             }
             other => panic!("expected Http, got {other:?}"),
         }
@@ -1232,7 +1236,11 @@ mod tests {
         {
             StackError::Http { status, message } => {
                 assert_eq!(status, 404);
-                assert_eq!(message, "Review not found. [NOT_FOUND]");
+                assert_eq!(
+                    message,
+                    "Review not found. [NOT_FOUND] \
+                     (HTTP 404 on POST applications/com.example.app/reviews/gp:gone:reply)"
+                );
             }
             other => panic!("expected Http, got {other:?}"),
         }

@@ -591,7 +591,10 @@ mod tests {
         {
             StackError::Http { status, message } => {
                 assert_eq!(status, 500);
-                assert_eq!(message, "read exploded");
+                assert_eq!(
+                    message,
+                    "read exploded (HTTP 500 on GET applications/com.example.app/edits/E1/details)"
+                );
             }
             other => panic!("expected the read's Http 500, got {other:?}"),
         }
@@ -648,7 +651,8 @@ mod tests {
         assert_eq!(
             last,
             "[RustCore] Google Play: could not delete edit E1 of com.example.app \
-             (ignored; it expires on its own): HTTP 503: try later"
+             (ignored; it expires on its own): HTTP 503: try later \
+             (HTTP 503 on DELETE applications/com.example.app/edits/E1)"
         );
     }
 
@@ -682,7 +686,8 @@ mod tests {
                 assert_eq!(
                     message,
                     "Google Play found no app with package name com.example.app (HTTP 404): \
-                     check the package name. Google said: Package not found: com.example.app."
+                     check the package name. Google said: Package not found: com.example.app. \
+                     (HTTP 404 on POST applications/com.example.app/edits)"
                 );
             }
             other => panic!("expected Http 404, got {other:?}"),

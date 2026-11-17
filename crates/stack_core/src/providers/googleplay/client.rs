@@ -4,11 +4,12 @@ use std::sync::Arc;
 use serde::Deserialize;
 use tokio::sync::Mutex;
 
-use super::error::{map_google_error, ErrorHints};
+use super::error::{local_rejection, map_google_error, with_request_context, ErrorHints};
 use crate::auth::oauth_jwt::ServiceAccountAuthenticator;
 use crate::domain::AppInfo;
 use crate::error::StackError;
-use crate::http_debug::send_and_read;
+use crate::http_debug::{send, HttpReply};
+use crate::logging::redact::{quoted, shape};
 use crate::logging::{self, target};
 use crate::ports::DebugLogger;
 
@@ -106,19 +107,22 @@ pub(super) fn is_valid_package_name(name: &str) -> bool {
 ///
 /// Reported as [`StackError::Http`] `404` — the answer Google gives for a
 /// package it does not know — so hosts handle "no such app" in one place; the
-/// message says the check was local. It also keeps URL building safe: `""`,
-/// `.`, `..` or a `/` can never reach a path segment.
+/// message says the check was local (see [`local_rejection`]). It also keeps
+/// URL building safe: `""`, `.`, `..` or a `/` can never reach a path segment.
 fn ensure_package_name(name: &str) -> Result<(), StackError> {
     if is_valid_package_name(name) {
         return Ok(());
     }
-    Err(StackError::Http {
-        status: 404,
-        message: format!(
-            "{name:?} is not a valid Android package name, so no Google Play app can \
-             have it (checked locally; nothing was sent to Google)."
+    Err(local_rejection(
+        404,
+        target::PLAY,
+        format!(
+            "package name {} is not a valid Android package name ({}), so no Google \
+             Play app can have it",
+            quoted(name),
+            shape(name)
         ),
-    })
+    ))
 }
 
 /// Whether `id` can be a Play developer account ID: the decimal number in
@@ -133,14 +137,21 @@ fn ensure_developer_id(id: &str) -> Result<(), StackError> {
     if is_valid_developer_id(id) {
         return Ok(());
     }
-    Err(StackError::Http {
-        status: 404,
-        message: format!(
-            "{id:?} is not a valid Google Play developer account ID (the number in a Play \
-             Console URL after /developers/), so no developer account can have it (checked \
-             locally; nothing was sent to Google)."
+    let problem = if id.is_empty() {
+        "is empty"
+    } else {
+        "is not numeric"
+    };
+    Err(local_rejection(
+        404,
+        target::PLAY_USERS,
+        format!(
+            "developer ID {} {problem} ({}); it is the number after /developers/ in a \
+             Play Console URL",
+            quoted(id),
+            shape(id)
         ),
-    })
+    ))
 }
 
 /// Google Play client: the shared transport (bearer token, one retry on 401,
@@ -300,36 +311,33 @@ impl GooglePlayClient {
     where
         F: Fn() -> reqwest::RequestBuilder + Send + Sync,
     {
-        let (mut status, mut body) = self.send_authorized(&build).await?;
-        if status == reqwest::StatusCode::UNAUTHORIZED {
+        let mut reply = self.send_authorized(&build).await?;
+        if reply.status == reqwest::StatusCode::UNAUTHORIZED {
             logging::info(target::AUTH, || {
-                "Google answered HTTP 401; retrying once with a new access token".to_string()
+                format!(
+                    "Google answered HTTP 401 on {}; retrying once with a new access token",
+                    reply.request.resource()
+                )
             });
             self.auth.invalidate().await;
-            (status, body) = self.send_authorized(&build).await?;
+            reply = self.send_authorized(&build).await?;
         }
 
-        if status.is_success() {
-            return Ok(body);
+        if reply.status.is_success() {
+            return Ok(reply.body);
         }
-        Err(map_google_error(
-            status.as_u16(),
-            &body,
-            self.auth.client_email(),
-            hints,
-        ))
+        let status = reply.status.as_u16();
+        let err = map_google_error(status, &reply.body, self.auth.client_email(), hints);
+        Err(with_request_context(err, status, &reply.request))
     }
 
     /// Sends one request built by `build` with the current bearer token.
-    async fn send_authorized<F>(
-        &self,
-        build: &F,
-    ) -> Result<(reqwest::StatusCode, String), StackError>
+    async fn send_authorized<F>(&self, build: &F) -> Result<HttpReply, StackError>
     where
         F: Fn() -> reqwest::RequestBuilder + Send + Sync,
     {
         let token = self.auth.bearer_token().await?;
-        send_and_read(build().bearer_auth(token), self.debug_logger.as_deref()).await
+        send(build().bearer_auth(token), self.debug_logger.as_deref()).await
     }
 
     /// One `GET {reporting}/v1beta1/apps:search?pageSize=…[&pageToken=…]`,
@@ -631,7 +639,8 @@ mod tests {
         assert_eq!(
             infos,
             [
-                "Google answered HTTP 401; retrying once with a new access token",
+                "Google answered HTTP 401 on GET v1beta1/apps:search; retrying once with a new \
+                 access token",
                 "Google: cached access token dropped; the next call exchanges a new one",
             ]
         );
@@ -700,7 +709,10 @@ mod tests {
         match client(&server).validate().await.unwrap_err() {
             StackError::Http { status, message } => {
                 assert_eq!(status, 429);
-                assert_eq!(message, "Quota exceeded [RESOURCE_EXHAUSTED]");
+                assert_eq!(
+                    message,
+                    "Quota exceeded [RESOURCE_EXHAUSTED] (HTTP 429 on GET v1beta1/apps:search)"
+                );
             }
             other => panic!("expected Http, got {other:?}"),
         }
@@ -1016,7 +1028,7 @@ mod tests {
         match client(&server).fetch_apps().await.unwrap_err() {
             StackError::Http { status, message } => {
                 assert_eq!(status, 500);
-                assert_eq!(message, "boom");
+                assert_eq!(message, "boom (HTTP 500 on GET v1beta1/apps:search)");
             }
             other => panic!("expected Http, got {other:?}"),
         }
@@ -1226,8 +1238,9 @@ mod tests {
             match client.publisher_url(package, &["reviews"]).unwrap_err() {
                 StackError::Http { status, message } => {
                     assert_eq!(status, 404);
+                    assert!(message.starts_with("local validation failed: package name "));
                     assert!(message.contains("is not a valid Android package name"));
-                    assert!(message.contains("nothing was sent to Google"));
+                    assert!(message.ends_with("; request not sent to Google"));
                 }
                 other => panic!("expected Http 404 for {package:?}, got {other:?}"),
             }
@@ -1270,8 +1283,9 @@ mod tests {
             match client.developer_url(id, &["users"]).unwrap_err() {
                 StackError::Http { status, message } => {
                     assert_eq!(status, 404);
-                    assert!(message.contains("is not a valid Google Play developer account ID"));
-                    assert!(message.contains("nothing was sent to Google"));
+                    assert!(message.starts_with("local validation failed: developer ID "));
+                    assert!(message.contains("the number after /developers/"));
+                    assert!(message.ends_with("; request not sent to Google"));
                 }
                 other => panic!("expected Http 404 for {id:?}, got {other:?}"),
             }
