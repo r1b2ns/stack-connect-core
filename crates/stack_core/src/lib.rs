@@ -1,10 +1,12 @@
 //! `stack_core` — shared Rust core for [stack-connect](../stack-connect).
 //!
-//! A multi-service hub: each external service (App Store Connect today; Firebase,
-//! Google Play, AWS, GitHub later) is a plugin implementing a uniform contract.
-//! The UniFFI facade exposes a stable surface — `available_services`,
-//! `credential_schema`, `connect` → `Provider` — that does not change as plugins
-//! are added. Consumed natively by iOS via UniFFI.
+//! A multi-service hub: each external service is a plugin implementing a uniform
+//! contract. App Store Connect and Google Play (apps, reviews, app details, store
+//! listings, tracks, app icons) are in the core today; Firebase, AWS and GitHub
+//! may follow. The UniFFI facade exposes a stable surface — `available_services`, `credential_schema`, `connect` →
+//! `Provider` — that does not change as plugins are added. Consumed natively by
+//! iOS via UniFFI and by the Flutter apps via flutter_rust_bridge (`frb`
+//! feature).
 
 uniffi::setup_scaffolding!();
 
@@ -12,6 +14,8 @@ mod auth;
 mod domain;
 mod error;
 mod facade;
+mod http_debug;
+mod logging;
 mod ports;
 mod providers;
 mod service;
@@ -35,19 +39,30 @@ mod frb_generated;
 pub use domain::{
     AccountExport, AnalyticsReport, AnalyticsReportData, AnalyticsReportInstance,
     AnalyticsReportInstancesPage, AnalyticsReportRequest, AnalyticsReportRequestsPage,
-    AnalyticsReportSegment, AnalyticsReportSegmentsPage, AnalyticsReportsPage, AppInfo,
-    AppReviewDetailInfo, AppStoreLocalizationInfo, AppStoreVersionInfo, BetaGroupInfo,
-    BetaTesterInfo, BuildDetailInfo, BuildInfo, BuildsPage, CustomerReview, CustomerReviewsPage,
-    PhasedReleaseInfo, ReviewResponse, ReviewSubmission, ScreenshotInfo, ScreenshotSetInfo,
+    AnalyticsReportSegment, AnalyticsReportSegmentsPage, AnalyticsReportsPage, AppDetailsInfo,
+    AppInfo, AppReviewDetailInfo, AppStoreLocalizationInfo, AppStoreVersionInfo, BetaGroupInfo,
+    BetaTesterInfo, BuildDetailInfo, BuildInfo, BuildsPage, BundleInfo, ChangesInReviewBehavior,
+    CommitOptions, CountryTargetingInfo, CustomerReview, CustomerReviewsPage, LocalizedTextInfo,
+    NewRelease, NewReleaseStatus, PhasedReleaseInfo, PlayGrantInfo, PlayUserInfo, ReleaseChange,
+    ReleaseMetadataUpdate, ReleaseSummaryInfo, ReviewResponse, ReviewSubmission, ScreenshotInfo,
+    ScreenshotSetInfo, StoreListingInfo, TrackInfo, TrackReleaseInfo,
 };
 pub use error::StackError;
-pub use facade::{available_services, connect, credential_schema, make_sync_service};
-pub use ports::{BlobStore, CredentialStore};
+pub use facade::{
+    available_services, connect, credential_schema, make_sync_service, set_core_logger,
+};
+pub use logging::LogLevel;
+pub use ports::{BlobStore, CoreLogger, CredentialStore};
 pub use service::capabilities::analytics::Analytics;
+pub use service::capabilities::app_details::AppDetails;
+pub use service::capabilities::app_icons::AppIcons;
 pub use service::capabilities::app_store_versions::AppStoreVersions;
 pub use service::capabilities::beta_groups::BetaGroups;
 pub use service::capabilities::builds::Builds;
+pub use service::capabilities::play_users::PlayUsers;
 pub use service::capabilities::reviews::Reviews;
+pub use service::capabilities::store_listings::StoreListings;
+pub use service::capabilities::tracks::Tracks;
 pub use service::kind::{CredentialField, ServiceKind};
 pub use service::provider::{Capability, Provider};
 pub use service::sync::SyncService;

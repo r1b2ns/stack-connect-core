@@ -1,7 +1,7 @@
 # Plan: `stack_core` (Rust) + Swift/iOS binding (UniFFI)
 
 > Shared Rust core that functions as a **multi-service hub**: each
-> external service (App Store Connect, Firebase, Google Play today; AWS, GitHub and
+> external service (App Store Connect and Google Play today; Firebase, AWS, GitHub and
 > others in the future) enters as a **plugin** (`Provider`) that implements a
 > common contract. Consumed natively by iOS via **UniFFI**
 > (`StackCoreRust.xcframework`).
@@ -18,7 +18,8 @@
 | Bindings | **Swift/iOS via UniFFI** (done) + **Dart via flutter_rust_bridge** (active, for the Flutter Android+desktop apps) | Core stays **binding-agnostic** (thin facade per generator); FRB is a *separate* toolchain from UniFFI, added as a second facade behind a `frb` feature — see §11 |
 | Architecture | **Multi-service via plugins** (`Provider` + `registry`) | FFI surface **stable** regardless of how many services exist; new service does not touch core |
 | 1st service | **App Store Connect** | First complete plugin; validates the contract with a real service |
-| Next | **Firebase, Google Play** (porting the Swift packages) → then **AWS, GitHub, …** | Enter as plugins reusing existing or new authenticators |
+| 2nd service | **Google Play**: apps, reviews, app detail, icons and release management in the core | Second plugin on the same contract, with its own authenticator (`auth::oauth_jwt`) |
+| Next | **Firebase** stays native in the iOS app for now → later **AWS, GitHub, …** | Enter as plugins reusing existing or new authenticators |
 | Apple | Client *subset* (~31 endpoint families), not the giant SDK | Avoids porting the 2,411 generated files from `appstoreconnect-swift-sdk` |
 | Persistence | **Native per platform via callback (`BlobStore`)** | Core *stateless*; iOS continues with SwiftData; lower-risk migration |
 
@@ -65,7 +66,7 @@ Types exported by UniFFI, stable regardless of how many services exist:
 ```rust
 /// Which external service a connected account talks to. Grows with new plugins.
 #[derive(uniffi::Enum)]
-pub enum ServiceKind { AppStoreConnect, Firebase, GooglePlay /* future: Aws, GitHub, … */ }
+pub enum ServiceKind { AppStoreConnect, GooglePlay /* append-only; future: Firebase, Aws, GitHub, … */ }
 
 /// Capability that a provider CAN expose. The UI calls `capabilities()` to know what's available.
 #[derive(uniffi::Enum)]
@@ -115,23 +116,31 @@ adopt only if the capability becomes too large for a single method.)
 
 Without touching `domain`, `facade`, `service::provider` or the other plugins:
 
-1. **`ServiceKind::Aws`** (one enum variant).
+1. **`ServiceKind::Aws`** (one enum variant, appended at the end: both bindings
+   encode variants by position).
 2. **Authenticator** in `auth/` if the scheme is new (e.g. `auth/sigv4.rs` for AWS,
-   reuse of `auth/oauth2.rs` for GitHub). Behind the `Authenticator` trait.
-3. **`providers/aws/`** implementing `Provider` (+ the `Capability` it offers).
+   `auth/oauth2.rs` for GitHub), or reuse an existing one (`auth::oauth_jwt` for any
+   Google service account). Authenticators are **concrete types** owned by the
+   provider's client; there is no shared `Authenticator` trait. Token-cache
+   primitives live in `auth::token`, and HTTP send + debug tracing in `http_debug`.
+3. **`providers/aws/`** implementing the internal `ProviderImpl` trait (+ the
+   `Capability` it offers); the exported `Provider` object wraps it.
 4. **Register** in `service/registry.rs`: `build(kind)`, `credential_schema(kind)`
    and include in `available_services()`.
 
 The facade already exposes the new service automatically (the UI sees it in `available_services()`
-and requests the right secrets via `credential_schema()`).
+and requests the right secrets via `credential_schema()`). The new enum variant still
+requires regenerating both bindings, and any exhaustive host `switch` over
+`ServiceKind` must gain a case. Google Play (`providers/googleplay/` +
+`auth::oauth_jwt`) was added exactly this way.
 
 ## 5. Layers: What Migrates to Rust vs. What Stays Native
 
 | Origin (Swift) | LOC | Destination |
 |---|---|---|
 | `appstoreconnect-swift-sdk` (actual app usage) | ~2,854 | → `providers/appstore` (**1st plugin**) + `auth::es256` |
-| `Packages/APIProviderFirebase` | ~1,933 | → `providers/firebase` (plugin) + `auth::oauth_jwt` |
-| `Packages/APIProviderPlay` | ~1,082 | → `providers/googleplay` (plugin) + `auth::oauth_jwt` |
+| `Packages/APIProviderFirebase` | ~1,933 | → `providers/firebase` (plugin) + `auth::oauth_jwt` (not ported; stays native for now) |
+| `Packages/APIProviderPlay` | ~1,082 | → `providers/googleplay` (plugin) + `auth::oauth_jwt` (first slice ported: connect + list apps) |
 | `Packages/StackProtocols` (`AccountConnectionProtocol`, `AppInfo`) | 47 | **dissolved** in core: `AppInfo`→`domain`; `AccountConnectionProtocol`→ `Provider` trait |
 | `StackCore::PersistentStorable` | 31 | → `BlobStore` trait (UniFFI callback) |
 | `StackCore::SwiftDataStorable` | 130 | **stays native** (implements the callback) |
@@ -153,16 +162,17 @@ stack-connect-core/
 ├── rust-toolchain.toml
 ├── crates/
 │   └── stack_core/
-│       ├── Cargo.toml         # auth schemes behind features (es256, oauth_jwt, oauth2, sigv4)
+│       ├── Cargo.toml         # features: frb (Dart binding), cli (bindgen); no per-service features
 │       ├── uniffi.toml
 │       ├── src/
 │       │   ├── lib.rs         # uniffi::setup_scaffolding!; re-exports
 │       │   ├── domain/        # AppInfo, ... (shared value types)
 │       │   ├── ports/         # CredentialStore, BlobStore, Clock (host callbacks)
 │       │   ├── error/         # StackError (+ Unsupported)
-│       │   ├── http/          # typed reqwest client + pagination strategies
-│       │   ├── auth/          # pluggable authenticators (trait Authenticator):
-│       │   │                  #   es256 (Apple) · oauth_jwt (Google SA) · oauth2 (GitHub) · sigv4 (AWS)
+│       │   ├── http_debug.rs  # shared reqwest send + debug tracing (pagination lives per client)
+│       │   ├── auth/          # concrete authenticators (no shared trait):
+│       │   │                  #   es256 (Apple) · oauth_jwt (Google SA) · token (shared cache)
+│       │   │                  #   future: oauth2 (GitHub) · sigv4 (AWS)
 │       │   ├── service/
 │       │   │   ├── provider.rs   # trait Provider · Capability
 │       │   │   ├── kind.rs       # ServiceKind · CredentialField
@@ -170,7 +180,7 @@ stack-connect-core/
 │       │   ├── providers/        # one module per concrete service:
 │       │   │   ├── appstore/     #   1st plugin (App Store Connect)
 │       │   │   ├── firebase/     #   (later phase)
-│       │   │   └── googleplay/   #   (later phase)   future: aws/ github/
+│       │   │   └── googleplay/   #   2nd plugin (Google Play: connect + list apps)   future: aws/ github/
 │       │   ├── sync/          # Generic SyncService (per provider/capability) over BlobStore
 │       │   └── facade/        # #[uniffi::export]: connect() · credential_schema() · available_services()
 │       └── tests/             # wiremock + JSON fixtures
@@ -178,6 +188,9 @@ stack-connect-core/
 ├── build/                     # build-xcframework.sh · gen-swift.sh · swift-smoke.sh
 └── .github/workflows/ci.yml
 ```
+
+As built, several of these are single files rather than directories (`domain.rs`,
+`ports.rs`, `error.rs`, `facade.rs`, `http_debug.rs`); see the README's Layout section.
 
 ## 8. Callback Interfaces (Core ↔ Native)
 
@@ -202,8 +215,9 @@ pub trait BlobStore: Send + Sync {          // mirrors PersistentStorable
 ```
 
 The **credential keys** are defined by each provider via `credential_schema`
-(Apple: `issuerId`/`keyId`/`p8`; Google: `serviceAccountJson`; AWS: `accessKeyId`/
-`secretAccessKey`/`region`; GitHub: `token`). The `CredentialStore` itself remains
+(Apple: `issuerId`/`keyId`/`privateKeyP8`; Google Play: `clientEmail`/`privateKeyId`/
+`privateKey`, which the host extracts from the service account's JSON key file; AWS:
+`accessKeyId`/`secretAccessKey`/`region`; GitHub: `token`). The `CredentialStore` itself remains
 generic (key→value per account). iOS: `KeychainStorable`→`CredentialStore`,
 `SwiftDataStorable`→`BlobStore`.
 
@@ -227,18 +241,18 @@ jsonwebtoken = "9"     # ES256 (.p8 Apple) and RS256 (Google SA), depending on t
 tokio        = { version = "1", features = ["rt", "rt-multi-thread", "sync", "macros", "time"] }
 thiserror    = "2"
 uniffi       = { version = "0.31", features = ["tokio"] }  # async → Swift; pure proc-macro
-# future, behind features: aws-sigv4 (AWS), oauth2 (GitHub), ...
+# future: aws-sigv4 (AWS), oauth2 (GitHub), ...
 
-[features]                      # each auth/service scheme only enters the binary if compiled
-default      = ["appstore"]
-appstore     = []               # ES256
-google       = []               # oauth_jwt (Firebase + Google Play)
-# aws        = ["dep:aws-sigv4"]
-# github     = []               # oauth2
+[features]
+cli = ["uniffi/cli"]               # embedded uniffi-bindgen binary
+frb = ["dep:flutter_rust_bridge"]  # Dart binding (flutter_rust_bridge), off by default
 ```
 
-The providers/authenticators are behind **cargo features** — the `.xcframework`
-only loads what is enabled.
+As built there are **no per-service or per-auth-scheme cargo features**: every provider
+and authenticator is always compiled in. Google Play needed no new dependency
+(`jsonwebtoken` already signs RS256 from PKCS#1/PKCS#8 PEM, and `reqwest` already sends
+forms and query strings). Per-service features remain an option if binary size ever
+becomes a problem.
 
 ## 11. Phase-Based Roadmap
 
@@ -247,11 +261,115 @@ only loads what is enabled.
 - **Phase 2 — Full ASC capabilities + sync.** The ~31 resources as capabilities; 403 error *pending agreements*; generic `SyncService` over `BlobStore`. Migrate the rest of `AppleAccountConnection`.
 - **Phase 3 — Cleanup.** Remove legacy Swift packages + `appstoreconnect-swift-sdk` usage; keep native only `WidgetIconCache`/`Log`/`AppGroup`.
 
-> **Out of scope (for now): Firebase / Google Play.** These providers are **not** being
-> migrated to the core at this time — they remain implemented **natively in the iOS app**
-> (`APIProviderFirebase`/`APIProviderPlay`). If they are ported later, each is just a
-> `providers/<x>/` + registration reusing `auth::oauth_jwt` (see §4), without touching core or
-> facade.
+- **Google Play — first slice (connect + list apps). ✅ IN THE CORE.** `ServiceKind::GooglePlay`
+  (appended); credential keys `clientEmail`/`privateKeyId`/`privateKey`, which the host
+  extracts from the service account's JSON key file. `auth::oauth_jwt::ServiceAccountAuthenticator`
+  signs an RS256 JWT-bearer assertion and exchanges it at `oauth2.googleapis.com/token`
+  (token cached with a 60 s margin, dropped on a 401). The key is parsed eagerly at
+  `connect`, so a bad key is `InvalidCredentials` there, unlike App Store Connect's lazy
+  `.p8` parse. Apps come from the Play Developer Reporting API `apps:search`, the only
+  list-apps endpoint; `capabilities() == [Apps]`. Google errors map onto the existing
+  `StackError` variants (no new variant). Pending: host integration (iOS, Flutter), the
+  `.scexport` conversion between iOS's `serviceAccountJSON` blob and the three fields, and
+  further capabilities (reviews, tracks/releases).
+- **Google Play — reviews + read-only app detail (Phase 3, core side). ✅ IN THE CORE.**
+  `capabilities() == [Apps, Reviews, AppDetails, StoreListings, Tracks]`; the three new
+  `Capability` variants are appended (position-encoded in both bindings), and App Store
+  Connect is unchanged. All calls go to the Android Publisher API (`androidpublisher` v3),
+  which must be enabled next to the Reporting API.
+  - `Reviews` reuses the generic capability: list (`tokenPagination`, bounded to 100 pages),
+    one page (no server-side sort/filter: `sort` ∈ {`""`, `-createdDate`} else
+    `Unsupported`; `filter_rating` applied to each fetched page; `limit` clamped to
+    1–100), and reply (`reviews/{id}:reply`, no local length check). `CustomerReview.id`
+    is the opaque composite `{packageName}/{reviewId}`. Reply deletion and review
+    submissions are `Unsupported`. Google only serves reviews created or modified in the
+    last week, with a comment, for production versions.
+  - `AppDetails` / `StoreListings` / `Tracks` read `edits.details` / `edits.listings` /
+    `edits.tracks` through one edit-session helper (insert → read → always delete, best
+    effort, the read's error wins, never commit), serialized per client. Opening an edit
+    invalidates any other open edit of the same service account and app (documented
+    side effect). `fetch_app_details` doubles as the access check for a manually added
+    package: `Http 404` = unknown package (also returned locally for a name that breaks
+    Android's rules), `Auth` = no access or API disabled.
+  - Error mapping gained per-call hints (API, Play Console permission, target app): a
+    401 `permissionDenied` reads as "no access", and a 404 on an app-level call names
+    the package.
+  - Pending: writes (store listing updates, rollout/track changes, all via
+    `edits.commit`); `CustomerReview` extra Play fields (app version, device, reviewer
+    language) and `TrackReleaseInfo.countryTargeting`; FRB wrappers for `AppDetails` /
+    `StoreListings` / `Tracks` (Play reviews already reach Dart through `FrbReviews`);
+    `translationLanguage` for reviews; live verification of which Play Console permission
+    `edits.insert` requires for read-only use.
+- **Google Play — app icons (`AppIcons`). ✅ IN THE CORE.** A new generic capability,
+  appended to `Capability` (position-encoded, so append only):
+  `AppIcons.fetch_icon_url(app_id) -> Option<String>`, reached via `Provider::app_icons()`.
+  Google Play now reports `capabilities() == [Apps, Reviews, AppDetails, StoreListings,
+  Tracks, AppIcons]`; App Store Connect also exposes `AppIcons` (appended after
+  `Analytics`) by delegating to the existing latest-build `iconAssetToken` lookup, and
+  keeps `AppMetadata::fetch_icon_url` unchanged for existing callers.
+  - **Source: the public store page, never an edit.** The Android Publisher API only lists
+    images through `edits.images.list`, and opening an edit invalidates any other open edit
+    of the same service account and app (e.g. a CI upload). Icons are needed for every app
+    in a list, so `providers/googleplay/store_page.rs` reads
+    `GET https://play.google.com/store/apps/details?id={package}&hl=en` instead. Its client
+    shares the provider's `reqwest::Client` (pool and timeouts) but holds no authenticator,
+    so it cannot mint or send a token; the base URL is injectable for tests.
+  - **Parsing:** the first `og:image` meta tag (any attribute order, double/single/no
+    quotes, HTML entities decoded). Only `https://` on `*.googleusercontent.com` (Play uses
+    `play-lh.googleusercontent.com`), no credentials or explicit port; the options after
+    the last `=` of the last path segment become `=s512` (appended when absent), query and
+    fragment dropped. At most 8 MiB of the page is read (`http_debug::send_and_read_capped`;
+    a live page is about 1.3 MB with the tag past the first megabyte), and the body is never
+    logged, only its size.
+  - **Semantics:** `200` with a usable icon → `Some(url)`; `404` (unpublished, unknown, not
+    visible in the store) → `None`; `200` without a usable `og:image` (consent page, foreign
+    host) → `None` plus a debug line; invalid package name → `None` without a request;
+    other non-2xx → `Http`; transport failure → `Network`. Store visibility decides, not
+    Play Console access: an app that is not live in the store (never published, or only on
+    internal/closed testing tracks) has no icon.
+  - FRB: only the `Capability` codec was regenerated (variant 19); no new wrapper, content
+    hash unchanged. Pending: an FRB `AppIcons` wrapper if the Flutter apps need icons;
+    host-side caching of the URL (the core does not cache).
+- **Google Play — release status and release management. ✅ IN THE CORE.** Plan:
+  `stack-connect/docs/plans/google-play-releases.md` (C1–C5). `Capability::ReleaseManagement`
+  is appended (variant 20); Google Play reports `capabilities() == [Apps, Reviews,
+  AppDetails, StoreListings, Tracks, AppIcons, ReleaseManagement]`. Everything lives on the
+  existing `Tracks` handle:
+  - `fetch_release_summaries(app_id, track)` (`providers/googleplay/releases.rs`):
+    `GET applications/{package}/tracks/{track}/releases`, the only release read **outside an
+    edit**, so it never cancels a CI upload and is safe on automatic paths. Raw
+    `releaseLifecycleState`; a `404` track is an empty list.
+  - `TrackReleaseInfo.country_targeting` (optional, `serde(default)`), `fetch_bundles`
+    (`edits.bundles.list` in a throwaway edit).
+  - `apply_release_change(app_id, track, ReleaseChange, CommitOptions) -> TrackInfo`
+    (`track_writes.rs` for the I/O, the pure `release_change.rs` for validation and the
+    edit of `releases[]` as raw JSON). One committed edit per change: insert → get →
+    apply → update → validate → commit; any failure deletes the edit and the original
+    error wins. Targeting by version-code set; a missing target is the new
+    `StackError::ReleaseNotFound` (appended, variant 8). Local `Http 400` for documented
+    invalid values before any edit.
+  - FRB: `StackError` and `Capability` codecs regenerated, no new wrapper (the Flutter apps
+    don't read tracks yet). Not validated against a live account: the replacement rules of
+    a new release, whether Google requires `changesNotSentForReview` for a given app
+    state, the 500-character release-notes limit, and whether `releases.list` 404s on an
+    unknown track.
+- **Google Play — user management (`PlayUsers`). ✅ IN THE CORE.** Plan task U-C1.
+  `Capability::PlayUsers` (variant 21) and `Provider::play_users()`: a capability of its own,
+  because the App Store-shaped `Users` (roles, visible apps, names) cannot express Play's
+  account permissions, per-app grants and expiry. `providers/googleplay/users.rs` calls
+  `developers/{developer_id}/users` and `…/users/{email}/grants/{package}` (no edit):
+  paged list, invite (user, then grants, rolled back on a failed grant), patch with an
+  explicit update mask, delete, grant upsert (patch, create on `404`) and delete.
+  Permissions cross as raw strings. New `error::Target::{Developer, DeveloperResource}`
+  word the 404 / no-access messages for a developer account. Not validated against a live
+  account: the permission the caller needs (expected: Admin), whether `users.list` lists
+  service accounts, whether a grant patch on a missing grant answers `404`, whether a
+  mask with an absent `expirationTime` clears it, and the `pageSize` maximum.
+
+> **Out of scope (for now): Firebase.** It is **not** being migrated to the core at this
+> time — it remains implemented **natively in the iOS app** (`APIProviderFirebase`). If it
+> is ported later, it is just a `providers/firebase/` + registration reusing
+> `auth::oauth_jwt` (see §4), without touching core or facade.
 - **Dart binding (flutter_rust_bridge).** Second binding generator, alongside UniFFI, for the
   Flutter Android + desktop apps (`../stack-connect/FLUTTER_PLAN.md`). FRB is a *separate* toolchain
   from UniFFI (not a `uniffi.toml` backend): add an **FRB facade behind a `frb` cargo feature**
@@ -262,8 +380,9 @@ only loads what is enabled.
   `BlobStore` / `DebugLogger`) to Dart implementations. Build matrix: Android via `cargo-ndk`
   (`*-linux-android`) + desktop cdylib (`*-pc-windows-msvc`, `*-unknown-linux-gnu`); the
   `crate-type` already includes `cdylib`. Add `build/build-android.sh` + `build/build-desktop.sh`
-  mirroring `build/build-xcframework.sh`. It serves **Apple-only** Flutter apps (Firebase/Play stay
-  native in the iOS app — see the out-of-scope note above).
+  mirroring `build/build-xcframework.sh`. The Flutter apps started **Apple-only**; the binding
+  now also exposes Google Play (`ServiceKind::GooglePlay`), with host integration pending.
+  Firebase stays native in the iOS app (see the out-of-scope note above).
 - **Future — New services** (AWS via `auth::sigv4`, GitHub via `auth::oauth2`, …): each is just a `providers/<x>/` + registration (see §4). Without touching core or facade.
 
 ## 12. Phase 0 — Definition of Done ✅
@@ -285,8 +404,9 @@ only loads what is enabled.
 - **Contract:** one test per provider ensuring `kind()`/`capabilities()`/`validate()`
   and that missing capabilities return `Unsupported`.
 - **Binding (smoke):** XCTest crossing the UniFFI boundary (host + simulator).
-- **CI:** `cargo fmt --check` + `clippy -D warnings` + `cargo test` (with provider
-  feature matrix); `.xcframework` build; (later) iOS app build.
+- **CI:** `cargo fmt --check` + `clippy --all-targets --all-features -D warnings` +
+  `cargo test --all-features` (no provider feature matrix: providers are not
+  feature-gated); `.xcframework` build; (later) iOS app build.
 
 ## 14. Risks & Mitigation
 
@@ -296,5 +416,5 @@ only loads what is enabled.
 | FFI surface stability as it grows | New service doesn't change Swift API; only new capability adds method (rare) |
 | `async` Rust → Swift via UniFFI | Validated in Phase 0; `uniffi` feature `tokio` |
 | JWT parity (ES256/RS256) | Golden tests against tokens that Swift SDKs generate today |
-| Binary bloat with many services | Providers/auth behind cargo features; `.xcframework` only with enabled ones |
+| Binary bloat with many services | Not feature-gated today (Google Play added no dependency); introduce per-service cargo features only if size becomes a problem |
 | FFI boundary at each `BlobStore.save` in sync | Acceptable (sync is not hot-loop); batch writes per entity |

@@ -2,3 +2,4 @@
 //! internal `service::provider::ProviderImpl` contract.
 
 pub(crate) mod appstore;
+pub(crate) mod googleplay;

@@ -8111,6 +8111,12 @@ impl SseDecode for crate::service::provider::Capability {
             13 => crate::service::provider::Capability::Certificates,
             14 => crate::service::provider::Capability::Profiles,
             15 => crate::service::provider::Capability::Analytics,
+            16 => crate::service::provider::Capability::AppDetails,
+            17 => crate::service::provider::Capability::StoreListings,
+            18 => crate::service::provider::Capability::Tracks,
+            19 => crate::service::provider::Capability::AppIcons,
+            20 => crate::service::provider::Capability::ReleaseManagement,
+            21 => crate::service::provider::Capability::PlayUsers,
             _ => unreachable!("Invalid variant for Capability: {}", inner),
         };
     }
@@ -9065,6 +9071,7 @@ impl SseDecode for crate::service::kind::ServiceKind {
         let mut inner = <i32>::sse_decode(deserializer);
         return match inner {
             0 => crate::service::kind::ServiceKind::AppStoreConnect,
+            1 => crate::service::kind::ServiceKind::GooglePlay,
             _ => unreachable!("Invalid variant for ServiceKind: {}", inner),
         };
     }
@@ -9122,6 +9129,12 @@ impl SseDecode for crate::error::StackError {
             7 => {
                 let mut var_message = <String>::sse_decode(deserializer);
                 return crate::error::StackError::SubmissionNotRemovable {
+                    message: var_message,
+                };
+            }
+            8 => {
+                let mut var_message = <String>::sse_decode(deserializer);
+                return crate::error::StackError::ReleaseNotFound {
                     message: var_message,
                 };
             }
@@ -10830,6 +10843,12 @@ impl flutter_rust_bridge::IntoDart for crate::service::provider::Capability {
             Self::Certificates => 13.into_dart(),
             Self::Profiles => 14.into_dart(),
             Self::Analytics => 15.into_dart(),
+            Self::AppDetails => 16.into_dart(),
+            Self::StoreListings => 17.into_dart(),
+            Self::Tracks => 18.into_dart(),
+            Self::AppIcons => 19.into_dart(),
+            Self::ReleaseManagement => 20.into_dart(),
+            Self::PlayUsers => 21.into_dart(),
             _ => unreachable!(),
         }
     }
@@ -11103,6 +11122,7 @@ impl flutter_rust_bridge::IntoDart for crate::service::kind::ServiceKind {
     fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
         match self {
             Self::AppStoreConnect => 0.into_dart(),
+            Self::GooglePlay => 1.into_dart(),
             _ => unreachable!(),
         }
     }
@@ -11148,6 +11168,9 @@ impl flutter_rust_bridge::IntoDart for crate::error::StackError {
             }
             crate::error::StackError::SubmissionNotRemovable { message } => {
                 [7.into_dart(), message.into_into_dart().into_dart()].into_dart()
+            }
+            crate::error::StackError::ReleaseNotFound { message } => {
+                [8.into_dart(), message.into_into_dart().into_dart()].into_dart()
             }
             _ => {
                 unimplemented!("");
@@ -11947,6 +11970,12 @@ impl SseEncode for crate::service::provider::Capability {
                 crate::service::provider::Capability::Certificates => 13,
                 crate::service::provider::Capability::Profiles => 14,
                 crate::service::provider::Capability::Analytics => 15,
+                crate::service::provider::Capability::AppDetails => 16,
+                crate::service::provider::Capability::StoreListings => 17,
+                crate::service::provider::Capability::Tracks => 18,
+                crate::service::provider::Capability::AppIcons => 19,
+                crate::service::provider::Capability::ReleaseManagement => 20,
+                crate::service::provider::Capability::PlayUsers => 21,
                 _ => {
                     unimplemented!("");
                 }
@@ -12701,6 +12730,7 @@ impl SseEncode for crate::service::kind::ServiceKind {
         <i32>::sse_encode(
             match self {
                 crate::service::kind::ServiceKind::AppStoreConnect => 0,
+                crate::service::kind::ServiceKind::GooglePlay => 1,
                 _ => {
                     unimplemented!("");
                 }
@@ -12745,6 +12775,10 @@ impl SseEncode for crate::error::StackError {
             }
             crate::error::StackError::SubmissionNotRemovable { message } => {
                 <i32>::sse_encode(7, serializer);
+                <String>::sse_encode(message, serializer);
+            }
+            crate::error::StackError::ReleaseNotFound { message } => {
+                <i32>::sse_encode(8, serializer);
                 <String>::sse_encode(message, serializer);
             }
             _ => {

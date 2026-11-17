@@ -26,17 +26,26 @@ pub struct AccountExport {
 ///
 /// Serializes camelCase (`bundleId`, not `bundle_id`) so persisted blobs match the
 /// iOS-facing contract — see [`crate::service::sync::SyncService`].
+///
+/// Per service: App Store Connect sets `id` to the app's App Store Connect id
+/// and `bundle_id` to its bundle identifier. Google Play has no separate app id,
+/// so both `id` and `bundle_id` are the package name (e.g. `com.example.app`).
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, uniffi::Record)]
 #[serde(rename_all = "camelCase")]
 pub struct AppInfo {
     pub id: String,
     pub name: String,
     pub bundle_id: String,
+    /// The app's platform: `Some("ANDROID")` for Google Play apps, `None` for
+    /// App Store Connect apps (an ASC app can span several platforms).
     pub platform: Option<String>,
 }
 
 /// The developer's response attached to a [`CustomerReview`]. Dates are raw
 /// ISO8601 strings; the core does no date parsing (the host owns that).
+///
+/// Google Play replies have no id or state of their own: `id` repeats the
+/// review's opaque [`CustomerReview::id`] and `state` is always `None`.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, uniffi::Record)]
 pub struct ReviewResponse {
     pub id: String,
@@ -45,8 +54,14 @@ pub struct ReviewResponse {
     pub last_modified_date: Option<String>,
 }
 
-/// A single end-user App Store review, optionally with the developer's response.
+/// A single end-user store review, optionally with the developer's response.
 /// Dates are raw ISO8601 strings; the core does no date parsing.
+///
+/// Per service: for App Store Connect, `id` is the ASC review id. For Google
+/// Play, `id` is an opaque composite (`{packageName}/{reviewId}`) that the core
+/// needs to reply; hosts must treat every review id as opaque. Play has no
+/// territory (`territory` is `None`) and no creation date: `created_date`
+/// carries the last time the user wrote or edited the review.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, uniffi::Record)]
 pub struct CustomerReview {
     pub id: String,
@@ -61,7 +76,8 @@ pub struct CustomerReview {
 
 /// One page of customer reviews plus an opaque token to fetch the next page.
 /// `next_token` is `None` on the last page; otherwise pass it back verbatim as
-/// the next call's `page_token` (it is the JSON:API `links.next` URL).
+/// the next call's `page_token` (for App Store Connect it is the JSON:API
+/// `links.next` URL, for Google Play the API's `nextPageToken`).
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
 pub struct CustomerReviewsPage {
     pub reviews: Vec<CustomerReview>,
@@ -705,4 +721,302 @@ pub struct AnalyticsReportData {
     pub headers: Vec<String>,
     pub rows: Vec<Vec<String>>,
     pub row_count: u32,
+}
+
+/// An app's store contact details and default language, as Google Play keeps
+/// them (`edits.details`). `app_id` is the id the call was made with (for Google
+/// Play, the package name); every other field is `None` when the store has no
+/// value for it.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, uniffi::Record)]
+#[serde(rename_all = "camelCase")]
+pub struct AppDetailsInfo {
+    pub app_id: String,
+    /// BCP-47 language code of the default store listing (e.g. `en-US`).
+    pub default_language: Option<String>,
+    pub contact_email: Option<String>,
+    pub contact_phone: Option<String>,
+    pub contact_website: Option<String>,
+}
+
+/// One localized store listing of an app (Google Play `edits.listings`).
+/// `language` is the BCP-47 code that keys the listing (e.g. `de-AT`); `video`
+/// is the promotional YouTube URL. Text fields are `None` when the listing has
+/// no value for them.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, uniffi::Record)]
+#[serde(rename_all = "camelCase")]
+pub struct StoreListingInfo {
+    pub language: String,
+    pub title: Option<String>,
+    pub short_description: Option<String>,
+    pub full_description: Option<String>,
+    pub video: Option<String>,
+}
+
+/// A release track of an app (Google Play `edits.tracks`) with its releases.
+/// `track` is the raw track name (`production`, `beta`, `alpha`, `internal`, a
+/// custom closed-testing track, or a form-factor track such as
+/// `wear:production`). `releases` is empty for a track with no release.
+///
+/// Only `PartialEq` (not `Eq`): [`TrackReleaseInfo::user_fraction`] is a float.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize, uniffi::Record)]
+#[serde(rename_all = "camelCase")]
+pub struct TrackInfo {
+    pub track: String,
+    pub releases: Vec<TrackReleaseInfo>,
+}
+
+/// One release on a [`TrackInfo`], with the raw Google Play values passed
+/// through:
+///
+/// - `status`: `draft`, `inProgress` (staged rollout), `halted`, `completed`
+///   (or `statusUnspecified`); `None` when absent.
+/// - `version_codes`: the release's version codes as decimal strings (Play's
+///   int64 values; parse them with a 64-bit integer type).
+/// - `user_fraction`: the staged-rollout fraction in `(0, 1)`, set only while a
+///   rollout is `inProgress` or `halted`.
+/// - `release_notes`: the localized "What's new" texts.
+/// - `in_app_update_priority`: `0` to `5`, `None` when unset.
+/// - `country_targeting`: the countries the release is restricted to; `None`
+///   when it is not restricted (Google only allows it on `inProgress`
+///   production releases).
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize, uniffi::Record)]
+#[serde(rename_all = "camelCase")]
+pub struct TrackReleaseInfo {
+    pub name: Option<String>,
+    pub status: Option<String>,
+    pub version_codes: Vec<String>,
+    pub user_fraction: Option<f64>,
+    pub release_notes: Vec<LocalizedTextInfo>,
+    pub in_app_update_priority: Option<i32>,
+    /// `#[serde(default)]` so JSON written before the field existed decodes.
+    #[serde(default)]
+    pub country_targeting: Option<CountryTargetingInfo>,
+}
+
+/// The countries a Google Play release is restricted to (`CountryTargeting`).
+/// `countries` are two-letter CLDR region codes (e.g. `BR`), in Google's order;
+/// `include_rest_of_world` also serves every country not listed.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, uniffi::Record)]
+#[serde(rename_all = "camelCase")]
+pub struct CountryTargetingInfo {
+    pub countries: Vec<String>,
+    pub include_rest_of_world: bool,
+}
+
+/// A text in one language, e.g. a release note. `language` is a BCP-47 code.
+/// Google omits empty strings from its JSON, so an absent value is `""`.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, uniffi::Record)]
+#[serde(rename_all = "camelCase")]
+pub struct LocalizedTextInfo {
+    pub language: String,
+    pub text: String,
+}
+
+/// The summary of one release on a track, as Google Play's edit-free
+/// `tracks.releases.list` returns it. Carries the review / lifecycle state that
+/// [`TrackReleaseInfo`] lacks (and none of its rollout details).
+///
+/// - `track`: the track name the release is on.
+/// - `name`: the release name; `None` when Google has none.
+/// - `lifecycle_state`: Google's raw `releaseLifecycleState`, passed through
+///   verbatim so a state added later still reaches the host:
+///   `RELEASE_LIFECYCLE_STATE_DRAFT`, `…_NOT_SENT_FOR_REVIEW`, `…_IN_REVIEW`,
+///   `…_APPROVED_NOT_PUBLISHED`, `…_NOT_APPROVED`, `…_PUBLISHED` (or
+///   `…_UNSPECIFIED`); `None` when absent.
+/// - `version_codes`: the version codes of the release's active artifacts, as
+///   decimal strings (the same encoding as [`TrackReleaseInfo::version_codes`]).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, uniffi::Record)]
+#[serde(rename_all = "camelCase")]
+pub struct ReleaseSummaryInfo {
+    pub track: String,
+    pub name: Option<String>,
+    pub lifecycle_state: Option<String>,
+    pub version_codes: Vec<String>,
+}
+
+/// An Android App Bundle uploaded to a Google Play app (`edits.bundles`), i.e.
+/// one that can go into a release.
+///
+/// - `version_code`: the bundle's version code as a decimal string (the same
+///   encoding as [`TrackReleaseInfo::version_codes`]).
+/// - `sha256`: Google's hex SHA-256 of the uploaded file; `None` when absent.
+///
+/// The API has no upload date and no version name for a bundle.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, uniffi::Record)]
+#[serde(rename_all = "camelCase")]
+pub struct BundleInfo {
+    pub version_code: String,
+    pub sha256: Option<String>,
+}
+
+/// One change to a release on a Google Play track, applied by
+/// `Tracks::apply_release_change` inside a single edit (read the track fresh,
+/// apply, update, validate, commit).
+///
+/// The target release is identified by its `version_codes` (decimal strings,
+/// compared as a set of 64-bit integers, so order and leading zeros do not
+/// matter), never by name or position: names are optional and editable, and
+/// positions change when Google drops obsolete releases. A target that is not
+/// on the track any more is `StackError::ReleaseNotFound`.
+///
+/// Which status transitions are allowed is Google's call (`edits.validate`):
+/// the core only rejects values Google documents as invalid (a rollout
+/// fraction outside `(0, 1)`, an in-app update priority outside `0..=5`, a
+/// version code that is not an integer) before opening the edit.
+#[derive(Debug, Clone, PartialEq, uniffi::Enum)]
+pub enum ReleaseChange {
+    /// Staged rollout to `user_fraction` (`0 < f < 1`): status `inProgress`.
+    /// Starts a rollout from a draft, changes the fraction of a running one,
+    /// or restarts a halted one at a new fraction.
+    SetRollout {
+        version_codes: Vec<String>,
+        user_fraction: f64,
+    },
+    /// Stops serving the release to new users: status `halted` (the fraction
+    /// is kept, so a resume picks up where it stopped).
+    Halt { version_codes: Vec<String> },
+    /// Resumes a halted release: `inProgress` when it has a rollout fraction,
+    /// `completed` when it has none.
+    Resume { version_codes: Vec<String> },
+    /// Releases to everyone: status `completed`, no fraction. Every other
+    /// `completed` release on the track is dropped, as it is superseded.
+    Complete { version_codes: Vec<String> },
+    /// Changes the release's name, notes, priority or country targeting; the
+    /// status and rollout are left alone.
+    UpdateMetadata {
+        version_codes: Vec<String>,
+        update: ReleaseMetadataUpdate,
+    },
+    /// Adds a new release to the track (see [`NewRelease`] for what it
+    /// replaces).
+    CreateRelease { release: NewRelease },
+    /// Copies the release with `version_codes` from `from_track` to the target
+    /// track as a new release with `status`, read in the same edit. Its name,
+    /// release notes and in-app update priority are kept unless overridden;
+    /// country targeting is never copied (it is per track), only set through
+    /// `country_targeting`. Replaces releases on the target track like
+    /// [`ReleaseChange::CreateRelease`].
+    Promote {
+        from_track: String,
+        version_codes: Vec<String>,
+        status: NewReleaseStatus,
+        name: Option<String>,
+        release_notes: Option<Vec<LocalizedTextInfo>>,
+        in_app_update_priority: Option<i32>,
+        country_targeting: Option<CountryTargetingInfo>,
+    },
+}
+
+/// The fields [`ReleaseChange::UpdateMetadata`] changes. `None` leaves a field
+/// as it is.
+///
+/// - `name`: a blank name removes it (Google then derives one).
+/// - `release_notes`: replaces every language; an empty list removes them all.
+/// - `in_app_update_priority`: `0..=5`. Google refuses to change it once the
+///   release is rolled out.
+/// - `country_targeting`: replaces the targeting. It cannot be removed through
+///   this record (Google only allows it on `inProgress` production releases).
+#[derive(Debug, Clone, PartialEq, Eq, Default, uniffi::Record)]
+pub struct ReleaseMetadataUpdate {
+    pub name: Option<String>,
+    pub release_notes: Option<Vec<LocalizedTextInfo>>,
+    pub in_app_update_priority: Option<i32>,
+    pub country_targeting: Option<CountryTargetingInfo>,
+}
+
+/// A release [`ReleaseChange::CreateRelease`] adds to a track.
+///
+/// What it replaces on the track depends on `status`, following the Play
+/// Console's one-pending-release model:
+/// - `Draft`: replaces any other draft; a running rollout and the completed
+///   release keep serving.
+/// - `InProgress`: replaces drafts and any running or halted rollout; the
+///   completed release keeps serving the rest of the users.
+/// - `Completed`: replaces every release on the track.
+///
+/// `name: None` lets Google derive a name; `release_notes` may be empty.
+#[derive(Debug, Clone, PartialEq, uniffi::Record)]
+pub struct NewRelease {
+    pub version_codes: Vec<String>,
+    pub name: Option<String>,
+    pub release_notes: Vec<LocalizedTextInfo>,
+    pub status: NewReleaseStatus,
+    pub in_app_update_priority: Option<i32>,
+    pub country_targeting: Option<CountryTargetingInfo>,
+}
+
+/// The status a new release starts in.
+#[derive(Debug, Clone, PartialEq, uniffi::Enum)]
+pub enum NewReleaseStatus {
+    /// Not served to anyone (`draft`).
+    Draft,
+    /// A staged rollout to `user_fraction` of the users (`inProgress`,
+    /// `0 < f < 1`).
+    InProgress { user_fraction: f64 },
+    /// Served to everyone (`completed`).
+    Completed,
+}
+
+/// How `Tracks::apply_release_change` commits its edit (`edits.commit`).
+///
+/// - `send_for_review`: `false` sets `changesNotSentForReview=true`, so the
+///   changes wait in the Play Console until someone sends them for review
+///   there. Google rejects the commit with an explanatory message when the
+///   flag does not match the app's state.
+/// - `changes_in_review_behavior`: what to do when other changes are in
+///   review; `None` leaves it to Google (which cancels the review and submits).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Record)]
+pub struct CommitOptions {
+    pub send_for_review: bool,
+    pub changes_in_review_behavior: Option<ChangesInReviewBehavior>,
+}
+
+/// `changesInReviewBehavior` of `edits.commit`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum ChangesInReviewBehavior {
+    /// Cancel the review in progress, then submit everything
+    /// (`CANCEL_IN_REVIEW_AND_SUBMIT`).
+    CancelInReviewAndSubmit,
+    /// Fail the commit if changes are in review (`ERROR_IF_IN_REVIEW`); the
+    /// edit is then deleted like after any other failure.
+    ErrorIfInReview,
+}
+
+/// A user of a Google Play developer account (`developers.users`), with the
+/// raw Google values passed through:
+///
+/// - `email`: the user's (or service account's) e-mail; it identifies the user
+///   in every other call.
+/// - `name`: Google's resource name, `developers/{developer}/users/{email}`.
+/// - `access_state`: `INVITED`, `INVITATION_EXPIRED`, `ACCESS_GRANTED`,
+///   `ACCESS_EXPIRED` (or `ACCESS_STATE_UNSPECIFIED`); `None` when absent. A
+///   state Google adds later passes through unchanged.
+/// - `expiration_time`: when the access expires, as Google's RFC 3339 text
+///   (e.g. `2027-01-01T00:00:00Z`); `None` when it never does.
+/// - `developer_account_permissions`: account-wide permissions such as
+///   `CAN_MANAGE_PERMISSIONS_GLOBAL` (Admin), as raw strings.
+/// - `grants`: per-app access.
+/// - `partial`: `true` when the caller cannot see (and so cannot manage) every
+///   permission of this user, e.g. the account owner.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, uniffi::Record)]
+#[serde(rename_all = "camelCase")]
+pub struct PlayUserInfo {
+    pub email: String,
+    pub name: Option<String>,
+    pub access_state: Option<String>,
+    pub expiration_time: Option<String>,
+    pub developer_account_permissions: Vec<String>,
+    pub grants: Vec<PlayGrantInfo>,
+    pub partial: bool,
+}
+
+/// One app a Google Play user has access to (`developers.users.grants`).
+/// `package_name` is the app's package name (for a draft app without one,
+/// Google's app ID from the grant's resource name); `app_level_permissions`
+/// are raw strings such as `CAN_REPLY_TO_REVIEWS`.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, uniffi::Record)]
+#[serde(rename_all = "camelCase")]
+pub struct PlayGrantInfo {
+    pub package_name: String,
+    pub app_level_permissions: Vec<String>,
 }

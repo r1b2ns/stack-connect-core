@@ -1900,6 +1900,7 @@ dependencies = [
  "jsonwebtoken",
  "md-5",
  "pbkdf2",
+ "percent-encoding",
  "reqwest",
  "serde",
  "serde_json",

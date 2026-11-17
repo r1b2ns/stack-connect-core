@@ -5,7 +5,8 @@
 use std::sync::Arc;
 
 use crate::error::StackError;
-use crate::ports::{BlobStore, CredentialStore, DebugLogger};
+use crate::logging::{self, LogLevel};
+use crate::ports::{BlobStore, CoreLogger, CredentialStore, DebugLogger};
 use crate::service::kind::{CredentialField, ServiceKind};
 use crate::service::provider::Provider;
 use crate::service::registry;
@@ -27,16 +28,23 @@ pub fn credential_schema(kind: ServiceKind) -> Vec<CredentialField> {
 /// connected [`Provider`].
 ///
 /// Synchronous on purpose: it only reads secrets through the (synchronous)
-/// callback and parses the key material — no network. The returned provider does
+/// callback and builds the provider — no network. The returned provider does
 /// the async work (`validate`, `fetch_apps`).
 ///
-/// When `debug_logger` is `Some`, every App Store Connect HTTP request the
-/// provider issues is logged as a runnable cURL (with pretty-printed JSON body)
-/// and its response (status + pretty-printed JSON). The host passes `None` in
+/// Key handling differs per service. App Store Connect keeps its `.p8` as-is
+/// and parses it on the first request. Google Play parses its private key here,
+/// including one local test signature, so a blank field or an unusable key is
+/// rejected at connect rather than on the first request.
+///
+/// When `debug_logger` is `Some`, every HTTP request the provider issues
+/// (App Store Connect calls; for Google Play, the OAuth token exchange and every
+/// API call) is logged as a runnable cURL (with pretty-printed JSON body) and
+/// its response (status + pretty-printed JSON). The host passes `None` in
 /// release builds and a native logger only when its debug launch flag is set.
 ///
 /// # Errors
-/// [`StackError::InvalidCredentials`] if a required secret is missing.
+/// [`StackError::InvalidCredentials`] if a required secret is missing, or, for
+/// Google Play, if a field is blank or the private key is not a usable RSA key.
 #[uniffi::export]
 pub fn connect(
     kind: ServiceKind,
@@ -61,4 +69,16 @@ pub fn make_sync_service(
     account_id: String,
 ) -> Arc<SyncService> {
     SyncService::new(provider, store, account_id)
+}
+
+/// Installs the process-wide diagnostic log sink (`Some`) or removes it
+/// (`None`), receiving `min_level` and every more severe level.
+///
+/// Independent of `connect`'s `debug_logger`: install it once at startup and
+/// it covers every provider, including those connected earlier. Messages are
+/// redacted before they reach `logger` (see [`CoreLogger`]). Without a sink the
+/// core formats nothing. Call again to change the level.
+#[uniffi::export]
+pub fn set_core_logger(logger: Option<Arc<dyn CoreLogger>>, min_level: LogLevel) {
+    logging::install(logger, min_level);
 }

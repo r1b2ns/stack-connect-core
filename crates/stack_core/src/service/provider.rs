@@ -6,6 +6,8 @@ use crate::domain::AppInfo;
 use crate::error::StackError;
 use crate::service::capabilities::accessibility_declarations::AccessibilityDeclarations;
 use crate::service::capabilities::analytics::Analytics;
+use crate::service::capabilities::app_details::AppDetails;
+use crate::service::capabilities::app_icons::AppIcons;
 use crate::service::capabilities::app_metadata::AppMetadata;
 use crate::service::capabilities::app_store_versions::AppStoreVersions;
 use crate::service::capabilities::beta_app_localizations::BetaAppLocalizations;
@@ -16,8 +18,11 @@ use crate::service::capabilities::builds::Builds;
 use crate::service::capabilities::bundle_ids::BundleIds;
 use crate::service::capabilities::certificates::Certificates;
 use crate::service::capabilities::devices::Devices;
+use crate::service::capabilities::play_users::PlayUsers;
 use crate::service::capabilities::profiles::Profiles;
 use crate::service::capabilities::reviews::Reviews;
+use crate::service::capabilities::store_listings::StoreListings;
+use crate::service::capabilities::tracks::Tracks;
 use crate::service::capabilities::users::Users;
 use crate::service::kind::ServiceKind;
 
@@ -25,6 +30,10 @@ use crate::service::kind::ServiceKind;
 /// to learn what a connected account can do; capabilities a provider lacks make
 /// the corresponding accessor (e.g. [`Provider::reviews`]) return `None`. Grows
 /// over time.
+///
+/// **Append only.** Both bindings encode a variant by its position (UniFFI and
+/// the FRB SSE codec), so inserting or reordering variants would make a host
+/// built against an older binding decode the wrong capability.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, uniffi::Enum)]
 pub enum Capability {
     Apps,
@@ -43,6 +52,24 @@ pub enum Capability {
     Certificates,
     Profiles,
     Analytics,
+    /// An app's store contact details and default language ([`AppDetails`]).
+    AppDetails,
+    /// An app's localized store listings ([`StoreListings`]).
+    StoreListings,
+    /// An app's release tracks and their releases ([`Tracks`]).
+    Tracks,
+    /// Where to load an app's icon from ([`AppIcons`]).
+    AppIcons,
+    /// Changing an app's releases: rollout, halt, resume, complete, metadata,
+    /// new release and promotion through
+    /// [`Tracks::apply_release_change`](crate::service::capabilities::tracks::Tracks::apply_release_change),
+    /// plus the bundles a release can be made from. Hosts hide every release
+    /// write on providers without it. Served by the [`Tracks`] handle.
+    ReleaseManagement,
+    /// The users of a Google Play developer account and their per-app grants
+    /// ([`PlayUsers`]). Distinct from [`Capability::Users`], whose App Store
+    /// shape (roles, visible apps) does not fit Google Play.
+    PlayUsers,
 }
 
 /// Internal, non-exported contract every concrete plugin implements. Kept off the
@@ -159,6 +186,37 @@ pub(crate) trait ProviderImpl: Send + Sync {
     /// The Analytics capability handle, or `None` if this provider lacks
     /// [`Capability::Analytics`]. Default `None` so providers opt in explicitly.
     fn analytics(&self) -> Option<Arc<Analytics>> {
+        None
+    }
+
+    /// The App Details capability handle, or `None` if this provider lacks
+    /// [`Capability::AppDetails`]. Default `None` so providers opt in explicitly.
+    fn app_details(&self) -> Option<Arc<AppDetails>> {
+        None
+    }
+
+    /// The Store Listings capability handle, or `None` if this provider lacks
+    /// [`Capability::StoreListings`]. Default `None` so providers opt in
+    /// explicitly.
+    fn store_listings(&self) -> Option<Arc<StoreListings>> {
+        None
+    }
+
+    /// The Tracks capability handle, or `None` if this provider lacks
+    /// [`Capability::Tracks`]. Default `None` so providers opt in explicitly.
+    fn tracks(&self) -> Option<Arc<Tracks>> {
+        None
+    }
+
+    /// The App Icons capability handle, or `None` if this provider lacks
+    /// [`Capability::AppIcons`]. Default `None` so providers opt in explicitly.
+    fn app_icons(&self) -> Option<Arc<AppIcons>> {
+        None
+    }
+
+    /// The Play Users capability handle, or `None` if this provider lacks
+    /// [`Capability::PlayUsers`]. Default `None` so providers opt in explicitly.
+    fn play_users(&self) -> Option<Arc<PlayUsers>> {
         None
     }
 }
@@ -309,11 +367,55 @@ impl Provider {
     pub fn analytics(&self) -> Option<Arc<Analytics>> {
         self.inner.analytics()
     }
+
+    /// The App Details capability handle, or `None` when this provider does not
+    /// expose [`Capability::AppDetails`]. This is the discovery mechanism: the
+    /// host calls `provider.app_details()` and gets `None` when app details are
+    /// unsupported.
+    pub fn app_details(&self) -> Option<Arc<AppDetails>> {
+        self.inner.app_details()
+    }
+
+    /// The Store Listings capability handle, or `None` when this provider does
+    /// not expose [`Capability::StoreListings`]. This is the discovery
+    /// mechanism: the host calls `provider.store_listings()` and gets `None`
+    /// when store listings are unsupported.
+    pub fn store_listings(&self) -> Option<Arc<StoreListings>> {
+        self.inner.store_listings()
+    }
+
+    /// The Tracks capability handle, or `None` when this provider does not
+    /// expose [`Capability::Tracks`]. This is the discovery mechanism: the host
+    /// calls `provider.tracks()` and gets `None` when release tracks are
+    /// unsupported.
+    pub fn tracks(&self) -> Option<Arc<Tracks>> {
+        self.inner.tracks()
+    }
+
+    /// The App Icons capability handle, or `None` when this provider does not
+    /// expose [`Capability::AppIcons`]. This is the discovery mechanism: the
+    /// host calls `provider.app_icons()` and gets `None` when app icons are
+    /// unsupported.
+    pub fn app_icons(&self) -> Option<Arc<AppIcons>> {
+        self.inner.app_icons()
+    }
+
+    /// The Play Users capability handle, or `None` when this provider does not
+    /// expose [`Capability::PlayUsers`]. This is the discovery mechanism: the
+    /// host calls `provider.play_users()` and gets `None` when Google Play user
+    /// management is unsupported.
+    pub fn play_users(&self) -> Option<Arc<PlayUsers>> {
+        self.inner.play_users()
+    }
 }
 
 #[uniffi::export(async_runtime = "tokio")]
 impl Provider {
     /// Verifies the stored credentials against the live service.
+    ///
+    /// For Google Play, `Ok` means the key works and the Play Developer
+    /// Reporting API is enabled; it does not guarantee the service account can
+    /// see any app yet (Play Console access can take hours to propagate).
     ///
     /// # Errors
     /// [`StackError::Auth`] when the credentials are rejected (including App Store

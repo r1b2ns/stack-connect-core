@@ -31,13 +31,37 @@ pub trait BlobStore: Send + Sync {
 }
 
 /// Optional debug sink for HTTP tracing. When the host injects one (via
-/// `connect`), the App Store Connect client logs every request as a runnable
-/// cURL (headers + pretty-printed JSON body) and the response (status line +
-/// pretty-printed JSON). Off by default — the host only passes a logger when its
-/// debug launch flag is set. Implemented natively (the iOS app prints to the
-/// Xcode console) and injected across the FFI as a foreign trait.
+/// `connect`), every provider logs each request as a runnable cURL (headers +
+/// body, pretty-printed when JSON) and the response (status line +
+/// pretty-printed JSON): App Store Connect API calls, and for Google Play both
+/// the OAuth token exchange and every API call. Off by default — the host only
+/// passes a logger when its debug launch flag is set. Implemented natively (the
+/// iOS app prints to the Xcode console) and injected across the FFI as a foreign
+/// trait.
+///
+/// Nothing is redacted, so the log is sensitive: `Authorization` bearer tokens
+/// appear verbatim, and so does Google's signed JWT assertion in the token
+/// request body. Each grants API access until it expires (an assertion can be
+/// exchanged again for a fresh one-hour token until its own `exp`). Private keys
+/// never appear in any request.
 #[uniffi::export(with_foreign)]
 pub trait DebugLogger: Send + Sync {
     /// Emits one already-formatted, possibly multi-line debug message.
     fn log(&self, message: String);
+}
+
+/// Process-wide diagnostic log sink, installed with
+/// [`crate::facade::set_core_logger`]. Unlike [`DebugLogger`], it is meant to
+/// stay on in release builds: every message is **redacted** before it gets
+/// here (no access token, `Authorization` header, private key, JSON key or
+/// JWT; user e-mails masked as `d***@agency.example`), and lines are leveled so
+/// the host can filter and route them (iOS: one `os.Logger` per `target`).
+///
+/// Called synchronously on whichever thread the core is running; implement it
+/// as a cheap, non-blocking hand-off (e.g. `Logger.log`).
+#[uniffi::export(with_foreign)]
+pub trait CoreLogger: Send + Sync {
+    /// Emits one single-line message. `target` names the area (`http`,
+    /// `auth`, `googleplay.users`, …; see the README's *Logging* section).
+    fn log(&self, level: crate::logging::LogLevel, target: String, message: String);
 }

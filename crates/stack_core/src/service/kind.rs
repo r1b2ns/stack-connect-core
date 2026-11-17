@@ -1,8 +1,15 @@
 /// Which external service a connected account talks to. Exported across the FFI;
-/// designed to grow as new plugins land (Firebase, Google Play, AWS, GitHub, …).
+/// designed to grow as new plugins land (Firebase, AWS, GitHub, …).
+///
+/// Both bindings encode variants by position, so new variants are only ever
+/// appended.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, uniffi::Enum)]
 pub enum ServiceKind {
+    /// Apple App Store Connect, authenticated with a team API key (`.p8`).
     AppStoreConnect,
+    /// Google Play Console, authenticated with a Google Cloud service account
+    /// key.
+    GooglePlay,
 }
 
 /// A single credential field a service requires. Drives the host's "connect

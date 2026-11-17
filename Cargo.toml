@@ -31,6 +31,8 @@ md-5 = "0.10"
 uuid = { version = "1", features = ["v4"] }
 # Gunzip for downloaded analytics report segments (Apple serves gzip TSV).
 flate2 = "1"
+# Decodes request paths for the diagnostic log (already in the tree via reqwest/url).
+percent-encoding = "2"
 
 [profile.release]
 opt-level = "z"

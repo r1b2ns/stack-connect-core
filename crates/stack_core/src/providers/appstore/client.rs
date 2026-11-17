@@ -20,6 +20,8 @@ use crate::domain::{
     ReviewResponse, ReviewSubmission, ScreenshotInfo, ScreenshotSetInfo, TeamMemberInfo, UserInfo,
 };
 use crate::error::StackError;
+use crate::http_debug::{render_response, send_unbuffered};
+use crate::logging::{self, target};
 use crate::ports::DebugLogger;
 
 const DEFAULT_BASE_URL: &str = "https://api.appstoreconnect.apple.com";
@@ -2485,8 +2487,9 @@ impl AppStoreClient {
     /// cURL (with pretty-printed JSON body) before sending and the response
     /// (status + pretty-printed JSON body) after.
     ///
-    /// This is the single choke point every HTTP call routes through, so logging
-    /// lives in one place and the send/read boilerplate is not duplicated.
+    /// Every HTTP call this client makes routes through here, which delegates to
+    /// the crate-wide [`crate::http_debug::send_and_read`] so logging lives in one
+    /// place and the send/read boilerplate is not duplicated.
     ///
     /// # Errors
     /// [`StackError::Network`] on transport failure (sending or reading the body)
@@ -2495,29 +2498,7 @@ impl AppStoreClient {
         &self,
         builder: reqwest::RequestBuilder,
     ) -> Result<(reqwest::StatusCode, String), StackError> {
-        if let Some(logger) = &self.debug_logger {
-            // `try_clone` fails only for streaming bodies; the client uses
-            // in-memory `.json()`/empty bodies, so this clones in practice.
-            if let Some(req) = builder.try_clone().and_then(|b| b.build().ok()) {
-                logger.log(render_curl(&req));
-            }
-        }
-
-        let response = builder
-            .send()
-            .await
-            .map_err(|e| StackError::network(e.to_string()))?;
-        let status = response.status();
-        let body = response
-            .text()
-            .await
-            .map_err(|e| StackError::network(e.to_string()))?;
-
-        if let Some(logger) = &self.debug_logger {
-            logger.log(render_response(status, &body));
-        }
-
-        Ok((status, body))
+        crate::http_debug::send_and_read(builder, self.debug_logger.as_deref()).await
     }
 
     /// Cheap credential check: `GET /v1/apps?limit=1`.
@@ -3014,6 +2995,12 @@ impl AppStoreClient {
         //    Reuse is best-effort — a stale draft may reject the new item, so any
         //    failure here falls back to the create-new flow below.
         if let Some(submission_id) = self.find_reusable_empty_draft(app_id, platform).await? {
+            logging::info(target::APPSTORE, || {
+                format!(
+                    "submit_for_review: reusing empty READY_FOR_REVIEW draft {submission_id} \
+                     for app {app_id}"
+                )
+            });
             if let Some(logger) = &self.debug_logger {
                 logger.log(format!(
                     "[RustCore] submit_for_review: reusing empty READY_FOR_REVIEW \
@@ -3023,6 +3010,12 @@ impl AppStoreClient {
             match self.attach_and_submit(&submission_id, version_id).await {
                 Ok(()) => return Ok(()),
                 Err(err) => {
+                    logging::warn(target::APPSTORE, || {
+                        format!(
+                            "submit_for_review: reuse of draft {submission_id} failed \
+                             ({err}); falling back to creating a new review submission"
+                        )
+                    });
                     if let Some(logger) = &self.debug_logger {
                         logger.log(format!(
                             "[RustCore] submit_for_review: reuse of draft \
@@ -3037,6 +3030,9 @@ impl AppStoreClient {
         }
 
         // 2. Create a fresh review submission (original flow).
+        logging::info(target::APPSTORE, || {
+            format!("submit_for_review: creating a new review submission for app {app_id}")
+        });
         if let Some(logger) = &self.debug_logger {
             logger.log(format!(
                 "[RustCore] submit_for_review: creating a new review submission \
@@ -3589,6 +3585,12 @@ impl AppStoreClient {
             // Still an un-submitted draft after removing items → it was empty and
             // there is no API path to clear it. Report honestly.
             Some(Some(state)) if state == "READY_FOR_REVIEW" => {
+                logging::warn(target::APPSTORE, || {
+                    format!(
+                        "review submission {submission_id} still READY_FOR_REVIEW after item \
+                         removal (empty draft, not removable via the ASC API)"
+                    )
+                });
                 if let Some(logger) = &self.debug_logger {
                     logger.log(format!(
                         "[RustCore] review submission {submission_id} still \
@@ -5870,7 +5872,8 @@ impl AppStoreClient {
     /// Performs a single pre-signed chunk upload described by `op`, sending
     /// `chunk` as the request body.
     ///
-    /// Unlike [`Self::send_and_read`], this deliberately bypasses `render_curl`:
+    /// Unlike [`Self::send_and_read`], this deliberately bypasses
+    /// [`render_curl`](crate::http_debug::render_curl):
     /// the body is raw binary image data, so routing it through the pretty-JSON
     /// logger would dump megabytes of lossy UTF-8 into the debug log. Instead,
     /// when a debug logger is present a single redacted line records the method,
@@ -5900,15 +5903,10 @@ impl AppStoreClient {
             builder = builder.header(&header.name, &header.value);
         }
 
-        let response = builder
-            .send()
-            .await
-            .map_err(|e| StackError::network(e.to_string()))?;
-        let status = response.status();
-        let body = response
-            .text()
-            .await
-            .map_err(|e| StackError::network(e.to_string()))?;
+        // The opt-in trace already has its one redacted line above.
+        let sent = send_unbuffered(builder, |_| {}).await?;
+        let status = sent.status();
+        let body = sent.text().await?;
 
         if let Some(logger) = &self.debug_logger {
             // Status only — the upload response body is not JSON worth pretty-printing.
@@ -7674,13 +7672,9 @@ impl AppStoreClient {
             ));
         }
 
-        // Pre-signed URL: deliberately NO `bearer_auth`.
-        let mut response = self
-            .http
-            .get(url)
-            .send()
-            .await
-            .map_err(|e| StackError::network(e.to_string()))?;
+        // Pre-signed URL: deliberately NO `bearer_auth`. The host log line
+        // carries the path only, never the signed query.
+        let mut response = send_unbuffered(self.http.get(url), |_| {}).await?;
         let status = response.status();
 
         if let Some(logger) = &self.debug_logger {
@@ -7698,10 +7692,7 @@ impl AppStoreClient {
         }
 
         if !status.is_success() {
-            let body = response
-                .text()
-                .await
-                .map_err(|e| StackError::network(e.to_string()))?;
+            let body = response.text().await?;
             if let Some(err) = pending_agreements_error(status.as_u16(), &body) {
                 return Err(err);
             }
@@ -7714,11 +7705,7 @@ impl AppStoreClient {
         // Stream the body, enforcing `max_bytes` as we go so a missing/under-
         // reported `Content-Length` cannot make us buffer an unbounded response.
         let mut compressed: Vec<u8> = Vec::new();
-        while let Some(chunk) = response
-            .chunk()
-            .await
-            .map_err(|e| StackError::network(e.to_string()))?
-        {
+        while let Some(chunk) = response.chunk().await? {
             if compressed.len() as u64 + chunk.len() as u64 > max_bytes {
                 return Err(StackError::unsupported(
                     "analytics segment exceeds max_bytes; download via URL directly",
@@ -7756,37 +7743,6 @@ impl AppStoreClient {
     }
 }
 
-/// Renders a `reqwest::Request` as a runnable, multi-line cURL command for the
-/// debug logger: the method/URL, one `-H` line per header (in reqwest's stored
-/// order, Authorization included verbatim — this is an opt-in, debug-only sink),
-/// and a `-d` line carrying the pretty-printed JSON body when one is present.
-fn render_curl(req: &reqwest::Request) -> String {
-    let mut out = format!(
-        "[RustCore] → request\n→ curl -X {} '{}'",
-        req.method(),
-        req.url()
-    );
-
-    for (name, value) in req.headers() {
-        let value = value.to_str().unwrap_or("<non-utf8>");
-        out.push_str(&format!(" \\\n  -H '{name}: {value}'"));
-    }
-
-    if let Some(bytes) = req.body().and_then(reqwest::Body::as_bytes) {
-        if !bytes.is_empty() {
-            out.push_str(&format!(" \\\n  -d '{}'", pretty_json(bytes)));
-        }
-    }
-
-    out
-}
-
-/// Renders a response status line plus its body (pretty-printed when the body is
-/// JSON, raw otherwise) for the debug logger.
-fn render_response(status: reqwest::StatusCode, body: &str) -> String {
-    format!("[RustCore] ← {status}\n{}", pretty_json(body.as_bytes()))
-}
-
 /// Computes the MD5 of `data`, returning it as a lowercase hex string. Used as
 /// the `sourceFileChecksum` when committing an uploaded screenshot. The 16-byte
 /// digest is hex-encoded inline (`{:02x}`) to avoid pulling in a hex crate.
@@ -7799,15 +7755,6 @@ fn md5_hex(data: &[u8]) -> String {
         let _ = write!(hex, "{byte:02x}");
     }
     hex
-}
-
-/// Pretty-prints `bytes` as JSON; on any parse/serialize failure falls back to
-/// the lossy UTF-8 of the raw bytes. Never panics.
-fn pretty_json(bytes: &[u8]) -> String {
-    serde_json::from_slice::<serde_json::Value>(bytes)
-        .ok()
-        .and_then(|v| serde_json::to_string_pretty(&v).ok())
-        .unwrap_or_else(|| String::from_utf8_lossy(bytes).into_owned())
 }
 
 /// Detects an App Store Connect "pending agreements" 403 from a non-2xx
@@ -14517,16 +14464,6 @@ mod tests {
         // `client(..)` uses `with_base_url`, whose `debug_logger` defaults to None.
         let apps = client(server.uri()).fetch_apps().await.unwrap();
         assert_eq!(apps.len(), 1);
-    }
-
-    #[test]
-    fn pretty_json_falls_back_to_raw_for_non_json() {
-        // Non-JSON bytes must not panic and must round-trip as lossy UTF-8.
-        assert_eq!(pretty_json(b"not json"), "not json");
-        // Valid JSON is re-rendered in pretty (multi-line) form.
-        let pretty = pretty_json(br#"{"a":1}"#);
-        assert!(pretty.contains("\"a\": 1"));
-        assert!(pretty.contains('\n'));
     }
 
     // -----------------------------------------------------------------------

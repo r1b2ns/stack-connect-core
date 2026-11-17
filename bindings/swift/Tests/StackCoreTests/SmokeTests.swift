@@ -5,16 +5,26 @@ import XCTest
 // Cross-FFI smoke for `swift test` / xcodebuild on an iOS simulator (the xcframework
 // carries iOS slices). The host equivalent lives in ../../smoke/main.swift.
 //
-// Offline by design: it only exercises the synchronous metadata surface and the
-// synchronous `connect`, which reads secrets via the Swift CredentialStore callback.
+// Offline by design: it exercises the synchronous metadata surface, the
+// synchronous `connect`, which reads secrets via the Swift CredentialStore
+// callback, and async capability calls the core rejects before any request.
 final class SmokeTests: XCTestCase {
     func testAppStoreConnectIsAvailableAcrossFFI() {
         XCTAssertTrue(availableServices().contains(.appStoreConnect))
     }
 
+    func testGooglePlayIsAvailableAcrossFFI() {
+        XCTAssertTrue(availableServices().contains(.googlePlay))
+    }
+
     func testCredentialSchemaCrossesFFI() {
         let keys = credentialSchema(kind: .appStoreConnect).map { $0.key }
         XCTAssertEqual(keys, ["issuerId", "keyId", "privateKeyP8"])
+    }
+
+    func testGooglePlayCredentialSchemaCrossesFFI() {
+        let keys = credentialSchema(kind: .googlePlay).map { $0.key }
+        XCTAssertEqual(keys, ["clientEmail", "privateKeyId", "privateKey"])
     }
 
     func testRustCallsBackIntoSwiftCredentialStore() {
@@ -42,7 +52,7 @@ final class SmokeTests: XCTestCase {
         }
 
         let store = RecordingStore()
-        XCTAssertThrowsError(try connect(kind: .appStoreConnect, accountId: "acct-1", store: store)) { error in
+        XCTAssertThrowsError(try connect(kind: .appStoreConnect, accountId: "acct-1", store: store, debugLogger: nil)) { error in
             guard case StackError.InvalidCredentials = error else {
                 return XCTFail("expected .InvalidCredentials, got \(error)")
             }
@@ -51,5 +61,102 @@ final class SmokeTests: XCTestCase {
         let first = store.asked.first
         XCTAssertEqual(first?.accountId, "acct-1")
         XCTAssertEqual(first?.key, "issuerId")
+    }
+
+    // MARK: - Google Play
+
+    /// The core repo root, found from this file (bindings/swift/Tests/StackCoreTests/).
+    private static let repoRoot = URL(fileURLWithPath: #filePath)
+        .deletingLastPathComponent() // StackCoreTests
+        .deletingLastPathComponent() // Tests
+        .deletingLastPathComponent() // swift
+        .deletingLastPathComponent() // bindings
+        .deletingLastPathComponent() // repo root
+
+    /// Connects Google Play offline with the crate's RSA test key: `connect`
+    /// parses and test-signs the key locally, so no network is touched.
+    private func connectGooglePlay() throws -> Provider {
+        final class PlayStore: CredentialStore, @unchecked Sendable {
+            let secrets: [String: String]
+            init(secrets: [String: String]) { self.secrets = secrets }
+            func secret(accountId: String, key: String) -> String? { secrets[key] }
+            func setSecret(accountId: String, key: String, value: String) {}
+            func delete(accountId: String) {}
+        }
+
+        let pemURL = Self.repoRoot
+            .appendingPathComponent("crates/stack_core/tests/fixtures/test_rsa_private_pkcs8.pem")
+        let pem = try String(contentsOf: pemURL, encoding: .utf8)
+        let store = PlayStore(secrets: [
+            "clientEmail": "play-bot@my-project.iam.gserviceaccount.com",
+            "privateKeyId": "0123456789abcdef0123456789abcdef01234567",
+            "privateKey": pem,
+        ])
+        return try connect(kind: .googlePlay, accountId: "play-bot", store: store, debugLogger: nil)
+    }
+
+    func testGooglePlayCapabilitiesCrossFFI() throws {
+        let play = try connectGooglePlay()
+        XCTAssertEqual(play.capabilities(), [.apps, .reviews, .appDetails, .storeListings, .tracks, .appIcons, .releaseManagement, .playUsers])
+        XCTAssertNotNil(play.reviews())
+        XCTAssertNotNil(play.appDetails())
+        XCTAssertNotNil(play.storeListings())
+        XCTAssertNotNil(play.tracks())
+        XCTAssertNotNil(play.appIcons())
+        XCTAssertNotNil(play.playUsers())
+        XCTAssertNil(play.appStoreVersions())
+        XCTAssertNil(play.builds())
+    }
+
+    func testGooglePlayRejectsInvalidPackageBeforeAnyRequest() async throws {
+        let details = try XCTUnwrap(try connectGooglePlay().appDetails())
+        do {
+            _ = try await details.fetchAppDetails(appId: "not a package")
+            XCTFail("expected an invalid package name to be rejected")
+        } catch StackError.Http(let status, _) {
+            XCTAssertEqual(status, 404)
+        }
+    }
+
+    func testGooglePlayReleaseChangeRejectsAnInvalidFractionBeforeAnyRequest() async throws {
+        let tracks = try XCTUnwrap(try connectGooglePlay().tracks())
+        do {
+            _ = try await tracks.applyReleaseChange(
+                appId: "com.example.app",
+                track: "production",
+                change: .setRollout(versionCodes: ["42"], userFraction: 1.0),
+                options: CommitOptions(sendForReview: true, changesInReviewBehavior: nil)
+            )
+            XCTFail("expected a rollout fraction of 1 to be rejected")
+        } catch StackError.Http(let status, _) {
+            XCTAssertEqual(status, 400)
+        }
+    }
+
+    func testGooglePlayUsersRejectAnInvalidDeveloperIdBeforeAnyRequest() async throws {
+        let users = try XCTUnwrap(try connectGooglePlay().playUsers())
+        do {
+            _ = try await users.fetchUsers(developerId: "not-a-number")
+            XCTFail("expected an invalid developer ID to be rejected")
+        } catch StackError.Http(let status, _) {
+            XCTAssertEqual(status, 404)
+        }
+    }
+
+    func testGooglePlayIconOfInvalidPackageIsNilWithoutARequest() async throws {
+        // A name no Play app can have has no store page: `nil`, decided locally.
+        let icons = try XCTUnwrap(try connectGooglePlay().appIcons())
+        let icon = try await icons.fetchIconUrl(appId: "not a package")
+        XCTAssertNil(icon)
+    }
+
+    func testGooglePlayRejectsForeignReviewIdBeforeAnyRequest() async throws {
+        let reviews = try XCTUnwrap(try connectGooglePlay().reviews())
+        do {
+            _ = try await reviews.replyToReview(reviewId: "not-a-play-review-id", body: "hi")
+            XCTFail("expected a foreign review id to be rejected")
+        } catch StackError.Decode {
+            // Expected: the composite id is opaque and this one is not Play's.
+        }
     }
 }
