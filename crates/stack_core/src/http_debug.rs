@@ -20,6 +20,22 @@ pub(crate) struct HttpReply {
     pub(crate) status: reqwest::StatusCode,
     pub(crate) body: String,
     pub(crate) request: RequestInfo,
+    /// The `Retry-After` header in seconds, when the response carries one in
+    /// its delta-seconds form (see [`retry_after_secs`]).
+    pub(crate) retry_after_secs: Option<u64>,
+}
+
+/// The `Retry-After` header as a number of seconds (RFC 9110 §10.2.3
+/// delta-seconds, e.g. `Retry-After: 30`). `None` when it is absent, empty or
+/// in its HTTP-date form, which Google APIs do not send.
+fn retry_after_secs(headers: &reqwest::header::HeaderMap) -> Option<u64> {
+    headers
+        .get(reqwest::header::RETRY_AFTER)?
+        .to_str()
+        .ok()?
+        .trim()
+        .parse()
+        .ok()
 }
 
 /// Sends `builder` and reads the whole body.
@@ -58,6 +74,7 @@ pub(crate) async fn send(
     };
     let status = response.status();
     let request_id = request_id(response.headers());
+    let retry_after_secs = retry_after_secs(response.headers());
     let body = match response.text().await {
         Ok(body) => body,
         Err(err) => return Err(transport_error(&info, started.elapsed(), err)),
@@ -78,6 +95,7 @@ pub(crate) async fn send(
         status,
         body,
         request: info,
+        retry_after_secs,
     })
 }
 
@@ -334,6 +352,49 @@ mod tests {
         fn log(&self, message: String) {
             self.messages.lock().unwrap().push(message);
         }
+    }
+
+    #[test]
+    fn retry_after_reads_delta_seconds_only() {
+        use reqwest::header::{HeaderMap, HeaderValue, RETRY_AFTER};
+
+        let with = |value: &'static str| {
+            let mut headers = HeaderMap::new();
+            headers.insert(RETRY_AFTER, HeaderValue::from_static(value));
+            retry_after_secs(&headers)
+        };
+        assert_eq!(with("30"), Some(30));
+        assert_eq!(with(" 0 "), Some(0));
+        assert_eq!(with("Wed, 21 Oct 2026 07:28:00 GMT"), None);
+        assert_eq!(with(""), None);
+        assert_eq!(with("-5"), None);
+        assert_eq!(with("99999999999999999999999"), None);
+        assert_eq!(retry_after_secs(&HeaderMap::new()), None);
+    }
+
+    #[tokio::test]
+    async fn send_carries_the_retry_after_header() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/limited"))
+            .respond_with(ResponseTemplate::new(429).insert_header("Retry-After", "17"))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/plain"))
+            .respond_with(ResponseTemplate::new(200))
+            .mount(&server)
+            .await;
+
+        let client = reqwest::Client::new();
+        let limited = send(client.get(format!("{}/limited", server.uri())), None)
+            .await
+            .unwrap();
+        assert_eq!(limited.retry_after_secs, Some(17));
+        let plain = send(client.get(format!("{}/plain", server.uri())), None)
+            .await
+            .unwrap();
+        assert_eq!(plain.retry_after_secs, None);
     }
 
     #[test]

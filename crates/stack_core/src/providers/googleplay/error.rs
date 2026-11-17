@@ -1,10 +1,15 @@
 //! Maps Google API error responses (AIP-193 `{"error": {...}}` bodies) to
 //! [`StackError`].
 //!
-//! Classification reads only the HTTP status and the machine-readable `reason`
-//! fields — `google.rpc.ErrorInfo` entries in `error.details[]`, plus the legacy
-//! `error.errors[].reason` — never the human `message`, whose wording Google may
-//! change at any time.
+//! Classification reads the HTTP status, `error.status` and the
+//! machine-readable `reason` fields — `google.rpc.ErrorInfo` entries in
+//! `error.details[]`, plus the legacy `error.errors[].reason` — and not the
+//! human `message`, whose wording Google may change at any time, with one
+//! exception: a 403 whose message mentions a quota (see [`is_quota_error`]).
+//! The Android Publisher API reports some quotas only that way (`403
+//! PERMISSION_DENIED` "Listing releases quota exceeded.", no `details[]`), and
+//! reading it as missing access would send the user to fix permissions that
+//! are fine.
 //!
 //! Both Google APIs the provider calls share this mapping; an [`ErrorHints`]
 //! value names the API, the Play Console permission the call needs and, for
@@ -16,7 +21,7 @@ use serde::Deserialize;
 use serde_json::Value;
 
 use crate::error::StackError;
-use crate::logging::{self, http::RequestInfo};
+use crate::logging::{self, http::RequestInfo, target};
 
 /// The API is not enabled in the service account's Google Cloud project.
 const REASON_SERVICE_DISABLED: &str = "SERVICE_DISABLED";
@@ -30,6 +35,22 @@ const LEGACY_ACCESS_NOT_CONFIGURED: &str = "accessNotConfigured";
 const LEGACY_PERMISSION_DENIED: &str = "permissionDenied";
 /// `@type` suffix of the structured error detail that carries `reason`.
 const ERROR_INFO_TYPE_SUFFIX: &str = "google.rpc.ErrorInfo";
+/// `ErrorInfo.reason` of a per-minute or per-user rate limit.
+const REASON_RATE_LIMIT_EXCEEDED: &str = "RATE_LIMIT_EXCEEDED";
+/// `error.status` (`google.rpc.Code`) of an exhausted quota or rate limit.
+const STATUS_RESOURCE_EXHAUSTED: &str = "RESOURCE_EXHAUSTED";
+/// Legacy (`errors[].reason`, domain `usageLimits`) quota and rate-limit
+/// reasons, which come with a 403.
+const LEGACY_QUOTA_REASONS: [&str; 3] = [
+    "userRateLimitExceeded",
+    "rateLimitExceeded",
+    "quotaExceeded",
+];
+/// What a quota message contains, matched ASCII case-insensitively.
+const QUOTA_WORD: &str = "quota";
+/// The status a quota or rate limit is reported with, whatever Google
+/// answered (403 or 429): "too many requests", not "no access".
+const QUOTA_STATUS: u16 = 429;
 
 /// The Play Console permission every read needs.
 pub(super) const PERMISSION_VIEW_APP_INFO: &str = "View app information (read-only)";
@@ -211,6 +232,11 @@ fn google_message(parsed: Option<&GoogleErrorBody>, body: &str) -> String {
 
 /// Maps a non-2xx Google API response to a [`StackError`].
 ///
+/// - **A quota or rate limit** ([`is_quota_error`]: any 429, or a 403 that
+///   says so) → [`StackError::Http`] `429`, whatever status Google sent:
+///   Google's message first, then that it is a quota and not a permission
+///   problem, and `retry_after_secs` (the `Retry-After` header) when known.
+///   Logged as `Warn` under `googleplay`, starting with `quota:`.
 /// - **401** → [`StackError::Auth`]:
 ///   - legacy `permissionDenied` (how the Android Publisher API reports a
 ///     service account without access to the app): the "invite it in Play
@@ -227,16 +253,21 @@ fn google_message(parsed: Option<&GoogleErrorBody>, body: &str) -> String {
 /// - **404** → [`StackError::Http`]; for a [`Target::App`] call the message
 ///   says Google Play has no app with that package name, for a
 ///   [`Target::Developer`] call no developer account with that ID.
-/// - **Anything else** (400, 409, 429, 5xx) → [`StackError::Http`] carrying
+/// - **Anything else** (400, 409, 5xx) → [`StackError::Http`] carrying
 ///   Google's message: not a credential problem.
 pub(super) fn map_google_error(
     status: u16,
     body: &str,
+    retry_after_secs: Option<u64>,
     client_email: &str,
     hints: &ErrorHints<'_>,
 ) -> StackError {
     let parsed = parse_error_body(body);
     let google_msg = google_message(parsed.as_ref(), body);
+
+    if is_quota_error(status, parsed.as_ref()) {
+        return quota_exceeded(status, &google_msg, retry_after_secs);
+    }
 
     match status {
         401 if parsed
@@ -307,6 +338,72 @@ pub(super) fn local_rejection(status: u16, target: &str, detail: impl Display) -
     let message = format!("local validation failed: {detail}; request not sent to Google");
     logging::warn(target, || message.clone());
     StackError::Http { status, message }
+}
+
+/// Whether a response reports an exhausted quota or rate limit rather than
+/// missing access or a bad request:
+///
+/// - any **429** (`RESOURCE_EXHAUSTED`);
+/// - a **403** with `error.status` `RESOURCE_EXHAUSTED`, an `ErrorInfo` reason
+///   `RATE_LIMIT_EXCEEDED`, or a legacy `userRateLimitExceeded` /
+///   `rateLimitExceeded` / `quotaExceeded` reason;
+/// - a **403** whose `error.message` contains "quota" (any case), the only
+///   sign some Android Publisher quotas give (`PERMISSION_DENIED` "Listing
+///   releases quota exceeded."). A structured reason [`map_forbidden`] reads
+///   (`SERVICE_DISABLED`, `ACCESS_TOKEN_SCOPE_INSUFFICIENT`, legacy
+///   `accessNotConfigured`) wins over the wording, so a "requires a quota
+///   project" message about a disabled API is not read as a quota.
+///
+/// Other statuses are never a quota here: a 400 that mentions one is a bad
+/// request.
+fn is_quota_error(status: u16, parsed: Option<&GoogleErrorBody>) -> bool {
+    match status {
+        429 => true,
+        403 => parsed.is_some_and(|e| {
+            let infos = error_infos(&e.details);
+            let has_info = |reason: &str| infos.iter().any(|i| i.reason == reason);
+
+            let structured_quota = e.status.as_deref().map(str::trim)
+                == Some(STATUS_RESOURCE_EXHAUSTED)
+                || has_info(REASON_RATE_LIMIT_EXCEEDED)
+                || LEGACY_QUOTA_REASONS
+                    .iter()
+                    .any(|reason| e.has_legacy_reason(reason));
+            let structured_other = has_info(REASON_SERVICE_DISABLED)
+                || has_info(REASON_SCOPE_INSUFFICIENT)
+                || e.has_legacy_reason(LEGACY_ACCESS_NOT_CONFIGURED);
+            let worded_quota = e
+                .message
+                .as_deref()
+                .is_some_and(|m| m.to_ascii_lowercase().contains(QUOTA_WORD));
+
+            structured_quota || (worded_quota && !structured_other)
+        }),
+        _ => false,
+    }
+}
+
+/// The quota branch of [`map_google_error`]: [`StackError::Http`]
+/// [`QUOTA_STATUS`] with Google's message first, verbatim, then
+/// `; this is a Google Play API quota/rate limit, not a permission problem —
+/// wait and retry later`, plus ` (Retry-After: {n} s)` when Google sent the
+/// header. Logged as `Warn` under `googleplay` with a `quota:` prefix and the
+/// status Google actually answered.
+fn quota_exceeded(status: u16, google_msg: &str, retry_after_secs: Option<u64>) -> StackError {
+    let retry_after = retry_after_secs
+        .map(|secs| format!(" (Retry-After: {secs} s)"))
+        .unwrap_or_default();
+    let message = format!(
+        "{google_msg}; this is a Google Play API quota/rate limit, not a permission \
+         problem — wait and retry later{retry_after}"
+    );
+    logging::warn(target::PLAY, || {
+        format!("quota: Google answered HTTP {status} with a quota/rate limit: {message}")
+    });
+    StackError::Http {
+        status: QUOTA_STATUS,
+        message,
+    }
 }
 
 /// The 403 branch of [`map_google_error`].
@@ -387,7 +484,7 @@ mod tests {
 
     /// The mapping for an `apps:search` (Reporting API) failure.
     fn map_reporting_error(status: u16, body: &str, client_email: &str) -> StackError {
-        map_google_error(status, body, client_email, &ErrorHints::REPORTING)
+        map_google_error(status, body, None, client_email, &ErrorHints::REPORTING)
     }
 
     fn auth_message(err: StackError) -> String {
@@ -496,11 +593,11 @@ mod tests {
     }
 
     #[test]
-    fn status_429_and_500_map_to_http_with_google_message() {
+    fn other_statuses_map_to_http_with_google_message() {
+        // 429 is a quota, covered by the quota tests below.
         for (status, google_status) in [
             (400, "INVALID_ARGUMENT"),
             (404, "NOT_FOUND"),
-            (429, "RESOURCE_EXHAUSTED"),
             (500, "INTERNAL"),
         ] {
             let body = format!(
@@ -618,6 +715,7 @@ mod tests {
         let message = auth_message(map_google_error(
             403,
             PUBLISHER_SERVICE_DISABLED_BODY,
+            None,
             EMAIL,
             &hints,
         ));
@@ -638,6 +736,7 @@ mod tests {
         let publisher_message = auth_message(map_google_error(
             403,
             body,
+            None,
             EMAIL,
             &publisher(PERMISSION_VIEW_APP_INFO, Target::App(PACKAGE)),
         ));
@@ -654,6 +753,7 @@ mod tests {
         let message = auth_message(map_google_error(
             403,
             body,
+            None,
             EMAIL,
             &publisher(PERMISSION_REPLY_TO_REVIEWS, Target::AppResource(PACKAGE)),
         ));
@@ -673,6 +773,7 @@ mod tests {
         let message = auth_message(map_google_error(
             401,
             PERMISSION_DENIED_401_BODY,
+            None,
             EMAIL,
             &publisher(PERMISSION_VIEW_APP_INFO, Target::App(PACKAGE)),
         ));
@@ -693,6 +794,7 @@ mod tests {
         let message = auth_message(map_google_error(
             401,
             body,
+            None,
             EMAIL,
             &publisher(PERMISSION_VIEW_APP_INFO, Target::App(PACKAGE)),
         ));
@@ -706,6 +808,7 @@ mod tests {
         let (status, message) = http(map_google_error(
             404,
             body,
+            None,
             EMAIL,
             &publisher(PERMISSION_VIEW_APP_INFO, Target::App(PACKAGE)),
         ));
@@ -723,6 +826,7 @@ mod tests {
         let (status, message) = http(map_google_error(
             404,
             body,
+            None,
             EMAIL,
             &publisher(PERMISSION_REPLY_TO_REVIEWS, Target::AppResource(PACKAGE)),
         ));
@@ -732,11 +836,12 @@ mod tests {
 
     #[test]
     fn publisher_other_statuses_stay_http() {
-        for status in [400, 409, 429, 500] {
+        for status in [400, 409, 500] {
             let body = format!(r#"{{"error":{{"code":{status},"message":"boom"}}}}"#);
             let (mapped, message) = http(map_google_error(
                 status,
                 &body,
+                None,
                 EMAIL,
                 &publisher(PERMISSION_VIEW_APP_INFO, Target::App(PACKAGE)),
             ));
@@ -752,6 +857,7 @@ mod tests {
         let (status, message) = http(map_google_error(
             404,
             body,
+            None,
             EMAIL,
             &publisher(PERMISSION_ADMIN, Target::Developer("1234")),
         ));
@@ -765,6 +871,7 @@ mod tests {
         let (_, message) = http(map_google_error(
             404,
             body,
+            None,
             EMAIL,
             &publisher(PERMISSION_ADMIN, Target::DeveloperResource("1234")),
         ));
@@ -777,6 +884,7 @@ mod tests {
         let message = auth_message(map_google_error(
             403,
             body,
+            None,
             EMAIL,
             &publisher(PERMISSION_ADMIN, Target::DeveloperResource("1234")),
         ));
@@ -851,6 +959,179 @@ mod tests {
         assert_eq!(
             logs.messages(crate::logging::LogLevel::Warn, "test.target"),
             ["local validation failed: x is wrong; request not sent to Google"]
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Quotas and rate limits
+    // -----------------------------------------------------------------------
+
+    /// The 403 `tracks.releases.list` answered on a real account (captured
+    /// 2026-11): no `details[]`, nothing but the message says "quota".
+    const RELEASES_QUOTA_BODY: &str = r#"{"error":{"code":403,
+ "message":"Listing releases quota exceeded.","status":"PERMISSION_DENIED"}}"#;
+
+    const QUOTA_NOTE: &str = "; this is a Google Play API quota/rate limit, not a permission \
+                              problem — wait and retry later";
+
+    fn app_hints() -> ErrorHints<'static> {
+        publisher(PERMISSION_VIEW_APP_INFO, Target::AppResource(PACKAGE))
+    }
+
+    #[test]
+    fn worded_403_quota_is_http_429_not_auth() {
+        let logs = crate::logging::testing::capture_logs();
+        let (status, message) = http(map_google_error(
+            403,
+            RELEASES_QUOTA_BODY,
+            None,
+            EMAIL,
+            &app_hints(),
+        ));
+        assert_eq!(status, 429);
+        assert_eq!(
+            message,
+            format!("Listing releases quota exceeded. [PERMISSION_DENIED]{QUOTA_NOTE}")
+        );
+        assert!(!message.contains(EMAIL));
+        assert!(!message.contains("Users and permissions"));
+        assert_eq!(
+            logs.messages(crate::logging::LogLevel::Warn, "googleplay"),
+            [format!(
+                "quota: Google answered HTTP 403 with a quota/rate limit: Listing releases \
+                 quota exceeded. [PERMISSION_DENIED]{QUOTA_NOTE}"
+            )]
+        );
+    }
+
+    #[test]
+    fn quota_word_matches_in_any_case() {
+        let body = r#"{"error":{"code":403,"message":"QUOTA Exceeded for users.list","status":"PERMISSION_DENIED"}}"#;
+        let (status, _) = http(map_google_error(
+            403,
+            body,
+            None,
+            EMAIL,
+            &publisher(PERMISSION_ADMIN, Target::Developer("5374")),
+        ));
+        assert_eq!(status, 429);
+    }
+
+    #[test]
+    fn retry_after_seconds_are_named() {
+        let (status, message) = http(map_google_error(
+            403,
+            RELEASES_QUOTA_BODY,
+            Some(30),
+            EMAIL,
+            &app_hints(),
+        ));
+        assert_eq!(status, 429);
+        assert!(
+            message.ends_with(&format!("{QUOTA_NOTE} (Retry-After: 30 s)")),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn every_429_is_a_quota() {
+        for body in [
+            r#"{"error":{"code":429,"message":"Too many requests.","status":"RESOURCE_EXHAUSTED"}}"#,
+            r#"{"error":{"code":429,"message":"boom"}}"#,
+            "Too Many Requests",
+        ] {
+            let (status, message) = http(map_google_error(429, body, Some(5), EMAIL, &app_hints()));
+            assert_eq!(status, 429);
+            assert!(message.contains(QUOTA_NOTE), "{message}");
+            assert!(message.ends_with("(Retry-After: 5 s)"), "{message}");
+        }
+        let (_, message) = http(map_reporting_error(
+            429,
+            r#"{"error":{"code":429,"message":"Too many requests.","status":"RESOURCE_EXHAUSTED"}}"#,
+            EMAIL,
+        ));
+        assert_eq!(
+            message,
+            format!("Too many requests. [RESOURCE_EXHAUSTED]{QUOTA_NOTE}")
+        );
+    }
+
+    #[test]
+    fn structured_403_quota_signals_are_quotas_without_the_word() {
+        let bodies = [
+            // `error.status`.
+            r#"{"error":{"code":403,"message":"Slow down.","status":"RESOURCE_EXHAUSTED"}}"#,
+            // `ErrorInfo.reason`.
+            r#"{"error":{"code":403,"message":"Slow down.","status":"PERMISSION_DENIED",
+                "details":[{"@type":"type.googleapis.com/google.rpc.ErrorInfo",
+                "reason":"RATE_LIMIT_EXCEEDED","domain":"googleapis.com"}]}}"#,
+            // Legacy `errors[].reason`.
+            r#"{"error":{"code":403,"message":"User Rate Limit Exceeded",
+                "errors":[{"domain":"usageLimits","reason":"userRateLimitExceeded"}]}}"#,
+            r#"{"error":{"code":403,"message":"Rate Limit Exceeded",
+                "errors":[{"domain":"usageLimits","reason":"rateLimitExceeded"}]}}"#,
+            r#"{"error":{"code":403,"message":"Slow down.",
+                "errors":[{"domain":"usageLimits","reason":"quotaExceeded"}]}}"#,
+        ];
+        for body in bodies {
+            let (status, message) = http(map_google_error(403, body, None, EMAIL, &app_hints()));
+            assert_eq!(status, 429, "{body}");
+            assert!(message.ends_with(QUOTA_NOTE), "{message}");
+        }
+    }
+
+    #[test]
+    fn real_permission_403_is_still_auth() {
+        let body = r#"{"error":{"code":403,"message":"The caller does not have permission","status":"PERMISSION_DENIED"}}"#;
+        let logs = crate::logging::testing::capture_logs();
+        let message = auth_message(map_google_error(403, body, Some(30), EMAIL, &app_hints()));
+        assert!(message.contains("cannot access the app com.example.app"));
+        assert!(!message.contains("quota"));
+        assert!(!message.contains("Retry-After"));
+        assert!(logs
+            .messages(crate::logging::LogLevel::Warn, "googleplay")
+            .is_empty());
+    }
+
+    #[test]
+    fn a_structured_reason_wins_over_the_word_quota() {
+        // A disabled API whose message talks about a quota project.
+        let body = r#"{"error":{"code":403,
+            "message":"The androidpublisher.googleapis.com API requires a quota project, which is not set by default.",
+            "status":"PERMISSION_DENIED",
+            "details":[{"@type":"type.googleapis.com/google.rpc.ErrorInfo","reason":"SERVICE_DISABLED",
+              "metadata":{"serviceTitle":"Google Play Android Developer API"}}]}}"#;
+        let message = auth_message(map_google_error(403, body, None, EMAIL, &app_hints()));
+        assert!(message.starts_with("Google Play Android Developer API is not enabled"));
+    }
+
+    #[test]
+    fn quota_wording_outside_403_and_429_is_not_a_quota() {
+        let body = r#"{"error":{"code":400,"message":"Invalid quota project.","status":"INVALID_ARGUMENT"}}"#;
+        let (status, message) = http(map_google_error(400, body, None, EMAIL, &app_hints()));
+        assert_eq!(status, 400);
+        assert_eq!(message, "Invalid quota project. [INVALID_ARGUMENT]");
+    }
+
+    #[test]
+    fn quota_context_names_the_status_google_sent() {
+        let releases = RequestInfo::new(
+            reqwest::Method::GET,
+            reqwest::Url::parse(
+                "https://androidpublisher.googleapis.com/androidpublisher/v3/applications/\
+                 com.example.app/tracks/production/releases",
+            )
+            .unwrap(),
+        );
+        let err = map_google_error(403, RELEASES_QUOTA_BODY, None, EMAIL, &app_hints());
+        let (status, message) = http(with_request_context(err, 403, &releases));
+        assert_eq!(status, 429);
+        assert_eq!(
+            message,
+            format!(
+                "Listing releases quota exceeded. [PERMISSION_DENIED]{QUOTA_NOTE} (HTTP 403 on \
+                 GET applications/com.example.app/tracks/production/releases)"
+            )
         );
     }
 }

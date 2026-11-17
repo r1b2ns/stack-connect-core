@@ -152,7 +152,10 @@ last) for a release change whose target left the track. A disabled API
 message that names the app and the permission. A package Google does not know is
 `Http 404` ("Google Play found no app with package name …"). A package name that breaks
 Android's naming rules gets the same `Http 404`, decided locally without a request.
-Quota and server errors are `Http`. Every error mapped from a Google response keeps
+A quota or rate limit is `Http 429`, whatever Google answered (a 429, or a 403 whose
+status/reason or message says so, e.g. "Listing releases quota exceeded."): the message
+says it is not a permission problem and names `Retry-After` when Google sends it.
+Server errors are `Http`. Every error mapped from a Google response keeps
 Google's message verbatim and ends with the HTTP status and the resource called, e.g.
 `(HTTP 404 on GET developers/5374/users)`; every local rejection reads
 `local validation failed: …; request not sent to Google` and describes the rejected

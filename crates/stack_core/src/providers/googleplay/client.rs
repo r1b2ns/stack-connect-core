@@ -327,7 +327,13 @@ impl GooglePlayClient {
             return Ok(reply.body);
         }
         let status = reply.status.as_u16();
-        let err = map_google_error(status, &reply.body, self.auth.client_email(), hints);
+        let err = map_google_error(
+            status,
+            &reply.body,
+            reply.retry_after_secs,
+            self.auth.client_email(),
+            hints,
+        );
         Err(with_request_context(err, status, &reply.request))
     }
 
@@ -742,7 +748,9 @@ mod tests {
                 assert_eq!(status, 429);
                 assert_eq!(
                     message,
-                    "Quota exceeded [RESOURCE_EXHAUSTED] (HTTP 429 on GET v1beta1/apps:search)"
+                    "Quota exceeded [RESOURCE_EXHAUSTED]; this is a Google Play API quota/rate \
+                     limit, not a permission problem — wait and retry later (HTTP 429 on GET \
+                     v1beta1/apps:search)"
                 );
             }
             other => panic!("expected Http, got {other:?}"),

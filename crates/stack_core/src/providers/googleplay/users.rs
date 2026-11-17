@@ -833,6 +833,52 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn quota_is_http_429_not_auth() {
+        let server = MockServer::start().await;
+        mount_token(&server, "tok-1", 1).await;
+        Mock::given(method("GET"))
+            .and(path(USERS_PATH))
+            .respond_with(google_error(403, "Listing users quota exceeded."))
+            .up_to_n_times(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path(USERS_PATH))
+            .respond_with(
+                ResponseTemplate::new(429)
+                    .insert_header("Retry-After", "12")
+                    .set_body_json(serde_json::json!({
+                        "error": {
+                            "code": 429,
+                            "message": "Too many requests.",
+                            "status": "RESOURCE_EXHAUSTED"
+                        }
+                    })),
+            )
+            .mount(&server)
+            .await;
+        let client = client(&server);
+
+        let (status, message) = http(client.fetch_users(DEV).await.unwrap_err());
+        assert_eq!(status, 429);
+        assert_eq!(
+            message,
+            "Listing users quota exceeded. [X]; this is a Google Play API quota/rate \
+             limit, not a permission problem — wait and retry later (HTTP 403 on GET \
+             developers/5374/users)"
+        );
+
+        let (status, message) = http(client.fetch_users(DEV).await.unwrap_err());
+        assert_eq!(status, 429);
+        assert_eq!(
+            message,
+            "Too many requests. [RESOURCE_EXHAUSTED]; this is a Google Play API \
+             quota/rate limit, not a permission problem — wait and retry later \
+             (Retry-After: 12 s) (HTTP 429 on GET developers/5374/users)"
+        );
+    }
+
+    #[tokio::test]
     async fn forbidden_keeps_googles_message_naming_the_permission() {
         let server = MockServer::start().await;
         mount_token(&server, "tok-1", 1).await;

@@ -427,6 +427,50 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn quota_403_is_http_429_not_auth() {
+        let server = MockServer::start().await;
+        mount_token(&server, "tok-1", 1).await;
+        // What a real account answered once the listing quota ran out.
+        list()
+            .respond_with(
+                ResponseTemplate::new(403)
+                    .insert_header("Retry-After", "60")
+                    .set_body_json(serde_json::json!({
+                        "error": {
+                            "code": 403,
+                            "message": "Listing releases quota exceeded.",
+                            "status": "PERMISSION_DENIED"
+                        }
+                    })),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let logs = crate::logging::testing::capture_logs();
+        match client(&server)
+            .fetch_release_summaries(PACKAGE, "production")
+            .await
+            .unwrap_err()
+        {
+            StackError::Http { status, message } => {
+                assert_eq!(status, 429);
+                assert_eq!(
+                    message,
+                    "Listing releases quota exceeded. [PERMISSION_DENIED]; this is a Google \
+                     Play API quota/rate limit, not a permission problem — wait and retry \
+                     later (Retry-After: 60 s) (HTTP 403 on GET \
+                     applications/com.example.app/tracks/production/releases)"
+                );
+            }
+            other => panic!("expected Http 429, got {other:?}"),
+        }
+        let warnings = logs.messages(crate::logging::LogLevel::Warn, "googleplay");
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert!(warnings[0].starts_with("quota: Google answered HTTP 403"));
+    }
+
+    #[tokio::test]
     async fn malformed_body_is_decode() {
         let server = MockServer::start().await;
         mount_token(&server, "tok-1", 1).await;

@@ -99,7 +99,7 @@ The Dart (FRB) binding does not expose this sink yet.
 | --- | --- |
 | `http` | the shared HTTP choke point: every request of every provider and of the token exchange |
 | `auth` | access tokens: Google token exchanges, cache drops, 401 retries; App Store Connect JWT signing |
-| `googleplay` | transport-level checks shared by every Play call (package names), `apps:search` |
+| `googleplay` | transport-level checks shared by every Play call (package names, `quota:` lines for quota/rate limits), `apps:search` |
 | `googleplay.users` | developer-account users and grants |
 | `googleplay.edits` | edit sessions: insert, commit, delete |
 | `googleplay.tracks` | release changes and release summaries |
@@ -147,6 +147,13 @@ Example: the service account lacks "Admin (all permissions)":
 Warn  [http]             GET androidpublisher.googleapis.com/androidpublisher/v3/developers/5374/users → 403 Forbidden (121 ms); google error: code=403 status=PERMISSION_DENIED message="The caller does not have permission" details=[ErrorInfo reason=… domain=…]
 ```
 
+Example: a quota Google reports as a 403 (mapped to `Http 429`):
+
+```
+Warn  [http]             GET androidpublisher.googleapis.com/androidpublisher/v3/applications/com.example.app/tracks/production/releases → 403 Forbidden (98 ms); google error: code=403 status=PERMISSION_DENIED message="Listing releases quota exceeded."
+Warn  [googleplay]       quota: Google answered HTTP 403 with a quota/rate limit: Listing releases quota exceeded. [PERMISSION_DENIED]; this is a Google Play API quota/rate limit, not a permission problem — wait and retry later
+```
+
 Example: an invitation whose second grant fails, rolled back (abridged):
 
 ```
@@ -184,6 +191,12 @@ The `StackError` variants did not change; their messages did.
   Applies to `Http` and `Auth` errors mapped from a Google response; e-mails in
   the resource path are masked. Google's own message is not altered, so it may
   contain an address Google echoed back.
+- **Quotas and rate limits** (any 429, or a 403 with `RESOURCE_EXHAUSTED`,
+  `RATE_LIMIT_EXCEEDED`, a legacy `userRateLimitExceeded` / `rateLimitExceeded`
+  / `quotaExceeded` reason, or "quota" in Google's message) are `Http 429`, not
+  `Auth`: `Listing releases quota exceeded. [PERMISSION_DENIED]; this is a Google Play API quota/rate limit, not a permission problem — wait and retry later (Retry-After: 60 s) (HTTP 403 on GET applications/com.example.app/tracks/production/releases)`.
+  The `(Retry-After: …)` part appears only when Google sends that header; the
+  trailing context keeps the status Google actually answered.
 
 ## Redaction
 
