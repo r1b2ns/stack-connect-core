@@ -58,7 +58,7 @@ calls.
 | `StoreListings` | `fetch_store_listings(app_id)` → `[StoreListingInfo]` (language, title, short/full description, video) from `edits.listings`. |
 | `Tracks` | `fetch_tracks(app_id)` → `[TrackInfo]` (track name + releases: name, status, version codes as decimal strings, user fraction, release notes, in-app update priority, optional country targeting) from `edits.tracks`; tracks without a release are included. `fetch_release_summaries(app_id, track)` → `[ReleaseSummaryInfo]` (track, name, raw `releaseLifecycleState`, version codes) from `GET applications/{package}/tracks/{track}/releases`, **without an edit** (a `404` track is an empty list). `fetch_bundles(app_id)` → `[BundleInfo]` (version code, SHA-256) from `edits.bundles`. |
 | `ReleaseManagement` | `Tracks.apply_release_change(app_id, track, change, options)` → the committed `TrackInfo`. See *Release changes* below. |
-| `PlayUsers` | `Provider.play_users()`, on `androidpublisher/v3/developers/{developer_id}/users` (no edit). `fetch_users` (all pages, `pageSize=100`, at most 100 pages) → `[PlayUserInfo]` (email, resource name, raw `accessState`, `expirationTime`, account permissions, grants, `partial`); `invite_user` (`users.create`, then one `grants.create` per grant, since `User.grants` is output-only; a failed grant removes the new invitation again, best effort); `update_user` (`users.patch?updateMask=developerAccountPermissions,expirationTime`, so `None` clears the expiry); `delete_user`; `set_grant` (`grants.patch?updateMask=appLevelPermissions`, falling back to `grants.create` on a `404`); `delete_grant`. Permissions are raw strings both ways. The developer ID (the number in a Play Console URL) is checked locally (digits only, else `Http 404`), as are e-mails and grant package names (`Http 400`). An unknown developer account is `Http 404` naming the ID; a denied call is `Auth` naming "Admin (all permissions)" and keeping Google's message. |
+| `PlayUsers` | `Provider.play_users()`, on `androidpublisher/v3/developers/{developer_id}/users` (no edit). `fetch_users` (all pages, `pageSize=100`, at most 100 pages) → `[PlayUserInfo]` (email, resource name, raw `accessState`, `expirationTime`, account permissions, grants, `partial`); `invite_user` (`users.create`, then one `grants.create` per grant, since `User.grants` is output-only; a failed grant removes the new invitation again, best effort); `update_user` (`users.patch?updateMask=developerAccountPermissions,expirationTime`, so `None` clears the expiry); `delete_user`; `set_grant` (`grants.patch?updateMask=appLevelPermissions`, falling back to `grants.create` on a `404`); `delete_grant`. Permissions are raw strings both ways. The developer ID (the number in a Play Console URL) is checked locally (digits only, else `Http 404`), as are e-mails and grant package names (`Http 400`); these messages start with `local validation failed:` and end with `request not sent to Google`. An unknown developer account is `Http 404` naming the ID; a denied call is `Auth` naming "Admin (all permissions)" and keeping Google's message. |
 | `AppIcons` | `fetch_icon_url(app_id)` → the app icon at 512 px, read from the **public** store page `GET https://play.google.com/store/apps/details?id={package}&hl=en` with no credentials (no token is minted, no `androidpublisher` call, no edit). See *App icons* below. |
 
 *Reviews, as mapped onto `CustomerReview`:* `id` is an **opaque composite**,
@@ -152,7 +152,11 @@ last) for a release change whose target left the track. A disabled API
 message that names the app and the permission. A package Google does not know is
 `Http 404` ("Google Play found no app with package name …"). A package name that breaks
 Android's naming rules gets the same `Http 404`, decided locally without a request.
-Quota and server errors are `Http`. The iOS app connects Google Play accounts and lists
+Quota and server errors are `Http`. Every error mapped from a Google response keeps
+Google's message verbatim and ends with the HTTP status and the resource called, e.g.
+`(HTTP 404 on GET developers/5374/users)`; every local rejection reads
+`local validation failed: …; request not sent to Google` and describes the rejected
+value's shape (see [docs/LOGGING.md](docs/LOGGING.md)). The iOS app connects Google Play accounts and lists
 apps through the core; the Flutter apps only label the service so far, and the new
 capabilities (`AppDetails`, `StoreListings`, `Tracks`, `AppIcons`) have no FRB wrappers
 yet (Play reviews already work through `FrbReviews`; `Capability` itself crosses FRB).
@@ -167,6 +171,26 @@ compiled in: the only cargo features are `frb` (Dart binding) and `cli` (embedde
 revisited, it is just a `providers/<x>/` module + registration (plan §4), reusing
 `auth::oauth_jwt`.
 
+## Logging
+
+The host installs one process-wide, **redacted** log sink at startup:
+`set_core_logger(logger, min_level)` with a `CoreLogger` foreign trait
+(`log(level, target, message)`; iOS: `setCoreLogger(logger:minLevel:)`). Levels are
+`Error` (5xx, transport failures), `Warn` (4xx, local validation failures, failed
+writes and cleanups), `Info` (writes and their outcome, token retries) and `Debug`
+(one line per HTTP request, reads, paging). Targets name the area (`http`, `auth`,
+`googleplay`, `googleplay.users`, `googleplay.edits`, `googleplay.tracks`,
+`googleplay.reviews`, `googleplay.icons`, `appstore`), so the host can map them to
+logging categories.
+
+Every request logs its method, host and path (never the query), status and duration;
+a non-2xx adds the request id and a summary of the error body (Google's `code`,
+`status`, `message`, `details[]` reasons and types). Access tokens, `Authorization`
+headers, private keys, JSON key contents and JWTs never reach the sink, and e-mails
+are masked (`d***@agency.example`). This is separate from `connect`'s opt-in
+`DebugLogger`, which prints unredacted cURLs for debugging. Full reference, examples
+and the redaction rules: [docs/LOGGING.md](docs/LOGGING.md).
+
 ## Layout
 
 ```
@@ -176,10 +200,11 @@ crates/stack_core/                    # the core crate
     auth/oauth_jwt.rs                 # Google service-account RS256 JWT-bearer -> access token
     auth/token.rs                     # token cache primitives shared by the authenticators
     http_debug.rs                     # shared HTTP send + debug tracing (runnable cURL; capped, body-less variant for HTML pages)
+    logging/                          # host log sink (CoreLogger): levels, targets, redaction, HTTP line formats
     domain.rs                         # uniffi::Record value types (AppInfo, ...)
     error.rs                          # StackError (uniffi::Error)
-    ports.rs                          # foreign traits: CredentialStore, BlobStore, DebugLogger
-    facade.rs                         # available_services / credential_schema / connect / make_sync_service
+    ports.rs                          # foreign traits: CredentialStore, BlobStore, DebugLogger, CoreLogger
+    facade.rs                         # available_services / credential_schema / connect / make_sync_service / set_core_logger
     service/
       provider.rs                     # Provider + Capability (the uniform contract)
       kind.rs                         # ServiceKind / CredentialField
@@ -217,7 +242,7 @@ Rust toolchain **1.96.0** (pinned in `rust-toolchain.toml`). Recipes via [`just`
 
 ```bash
 just                       # list recipes
-just test                  # cargo test -p stack_core (516 lib + 9 facade tests)
+just test                  # cargo test -p stack_core (639 lib + 10 facade tests)
 just build-xcframework     # Swift bindings + xcframework (macOS)
 just gen-dart              # Dart FRB bindings into bindings/dart (regenerates frb_generated.rs)
 just build-android         # libstack_core.so (FRB) into the Flutter jniLibs
