@@ -24,9 +24,11 @@ use crate::logging::{self, target};
 const USERS: &str = "users";
 /// The `grants` collection under a user.
 const GRANTS: &str = "grants";
-/// Users per page. Google does not document a maximum; larger values are
-/// expected to be coerced.
-const PAGE_SIZE: u32 = 100;
+/// `pageSize` for every `users.list` request: `-1`, "all users in one
+/// response". It is the only value Google accepts; any other one is rejected
+/// with `400 INVALID_ARGUMENT` "Pagination is not currently available. The
+/// page_size parameter must be set to -1." (seen against a real account).
+const PAGE_SIZE: i32 = -1;
 /// Hard cap on `users.list` pages, so a server that never stops paginating
 /// cannot loop forever.
 const MAX_PAGES: usize = 100;
@@ -198,7 +200,9 @@ fn decode_grant(body: &str, what: &str) -> Result<PlayGrantInfo, StackError> {
 }
 
 impl GooglePlayClient {
-    /// Every user of `developer_id`, following `nextPageToken` until it is
+    /// Every user of `developer_id`. Each request asks for all users at once
+    /// (`pageSize=-1`, see [`PAGE_SIZE`]); should Google still answer with a
+    /// `nextPageToken`, it is followed (with the same `pageSize`) until it is
     /// absent or blank. Users without an e-mail are skipped.
     ///
     /// # Errors
@@ -614,7 +618,7 @@ mod tests {
         mount_token(&server, "tok-1", 1).await;
         Mock::given(method("GET"))
             .and(path(USERS_PATH))
-            .and(query_param("pageSize", "100"))
+            .and(query_param("pageSize", "-1"))
             .and(query_param_is_missing("pageToken"))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                 "users": [{
@@ -638,6 +642,9 @@ mod tests {
             .await;
         Mock::given(method("GET"))
             .and(path(USERS_PATH))
+            // A later page still asks for everything: -1 is the only value
+            // Google accepts.
+            .and(query_param("pageSize", "-1"))
             .and(query_param("pageToken", "a+b/c="))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                 "users": [
@@ -690,7 +697,82 @@ mod tests {
         );
         // The page token is URL-encoded.
         let calls = api_calls(&server).await;
-        assert!(calls[1].ends_with("pageToken=a%2Bb%2Fc%3D"), "{calls:?}");
+        assert_eq!(
+            calls,
+            [
+                format!("GET {USERS_PATH}?pageSize=-1"),
+                format!("GET {USERS_PATH}?pageSize=-1&pageToken=a%2Bb%2Fc%3D"),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn fetch_users_asks_for_all_users_in_one_request() {
+        let server = MockServer::start().await;
+        mount_token(&server, "tok-1", 1).await;
+        // Google's answer to any other page size (captured against a real
+        // account); a request without `pageSize=-1` falls through to it.
+        Mock::given(method("GET"))
+            .and(path(USERS_PATH))
+            .respond_with(ResponseTemplate::new(400).set_body_json(serde_json::json!({
+                "error": {
+                    "code": 400,
+                    "message": "Pagination is not currently available. The page_size \
+                                parameter must be set to -1.",
+                    "status": "INVALID_ARGUMENT"
+                }
+            })))
+            .with_priority(2)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path(USERS_PATH))
+            .and(query_param("pageSize", "-1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "users": [
+                    { "email": "ana@example.com" },
+                    { "email": "bob@example.com" }
+                ]
+            })))
+            .with_priority(1)
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let users = client(&server).fetch_users(DEV).await.unwrap();
+        let emails: Vec<&str> = users.iter().map(|u| u.email.as_str()).collect();
+        assert_eq!(emails, ["ana@example.com", "bob@example.com"]);
+        assert_eq!(
+            api_calls(&server).await,
+            [format!("GET {USERS_PATH}?pageSize=-1")]
+        );
+    }
+
+    #[tokio::test]
+    async fn fetch_users_stops_after_max_pages() {
+        let server = MockServer::start().await;
+        mount_token(&server, "tok-1", 1).await;
+        // A fresh token on every page: only the page cap ends the loop.
+        let counter = std::sync::atomic::AtomicUsize::new(0);
+        Mock::given(method("GET"))
+            .and(path(USERS_PATH))
+            .and(query_param("pageSize", "-1"))
+            .respond_with(move |_: &wiremock::Request| {
+                let n = counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "users": [], "nextPageToken": format!("T{n}")
+                }))
+            })
+            .expect(MAX_PAGES as u64)
+            .mount(&server)
+            .await;
+
+        match client(&server).fetch_users(DEV).await.unwrap_err() {
+            StackError::Decode { message } => {
+                assert_eq!(message, format!("users.list exceeded {MAX_PAGES} pages"))
+            }
+            other => panic!("expected Decode, got {other:?}"),
+        }
     }
 
     #[tokio::test]

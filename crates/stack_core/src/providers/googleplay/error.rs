@@ -796,7 +796,7 @@ mod tests {
         RequestInfo::new(
             reqwest::Method::GET,
             reqwest::Url::parse(
-                "https://androidpublisher.googleapis.com/androidpublisher/v3/developers/5374/users?pageSize=100",
+                "https://androidpublisher.googleapis.com/androidpublisher/v3/developers/5374/users?pageSize=-1",
             )
             .unwrap(),
         )
