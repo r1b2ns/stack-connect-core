@@ -398,12 +398,27 @@ impl GooglePlayClient {
         let mut seen_tokens = HashSet::new();
         let mut page_token: Option<String> = None;
 
-        for _ in 0..MAX_PAGES {
+        for page_number in 1..=MAX_PAGES {
             let body = self
                 .search_apps(FETCH_PAGE_SIZE, page_token.as_deref())
                 .await?;
             let page: SearchAppsResponse = serde_json::from_str(&body)
                 .map_err(|e| StackError::decode(format!("apps:search response: {e}")))?;
+            logging::debug(target::PLAY, || {
+                format!(
+                    "apps:search page {page_number}: {} apps, next page: {}",
+                    page.apps.len(),
+                    if page
+                        .next_page_token
+                        .as_deref()
+                        .is_some_and(|t| !t.trim().is_empty())
+                    {
+                        "yes"
+                    } else {
+                        "no"
+                    }
+                )
+            });
 
             for app in page
                 .apps
@@ -416,7 +431,16 @@ impl GooglePlayClient {
             }
 
             match page.next_page_token.filter(|t| !t.trim().is_empty()) {
-                None => return Ok(apps),
+                None => {
+                    logging::info(target::PLAY, || {
+                        format!(
+                            "apps:search: {} apps visible to {} over {page_number} page(s)",
+                            apps.len(),
+                            self.auth.client_email()
+                        )
+                    });
+                    return Ok(apps);
+                }
                 // A token seen before would loop forever.
                 Some(next) if !seen_tokens.insert(next.clone()) => {
                     return Err(StackError::decode("apps:search repeated nextPageToken"));
@@ -642,6 +666,13 @@ mod tests {
                 "Google answered HTTP 401 on GET v1beta1/apps:search; retrying once with a new \
                  access token",
                 "Google: cached access token dropped; the next call exchanges a new one",
+            ]
+        );
+        assert_eq!(
+            logs.messages(crate::logging::LogLevel::Info, "googleplay"),
+            [
+                "apps:search: 1 apps visible to p***@my-project.iam.gserviceaccount.com over 1 \
+              page(s)"
             ]
         );
         let text = logs.all_text();

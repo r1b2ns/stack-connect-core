@@ -15,6 +15,7 @@ use super::non_blank;
 use super::timestamp::Int64;
 use crate::domain::ReleaseSummaryInfo;
 use crate::error::StackError;
+use crate::logging::{self, target};
 
 /// The `tracks` collection under an app (outside an edit).
 const TRACKS: &str = "tracks";
@@ -69,6 +70,29 @@ impl PlayReleaseSummary {
     }
 }
 
+/// `2 releases: "1.2 (1002)" IN_REVIEW [1002]; "1.1" RELEASED [1001]`.
+fn describe_summaries(summaries: &[ReleaseSummaryInfo]) -> String {
+    if summaries.is_empty() {
+        return "no releases".to_string();
+    }
+    let entries: Vec<String> = summaries
+        .iter()
+        .map(|summary| {
+            let name = summary
+                .name
+                .as_deref()
+                .map(|n| format!("{n:?} "))
+                .unwrap_or_default();
+            format!(
+                "{name}{} [{}]",
+                summary.lifecycle_state.as_deref().unwrap_or("?"),
+                summary.version_codes.join(", ")
+            )
+        })
+        .collect();
+    format!("{} release(s): {}", summaries.len(), entries.join("; "))
+}
+
 impl GooglePlayClient {
     /// The summaries of the releases on `track` of `package_name`
     /// (`GET …/applications/{package}/tracks/{track}/releases`), in Google's
@@ -100,16 +124,31 @@ impl GooglePlayClient {
         };
         let body = match self.execute(|| self.http().get(url.clone()), &hints).await {
             Ok(body) => body,
-            Err(StackError::Http { status: 404, .. }) => return Ok(Vec::new()),
+            Err(StackError::Http { status: 404, .. }) => {
+                logging::info(target::PLAY_TRACKS, || {
+                    format!(
+                        "release summaries of {package_name} track {track}: Google answered \
+                         404, read as an unknown track; returning no releases"
+                    )
+                });
+                return Ok(Vec::new());
+            }
             Err(err) => return Err(err),
         };
         let response: ListReleaseSummariesResponse = serde_json::from_str(&body)
             .map_err(|e| StackError::decode(format!("tracks.releases.list response: {e}")))?;
-        Ok(response
+        let summaries: Vec<ReleaseSummaryInfo> = response
             .releases
             .into_iter()
             .map(|summary| summary.into_info(track))
-            .collect())
+            .collect();
+        logging::debug(target::PLAY_TRACKS, || {
+            format!(
+                "release summaries of {package_name} track {track}: {}",
+                describe_summaries(&summaries)
+            )
+        });
+        Ok(summaries)
     }
 }
 
@@ -281,11 +320,41 @@ mod tests {
             .mount(&server)
             .await;
 
+        let logs = crate::logging::testing::capture_logs();
         let summaries = client(&server)
             .fetch_release_summaries(PACKAGE, "my track")
             .await
             .unwrap();
         assert!(summaries.is_empty());
+        assert_eq!(
+            logs.messages(crate::logging::LogLevel::Info, "googleplay.tracks"),
+            [
+                "release summaries of com.example.app track my track: Google answered 404, read \
+              as an unknown track; returning no releases"
+            ]
+        );
+    }
+
+    #[test]
+    fn describe_summaries_lists_name_state_and_codes() {
+        assert_eq!(describe_summaries(&[]), "no releases");
+        assert_eq!(
+            describe_summaries(&[
+                ReleaseSummaryInfo {
+                    track: "production".into(),
+                    name: Some("1.2".into()),
+                    lifecycle_state: Some("IN_REVIEW".into()),
+                    version_codes: vec!["1002".into()],
+                },
+                ReleaseSummaryInfo {
+                    track: "production".into(),
+                    name: None,
+                    lifecycle_state: None,
+                    version_codes: vec!["1000".into(), "1001".into()],
+                },
+            ]),
+            "2 release(s): \"1.2\" IN_REVIEW [1002]; ? [1000, 1001]"
+        );
     }
 
     #[tokio::test]

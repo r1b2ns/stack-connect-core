@@ -25,6 +25,7 @@ use super::non_blank;
 use super::timestamp::Timestamp;
 use crate::domain::{CustomerReview, CustomerReviewsPage, ReviewResponse};
 use crate::error::StackError;
+use crate::logging::{self, target};
 
 /// The largest `maxResults` Google documents for `reviews.list` (default 10).
 const MAX_PAGE_SIZE: u32 = 100;
@@ -324,11 +325,18 @@ impl GooglePlayClient {
         let mut seen_tokens = HashSet::new();
         let mut token: Option<String> = None;
 
-        for _ in 0..MAX_PAGES {
+        for page_number in 1..=MAX_PAGES {
             let page = self
                 .list_reviews(package_name, MAX_PAGE_SIZE, token.as_deref())
                 .await?;
             let next = page.next_page_token();
+            logging::debug(target::PLAY_REVIEWS, || {
+                format!(
+                    "reviews of {package_name}: page {page_number}: {} reviews, next page: {}",
+                    page.reviews.len(),
+                    if next.is_some() { "yes" } else { "no" }
+                )
+            });
             reviews.extend(
                 page.reviews
                     .into_iter()
@@ -336,7 +344,15 @@ impl GooglePlayClient {
             );
 
             match next {
-                None => return Ok(reviews),
+                None => {
+                    logging::debug(target::PLAY_REVIEWS, || {
+                        format!(
+                            "reviews of {package_name}: {} reviews over {page_number} page(s)",
+                            reviews.len()
+                        )
+                    });
+                    return Ok(reviews);
+                }
                 // A token seen before would loop forever.
                 Some(next) if !seen_tokens.insert(next.clone()) => {
                     return Err(StackError::decode("reviews repeated nextPageToken"));
@@ -387,6 +403,15 @@ impl GooglePlayClient {
             .list_reviews(package_name, limit.clamp(1, MAX_PAGE_SIZE), token)
             .await?;
         let next_token = page.next_page_token();
+        logging::debug(target::PLAY_REVIEWS, || {
+            format!(
+                "reviews of {package_name}: {} page: {} reviews before the rating filter, next \
+                 page: {}",
+                if token.is_some() { "next" } else { "first" },
+                page.reviews.len(),
+                if next_token.is_some() { "yes" } else { "no" }
+            )
+        });
         let ratings = RatingFilter::new(filter_rating);
         let reviews = page
             .reviews
@@ -428,6 +453,15 @@ impl GooglePlayClient {
         let reply_segment = format!("{}:reply", key.review_id);
         let url = self.publisher_url(key.package_name, &["reviews", &reply_segment])?;
         let request_body = json!({ "replyText": body });
+        // The reply text is user content: its length only.
+        logging::info(target::PLAY_REVIEWS, || {
+            format!(
+                "replying to review {} of {} ({} chars)",
+                key.review_id,
+                key.package_name,
+                body.chars().count()
+            )
+        });
 
         let response = self
             .execute(
@@ -440,6 +474,12 @@ impl GooglePlayClient {
         let result = reply
             .result
             .ok_or_else(|| StackError::decode("review reply response: missing result"))?;
+        logging::info(target::PLAY_REVIEWS, || {
+            format!(
+                "reply to review {} of {} applied",
+                key.review_id, key.package_name
+            )
+        });
 
         Ok(ReviewResponse {
             id: review_id.to_string(),
@@ -1133,10 +1173,20 @@ mod tests {
             .mount(&server)
             .await;
 
+        let logs = crate::logging::testing::capture_logs();
         let response = client(&server)
             .reply_to_review("com.example.app/gp:AOqp", "Thanks for the feedback!")
             .await
             .unwrap();
+        // The reply's length is logged, never its text.
+        assert_eq!(
+            logs.messages(crate::logging::LogLevel::Info, "googleplay.reviews"),
+            [
+                "replying to review gp:AOqp of com.example.app (24 chars)",
+                "reply to review gp:AOqp of com.example.app applied",
+            ]
+        );
+        assert!(!logs.all_text().contains("Thanks"));
         assert_eq!(
             response,
             ReviewResponse {

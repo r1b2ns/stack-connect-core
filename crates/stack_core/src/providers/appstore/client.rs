@@ -21,6 +21,7 @@ use crate::domain::{
 };
 use crate::error::StackError;
 use crate::http_debug::{render_response, send_unbuffered};
+use crate::logging::{self, target};
 use crate::ports::DebugLogger;
 
 const DEFAULT_BASE_URL: &str = "https://api.appstoreconnect.apple.com";
@@ -2994,6 +2995,12 @@ impl AppStoreClient {
         //    Reuse is best-effort — a stale draft may reject the new item, so any
         //    failure here falls back to the create-new flow below.
         if let Some(submission_id) = self.find_reusable_empty_draft(app_id, platform).await? {
+            logging::info(target::APPSTORE, || {
+                format!(
+                    "submit_for_review: reusing empty READY_FOR_REVIEW draft {submission_id} \
+                     for app {app_id}"
+                )
+            });
             if let Some(logger) = &self.debug_logger {
                 logger.log(format!(
                     "[RustCore] submit_for_review: reusing empty READY_FOR_REVIEW \
@@ -3003,6 +3010,12 @@ impl AppStoreClient {
             match self.attach_and_submit(&submission_id, version_id).await {
                 Ok(()) => return Ok(()),
                 Err(err) => {
+                    logging::warn(target::APPSTORE, || {
+                        format!(
+                            "submit_for_review: reuse of draft {submission_id} failed \
+                             ({err}); falling back to creating a new review submission"
+                        )
+                    });
                     if let Some(logger) = &self.debug_logger {
                         logger.log(format!(
                             "[RustCore] submit_for_review: reuse of draft \
@@ -3017,6 +3030,9 @@ impl AppStoreClient {
         }
 
         // 2. Create a fresh review submission (original flow).
+        logging::info(target::APPSTORE, || {
+            format!("submit_for_review: creating a new review submission for app {app_id}")
+        });
         if let Some(logger) = &self.debug_logger {
             logger.log(format!(
                 "[RustCore] submit_for_review: creating a new review submission \
@@ -3569,6 +3585,12 @@ impl AppStoreClient {
             // Still an un-submitted draft after removing items → it was empty and
             // there is no API path to clear it. Report honestly.
             Some(Some(state)) if state == "READY_FOR_REVIEW" => {
+                logging::warn(target::APPSTORE, || {
+                    format!(
+                        "review submission {submission_id} still READY_FOR_REVIEW after item \
+                         removal (empty draft, not removable via the ASC API)"
+                    )
+                });
                 if let Some(logger) = &self.debug_logger {
                     logger.log(format!(
                         "[RustCore] review submission {submission_id} still \

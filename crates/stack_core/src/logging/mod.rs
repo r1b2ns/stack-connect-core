@@ -64,8 +64,16 @@ pub(crate) mod target {
     /// Google Play: transport-level checks shared by every call (package
     /// names), and the apps listing (`apps:search`).
     pub(crate) const PLAY: &str = "googleplay";
+    /// Google Play: edit sessions (insert / commit / delete).
+    pub(crate) const PLAY_EDITS: &str = "googleplay.edits";
     /// Google Play: track reads, release summaries and release changes.
     pub(crate) const PLAY_TRACKS: &str = "googleplay.tracks";
+    /// Google Play: reviews and replies.
+    pub(crate) const PLAY_REVIEWS: &str = "googleplay.reviews";
+    /// Google Play: icons from the public store page.
+    pub(crate) const PLAY_ICONS: &str = "googleplay.icons";
+    /// App Store Connect provider flows.
+    pub(crate) const APPSTORE: &str = "appstore";
     /// Google Play: developer-account users and grants.
     pub(crate) const PLAY_USERS: &str = "googleplay.users";
 }

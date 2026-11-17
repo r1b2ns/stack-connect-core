@@ -17,6 +17,7 @@ use std::sync::Arc;
 use super::client::is_valid_package_name;
 use crate::error::StackError;
 use crate::http_debug::send_and_read_capped;
+use crate::logging::{self, target};
 use crate::ports::DebugLogger;
 
 /// Where the public store pages live.
@@ -119,6 +120,12 @@ impl StorePageClient {
         package_name: &str,
     ) -> Result<Option<String>, StackError> {
         if !is_valid_package_name(package_name) {
+            logging::debug(target::PLAY_ICONS, || {
+                format!(
+                    "{package_name:?} is not a valid package name, so it has no store page; \
+                     no icon (request not sent)"
+                )
+            });
             self.trace(|| {
                 format!(
                     "[RustCore] Google Play icon: {package_name:?} is not a valid package \
@@ -137,6 +144,12 @@ impl StorePageClient {
         .await?;
 
         if status == reqwest::StatusCode::NOT_FOUND {
+            logging::debug(target::PLAY_ICONS, || {
+                format!(
+                    "no store page for {package_name} (unpublished or not visible in the \
+                     store); no icon"
+                )
+            });
             self.trace(|| {
                 format!(
                     "[RustCore] Google Play icon: no store page for {package_name} \
@@ -157,6 +170,12 @@ impl StorePageClient {
 
         let icon = icon_url_from_page(&body);
         if icon.is_none() {
+            logging::info(target::PLAY_ICONS, || {
+                format!(
+                    "the store page for {package_name} has no usable og:image (e.g. a \
+                     consent page was served instead); no icon"
+                )
+            });
             self.trace(|| {
                 format!(
                     "[RustCore] Google Play icon: the store page for {package_name} has no \
@@ -871,10 +890,18 @@ mod tests {
         let logger = Arc::new(CapturingLogger::default());
         let client = store_page_client(&server).with_debug_logger(Some(logger.clone()));
 
+        let logs = crate::logging::testing::capture_logs();
         for package in ["", "not a package", "com", "com.example/../x", "a&b.c"] {
             assert_eq!(client.fetch_icon_url(package).await.unwrap(), None);
         }
         assert!(server.received_requests().await.unwrap().is_empty());
+        let debug = logs.messages(crate::logging::LogLevel::Debug, "googleplay.icons");
+        assert_eq!(debug.len(), 5);
+        assert_eq!(
+            debug[1],
+            "\"not a package\" is not a valid package name, so it has no store page; no icon \
+             (request not sent)"
+        );
         let messages = logger.messages();
         assert_eq!(messages.len(), 5);
         assert!(messages

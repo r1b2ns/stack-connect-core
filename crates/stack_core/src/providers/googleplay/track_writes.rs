@@ -21,8 +21,12 @@ use super::error::{
     ErrorHints, GoogleApi, Target, PERMISSION_RELEASE_PRODUCTION, PERMISSION_RELEASE_TESTING,
 };
 use super::release_change::{self, Release};
-use crate::domain::{ChangesInReviewBehavior, CommitOptions, ReleaseChange, TrackInfo};
+use crate::domain::{
+    ChangesInReviewBehavior, CommitOptions, NewReleaseStatus, ReleaseChange, TrackInfo,
+    TrackReleaseInfo,
+};
 use crate::error::StackError;
+use crate::logging::{self, target};
 
 /// The `tracks` collection inside an edit.
 const TRACKS: &str = "tracks";
@@ -79,6 +83,97 @@ fn releases_of(track: &Map<String, Value>) -> Result<Vec<Release>, StackError> {
     }
 }
 
+/// `[1001, 1002]`.
+fn codes(version_codes: &[String]) -> String {
+    format!("[{}]", version_codes.join(", "))
+}
+
+fn describe_status(status: &NewReleaseStatus) -> String {
+    match status {
+        NewReleaseStatus::Draft => "draft".to_string(),
+        NewReleaseStatus::InProgress { user_fraction } => {
+            format!("inProgress at {user_fraction}")
+        }
+        NewReleaseStatus::Completed => "completed".to_string(),
+    }
+}
+
+/// A one-line summary of a release change for the log: its kind, the version
+/// codes it targets and the values it sets. Release notes are counted, never
+/// quoted (they are user content).
+fn describe_change(change: &ReleaseChange) -> String {
+    match change {
+        ReleaseChange::SetRollout {
+            version_codes,
+            user_fraction,
+        } => format!("SetRollout {} to {user_fraction}", codes(version_codes)),
+        ReleaseChange::Halt { version_codes } => format!("Halt {}", codes(version_codes)),
+        ReleaseChange::Resume { version_codes } => format!("Resume {}", codes(version_codes)),
+        ReleaseChange::Complete { version_codes } => {
+            format!("Complete {}", codes(version_codes))
+        }
+        ReleaseChange::UpdateMetadata {
+            version_codes,
+            update,
+        } => {
+            let mut fields = Vec::new();
+            if update.name.is_some() {
+                fields.push("name".to_string());
+            }
+            if let Some(notes) = &update.release_notes {
+                fields.push(format!("release notes ({} languages)", notes.len()));
+            }
+            if let Some(priority) = update.in_app_update_priority {
+                fields.push(format!("priority {priority}"));
+            }
+            if update.country_targeting.is_some() {
+                fields.push("country targeting".to_string());
+            }
+            let fields = if fields.is_empty() {
+                "nothing".to_string()
+            } else {
+                fields.join(", ")
+            };
+            format!("UpdateMetadata {} ({fields})", codes(version_codes))
+        }
+        ReleaseChange::CreateRelease { release } => format!(
+            "CreateRelease {} as {} ({} release-note languages)",
+            codes(&release.version_codes),
+            describe_status(&release.status),
+            release.release_notes.len()
+        ),
+        ReleaseChange::Promote {
+            from_track,
+            version_codes,
+            status,
+            ..
+        } => format!(
+            "Promote {} from {from_track} as {}",
+            codes(version_codes),
+            describe_status(status)
+        ),
+    }
+}
+
+/// `completed [1001]; inProgress [1002] at 0.1`, or `no releases`.
+fn describe_releases(releases: &[TrackReleaseInfo]) -> String {
+    if releases.is_empty() {
+        return "no releases".to_string();
+    }
+    releases
+        .iter()
+        .map(|release| {
+            let status = release.status.as_deref().unwrap_or("?");
+            let mut line = format!("{status} {}", codes(&release.version_codes));
+            if let Some(fraction) = release.user_fraction {
+                line.push_str(&format!(" at {fraction}"));
+            }
+            line
+        })
+        .collect::<Vec<_>>()
+        .join("; ")
+}
+
 impl GooglePlayClient {
     /// Applies `change` to `track` of `package_name` and publishes it, in one
     /// edit (see the module docs), returning the track as Google stored it.
@@ -105,6 +200,12 @@ impl GooglePlayClient {
         options: CommitOptions,
     ) -> Result<TrackInfo, StackError> {
         release_change::validate(change, track)?;
+        logging::info(target::PLAY_TRACKS, || {
+            format!(
+                "release change on {package_name} track {track}: {}",
+                describe_change(change)
+            )
+        });
         let permission = release_permission(track);
         let hints = ErrorHints {
             api: GoogleApi::Publisher,
@@ -149,10 +250,20 @@ impl GooglePlayClient {
             let stored = self
                 .update_track(package_name, &edit_id, track, &target, &hints)
                 .await?;
+            logging::debug(target::PLAY_TRACKS, || {
+                format!("edit {edit_id}: track {track} updated; validating")
+            });
             self.post_edit_action(package_name, &edit_id, "validate", &[], &hints)
                 .await?;
             self.commit_edit(package_name, &edit_id, options, &hints)
                 .await?;
+            logging::info(target::PLAY_TRACKS, || {
+                format!(
+                    "release change on {package_name} track {track} committed in edit \
+                     {edit_id}; track now: {}",
+                    describe_releases(&stored.releases)
+                )
+            });
             Ok(stored)
         })
         .await
@@ -233,6 +344,18 @@ impl GooglePlayClient {
         if let Some(behavior) = options.changes_in_review_behavior {
             query.push(("changesInReviewBehavior", behavior.as_query()));
         }
+        logging::info(target::PLAY_EDITS, || {
+            let options = if query.is_empty() {
+                "default options".to_string()
+            } else {
+                query
+                    .iter()
+                    .map(|(key, value)| format!("{key}={value}"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            };
+            format!("committing edit {edit_id} of {package_name} ({options})")
+        });
         let body = self
             .post_edit_action(package_name, edit_id, "commit", &query, hints)
             .await?;
@@ -248,6 +371,7 @@ mod tests {
     use crate::domain::{
         LocalizedTextInfo, NewRelease, NewReleaseStatus, ReleaseMetadataUpdate, TrackReleaseInfo,
     };
+    use crate::logging::testing::capture_logs;
     use crate::providers::googleplay::test_support::{client, mount_token, CapturingLogger};
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
@@ -526,6 +650,194 @@ mod tests {
                 .await
                 .unwrap();
         }
+    }
+
+    /// `Level [target] message` of every Google Play line (no HTTP/auth).
+    fn play_lines(logs: &crate::logging::testing::Capture) -> Vec<String> {
+        logs.records()
+            .into_iter()
+            .filter(|r| r.target.starts_with("googleplay."))
+            .map(|r| format!("{:?} [{}] {}", r.level, r.target, r.message))
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn host_log_follows_a_committed_release_change() {
+        let server = MockServer::start().await;
+        mount_token(&server, "tok-1", 1).await;
+        mount_read(&server, production()).await;
+        track_put("E1", "production")
+            .respond_with(Echo)
+            .mount(&server)
+            .await;
+        mount_validate_and_commit(&server).await;
+
+        let logs = capture_logs();
+        client(&server)
+            .apply_release_change(
+                PACKAGE,
+                "production",
+                &ReleaseChange::SetRollout {
+                    version_codes: codes(&["42"]),
+                    user_fraction: 0.5,
+                },
+                CommitOptions {
+                    send_for_review: false,
+                    changes_in_review_behavior: Some(ChangesInReviewBehavior::ErrorIfInReview),
+                },
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            play_lines(&logs),
+            [
+                "Info [googleplay.tracks] release change on com.example.app track production: \
+                 SetRollout [42] to 0.5",
+                "Info [googleplay.edits] edit E1 opened on com.example.app (write)",
+                "Debug [googleplay.tracks] edit E1: track production updated; validating",
+                "Info [googleplay.edits] committing edit E1 of com.example.app \
+                 (changesNotSentForReview=true, changesInReviewBehavior=ERROR_IF_IN_REVIEW)",
+                "Info [googleplay.tracks] release change on com.example.app track production \
+                 committed in edit E1; track now: inProgress [42] at 0.5; completed [40]",
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn host_log_shows_a_refused_release_change_and_the_deleted_edit() {
+        let server = MockServer::start().await;
+        mount_token(&server, "tok-1", 1).await;
+        mount_read(&server, production()).await;
+        track_put("E1", "production")
+            .respond_with(Echo)
+            .mount(&server)
+            .await;
+        action("E1", "validate")
+            .respond_with(google_error(400, "Release notes are too long."))
+            .mount(&server)
+            .await;
+        delete("E1")
+            .respond_with(ResponseTemplate::new(204))
+            .mount(&server)
+            .await;
+
+        let logs = capture_logs();
+        client(&server)
+            .apply_release_change(
+                PACKAGE,
+                "production",
+                &ReleaseChange::Halt {
+                    version_codes: codes(&["42"]),
+                },
+                SEND,
+            )
+            .await
+            .unwrap_err();
+
+        assert_eq!(
+            play_lines(&logs),
+            [
+                "Info [googleplay.tracks] release change on com.example.app track production: \
+                 Halt [42]",
+                "Info [googleplay.edits] edit E1 opened on com.example.app (write)",
+                "Debug [googleplay.tracks] edit E1: track production updated; validating",
+                "Warn [googleplay.edits] edit E1 of com.example.app failed (write): HTTP 400: \
+                 Release notes are too long. (HTTP 400 on POST \
+                 applications/com.example.app/edits/E1:validate); deleting it, nothing is \
+                 committed",
+                "Info [googleplay.edits] edit E1 of com.example.app deleted",
+            ]
+        );
+    }
+
+    #[test]
+    fn describe_change_names_the_kind_codes_and_values_but_never_note_text() {
+        let note = LocalizedTextInfo {
+            language: "en-US".into(),
+            text: "secret launch notes".into(),
+        };
+        let cases = [
+            (
+                ReleaseChange::SetRollout {
+                    version_codes: codes(&["1", "2"]),
+                    user_fraction: 0.25,
+                },
+                "SetRollout [1, 2] to 0.25",
+            ),
+            (
+                ReleaseChange::Halt {
+                    version_codes: codes(&["3"]),
+                },
+                "Halt [3]",
+            ),
+            (
+                ReleaseChange::Resume {
+                    version_codes: codes(&["3"]),
+                },
+                "Resume [3]",
+            ),
+            (
+                ReleaseChange::Complete {
+                    version_codes: codes(&["3"]),
+                },
+                "Complete [3]",
+            ),
+            (
+                ReleaseChange::UpdateMetadata {
+                    version_codes: codes(&["3"]),
+                    update: ReleaseMetadataUpdate {
+                        name: Some("n".into()),
+                        release_notes: Some(vec![note.clone()]),
+                        in_app_update_priority: Some(4),
+                        country_targeting: None,
+                    },
+                },
+                "UpdateMetadata [3] (name, release notes (1 languages), priority 4)",
+            ),
+            (
+                ReleaseChange::UpdateMetadata {
+                    version_codes: codes(&["3"]),
+                    update: ReleaseMetadataUpdate::default(),
+                },
+                "UpdateMetadata [3] (nothing)",
+            ),
+            (
+                ReleaseChange::CreateRelease {
+                    release: NewRelease {
+                        version_codes: codes(&["5"]),
+                        name: None,
+                        release_notes: vec![note.clone()],
+                        status: NewReleaseStatus::InProgress { user_fraction: 0.1 },
+                        in_app_update_priority: None,
+                        country_targeting: None,
+                    },
+                },
+                "CreateRelease [5] as inProgress at 0.1 (1 release-note languages)",
+            ),
+            (
+                ReleaseChange::Promote {
+                    from_track: "beta".into(),
+                    version_codes: codes(&["5"]),
+                    status: NewReleaseStatus::Completed,
+                    name: None,
+                    release_notes: Some(vec![note]),
+                    in_app_update_priority: None,
+                    country_targeting: None,
+                },
+                "Promote [5] from beta as completed",
+            ),
+        ];
+        for (change, expected) in cases {
+            let described = describe_change(&change);
+            assert_eq!(described, expected);
+            assert!(!described.contains("secret"));
+        }
+        assert_eq!(
+            describe_status(&NewReleaseStatus::Draft),
+            "draft".to_string()
+        );
+        assert_eq!(describe_releases(&[]), "no releases");
     }
 
     #[tokio::test]

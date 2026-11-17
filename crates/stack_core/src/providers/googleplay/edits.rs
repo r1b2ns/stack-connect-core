@@ -24,6 +24,7 @@ use crate::domain::{
     TrackInfo, TrackReleaseInfo,
 };
 use crate::error::StackError;
+use crate::logging::{self, target, LogLevel};
 
 /// The `edits` collection under an app.
 pub(super) const EDITS: &str = "edits";
@@ -300,16 +301,45 @@ impl GooglePlayClient {
     {
         let _session = self.edit_lock().lock().await;
         let edit_id = self.insert_edit(package_name, permission).await?;
+        // A write session is worth an Info line: it is what can publish.
+        let level = if delete_on_success {
+            LogLevel::Debug
+        } else {
+            LogLevel::Info
+        };
+        let purpose = if delete_on_success { "read" } else { "write" };
+        logging::log(level, target::PLAY_EDITS, || {
+            format!("edit {edit_id} opened on {package_name} ({purpose})")
+        });
         let result = work(edit_id.clone()).await;
 
+        if let Err(err) = &result {
+            logging::warn(target::PLAY_EDITS, || {
+                format!(
+                    "edit {edit_id} of {package_name} failed ({purpose}): {err}; deleting it, \
+                     nothing is committed"
+                )
+            });
+        }
         if delete_on_success || result.is_err() {
-            if let Err(err) = self.delete_edit(package_name, &edit_id).await {
-                self.trace(|| {
-                    format!(
-                        "[RustCore] Google Play: could not delete edit {edit_id} of \
-                         {package_name} (ignored; it expires on its own): {err}"
-                    )
-                });
+            match self.delete_edit(package_name, &edit_id).await {
+                Ok(()) => logging::log(level, target::PLAY_EDITS, || {
+                    format!("edit {edit_id} of {package_name} deleted")
+                }),
+                Err(err) => {
+                    logging::warn(target::PLAY_EDITS, || {
+                        format!(
+                            "could not delete edit {edit_id} of {package_name} (ignored; it \
+                             expires on its own): {err}"
+                        )
+                    });
+                    self.trace(|| {
+                        format!(
+                            "[RustCore] Google Play: could not delete edit {edit_id} of \
+                             {package_name} (ignored; it expires on its own): {err}"
+                        )
+                    });
+                }
             }
         }
         result
@@ -1173,5 +1203,33 @@ mod tests {
             StackError::Decode { message } => assert!(message.contains("edits.bundles response")),
             other => panic!("expected Decode, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn host_log_shows_a_read_session_at_debug() {
+        let server = MockServer::start().await;
+        mount_token(&server, "tok-1", 1).await;
+        mount_session(
+            &server,
+            "details",
+            ResponseTemplate::new(200).set_body_json(serde_json::json!({})),
+            ResponseTemplate::new(204),
+        )
+        .await;
+
+        let logs = crate::logging::testing::capture_logs();
+        client(&server).fetch_app_details(PACKAGE).await.unwrap();
+
+        assert_eq!(
+            logs.messages(crate::logging::LogLevel::Debug, "googleplay.edits"),
+            [
+                "edit E1 opened on com.example.app (read)",
+                "edit E1 of com.example.app deleted",
+            ]
+        );
+        assert!(logs
+            .records()
+            .iter()
+            .all(|r| r.target != "googleplay.edits" || r.level == crate::logging::LogLevel::Debug));
     }
 }

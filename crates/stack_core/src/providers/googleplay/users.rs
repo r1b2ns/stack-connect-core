@@ -18,7 +18,7 @@ use super::non_blank;
 use crate::domain::{PlayGrantInfo, PlayUserInfo};
 use crate::error::StackError;
 use crate::logging::redact::{mask_email, quoted, shape};
-use crate::logging::target;
+use crate::logging::{self, target};
 
 /// The `users` collection under a developer account.
 const USERS: &str = "users";
@@ -163,6 +163,21 @@ fn hints(target: Target<'_>) -> ErrorHints<'_> {
     }
 }
 
+/// `developers/{id}/users/{masked e-mail}`, for the log.
+fn user_resource(developer_id: &str, email: &str) -> String {
+    format!("developers/{developer_id}/users/{}", mask_email(email))
+}
+
+/// Logs how a write ended: `Info` `"{operation}: done"` or `Warn`
+/// `"{operation}: failed: {err}"`, and hands `result` back.
+fn log_outcome<T>(operation: &str, result: Result<T, StackError>) -> Result<T, StackError> {
+    match &result {
+        Ok(_) => logging::info(target::PLAY_USERS, || format!("{operation}: done")),
+        Err(err) => logging::warn(target::PLAY_USERS, || format!("{operation}: failed: {err}")),
+    }
+    result
+}
+
 fn user_name(developer_id: &str, email: &str) -> String {
     format!("developers/{developer_id}/users/{email}")
 }
@@ -201,8 +216,11 @@ impl GooglePlayClient {
         let mut users = Vec::new();
         let mut seen_tokens = HashSet::new();
         let mut page_token: Option<String> = None;
+        logging::debug(target::PLAY_USERS, || {
+            format!("users.list developers/{developer_id}/users")
+        });
 
-        for _ in 0..MAX_PAGES {
+        for page_number in 1..=MAX_PAGES {
             let body = self
                 .execute(
                     || {
@@ -220,10 +238,28 @@ impl GooglePlayClient {
                 .await?;
             let page: ListUsersResponse = serde_json::from_str(&body)
                 .map_err(|e| StackError::decode(format!("users.list response: {e}")))?;
+            let received = page.users.len();
             users.extend(page.users.into_iter().filter_map(PlayUser::into_info));
+            let next = page.next_page_token.filter(|t| !t.trim().is_empty());
+            logging::debug(target::PLAY_USERS, || {
+                format!(
+                    "users.list developers/{developer_id}/users: page {page_number}: \
+                     {received} users, next page: {}",
+                    if next.is_some() { "yes" } else { "no" }
+                )
+            });
 
-            match page.next_page_token.filter(|t| !t.trim().is_empty()) {
-                None => return Ok(users),
+            match next {
+                None => {
+                    logging::info(target::PLAY_USERS, || {
+                        format!(
+                            "users.list developers/{developer_id}/users: {} users over \
+                             {page_number} page(s)",
+                            users.len()
+                        )
+                    });
+                    return Ok(users);
+                }
                 Some(next) if !seen_tokens.insert(next.clone()) => {
                     return Err(StackError::decode("users.list repeated nextPageToken"));
                 }
@@ -256,6 +292,19 @@ impl GooglePlayClient {
             ensure_grant_app(&grant.package_name)?;
         }
         let url = self.developer_url(developer_id, &[USERS])?;
+        logging::info(target::PLAY_USERS, || {
+            format!(
+                "users.create {}: {} account permissions, {} grants, {}",
+                user_resource(developer_id, email),
+                account_permissions.len(),
+                grants.len(),
+                if expiration_time.is_some() {
+                    "with an expiry"
+                } else {
+                    "no expiry"
+                }
+            )
+        });
 
         let mut body = Map::new();
         body.insert("name".into(), json!(user_name(developer_id, email)));
@@ -267,13 +316,17 @@ impl GooglePlayClient {
         if let Some(expiration) = expiration_time {
             body.insert("expirationTime".into(), json!(expiration));
         }
-        let response = self
+        let created_user = self
             .execute(
                 || self.http().post(url.clone()).json(&body),
                 &hints(Target::Developer(developer_id)),
             )
-            .await?;
-        let mut user = decode_user(&response, "users.create")?;
+            .await
+            .and_then(|response| decode_user(&response, "users.create"));
+        let mut user = log_outcome(
+            &format!("users.create {}", user_resource(developer_id, email)),
+            created_user,
+        )?;
 
         let mut created = Vec::with_capacity(grants.len());
         for grant in grants {
@@ -288,7 +341,24 @@ impl GooglePlayClient {
             {
                 Ok(stored) => created.push(stored),
                 Err(err) => {
+                    logging::warn(target::PLAY_USERS, || {
+                        format!(
+                            "grant for {} failed after {} of {} grants; rolling back the \
+                             invitation of {}",
+                            grant.package_name,
+                            created.len(),
+                            grants.len(),
+                            user_resource(developer_id, email)
+                        )
+                    });
                     if let Err(cleanup) = self.delete_user(developer_id, email).await {
+                        logging::warn(target::PLAY_USERS, || {
+                            format!(
+                                "rollback: could not remove the invitation of {} (ignored): \
+                                 {cleanup}",
+                                user_resource(developer_id, email)
+                            )
+                        });
                         self.trace(|| {
                             format!(
                                 "[RustCore] Google Play: could not remove the invitation of \
@@ -320,6 +390,17 @@ impl GooglePlayClient {
     ) -> Result<PlayUserInfo, StackError> {
         ensure_email(email)?;
         let url = self.developer_url(developer_id, &[USERS, email])?;
+        let operation = format!(
+            "users.patch {} ({} account permissions, {})",
+            user_resource(developer_id, email),
+            account_permissions.len(),
+            if expiration_time.is_some() {
+                "expiry set"
+            } else {
+                "expiry cleared"
+            }
+        );
+        logging::info(target::PLAY_USERS, || operation.clone());
         let mut body = Map::new();
         body.insert("name".into(), json!(user_name(developer_id, email)));
         body.insert(
@@ -329,7 +410,7 @@ impl GooglePlayClient {
         if let Some(expiration) = expiration_time {
             body.insert("expirationTime".into(), json!(expiration));
         }
-        let response = self
+        let updated = self
             .execute(
                 || {
                     self.http()
@@ -339,8 +420,9 @@ impl GooglePlayClient {
                 },
                 &hints(Target::DeveloperResource(developer_id)),
             )
-            .await?;
-        decode_user(&response, "users.patch")
+            .await
+            .and_then(|response| decode_user(&response, "users.patch"));
+        log_outcome(&operation, updated)
     }
 
     /// `users.delete`.
@@ -354,12 +436,16 @@ impl GooglePlayClient {
     ) -> Result<(), StackError> {
         ensure_email(email)?;
         let url = self.developer_url(developer_id, &[USERS, email])?;
-        self.execute(
-            || self.http().delete(url.clone()),
-            &hints(Target::DeveloperResource(developer_id)),
-        )
-        .await
-        .map(|_| ())
+        let operation = format!("users.delete {}", user_resource(developer_id, email));
+        logging::info(target::PLAY_USERS, || operation.clone());
+        let deleted = self
+            .execute(
+                || self.http().delete(url.clone()),
+                &hints(Target::DeveloperResource(developer_id)),
+            )
+            .await
+            .map(|_| ());
+        log_outcome(&operation, deleted)
     }
 
     /// Updates the grant (`grants.patch` with [`GRANT_UPDATE_MASK`]); when
@@ -381,6 +467,12 @@ impl GooglePlayClient {
             "name": format!("{}/grants/{package_name}", user_name(developer_id, email)),
             "appLevelPermissions": app_level_permissions,
         });
+        let operation = format!(
+            "grants.patch {}/grants/{package_name} ({} app permissions)",
+            user_resource(developer_id, email),
+            app_level_permissions.len()
+        );
+        logging::info(target::PLAY_USERS, || operation.clone());
         let patched = self
             .execute(
                 || {
@@ -393,12 +485,15 @@ impl GooglePlayClient {
             )
             .await;
         match patched {
-            Ok(response) => decode_grant(&response, "grants.patch"),
+            Ok(response) => log_outcome(&operation, decode_grant(&response, "grants.patch")),
             Err(StackError::Http { status: 404, .. }) => {
+                logging::info(target::PLAY_USERS, || {
+                    format!("{operation}: no grant for this app yet (HTTP 404); creating it")
+                });
                 self.create_grant(developer_id, email, package_name, app_level_permissions)
                     .await
             }
-            Err(err) => Err(err),
+            Err(err) => log_outcome(&operation, Err(err)),
         }
     }
 
@@ -415,12 +510,19 @@ impl GooglePlayClient {
         ensure_email(email)?;
         ensure_grant_app(package_name)?;
         let url = self.developer_url(developer_id, &[USERS, email, GRANTS, package_name])?;
-        self.execute(
-            || self.http().delete(url.clone()),
-            &hints(Target::DeveloperResource(developer_id)),
-        )
-        .await
-        .map(|_| ())
+        let operation = format!(
+            "grants.delete {}/grants/{package_name}",
+            user_resource(developer_id, email)
+        );
+        logging::info(target::PLAY_USERS, || operation.clone());
+        let deleted = self
+            .execute(
+                || self.http().delete(url.clone()),
+                &hints(Target::DeveloperResource(developer_id)),
+            )
+            .await
+            .map(|_| ());
+        log_outcome(&operation, deleted)
     }
 
     /// `grants.create` under the user.
@@ -437,13 +539,20 @@ impl GooglePlayClient {
             "packageName": package_name,
             "appLevelPermissions": app_level_permissions,
         });
-        let response = self
+        let operation = format!(
+            "grants.create {}/grants/{package_name} ({} app permissions)",
+            user_resource(developer_id, email),
+            app_level_permissions.len()
+        );
+        logging::info(target::PLAY_USERS, || operation.clone());
+        let created = self
             .execute(
                 || self.http().post(url.clone()).json(&body),
                 &hints(Target::DeveloperResource(developer_id)),
             )
-            .await?;
-        decode_grant(&response, "grants.create")
+            .await
+            .and_then(|response| decode_grant(&response, "grants.create"));
+        log_outcome(&operation, created)
     }
 }
 
@@ -1029,6 +1138,175 @@ mod tests {
             .last()
             .unwrap()
             .contains("could not remove the invitation of ana@example.com"));
+    }
+
+    /// `Level message` of every `googleplay.users` line.
+    fn user_lines(logs: &crate::logging::testing::Capture) -> Vec<String> {
+        logs.records()
+            .into_iter()
+            .filter(|r| r.target == "googleplay.users")
+            .map(|r| format!("{:?} {}", r.level, r.message))
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn host_log_follows_an_invitation_its_failed_grant_and_the_rollback() {
+        let server = MockServer::start().await;
+        mount_token(&server, "tok-1", 1).await;
+        Mock::given(method("POST"))
+            .and(path(USERS_PATH))
+            .respond_with(created_user())
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path(format!("{USERS_PATH}/{EMAIL}/grants")))
+            .and(body_json(serde_json::json!({
+                "name": format!("developers/{DEV}/users/{EMAIL}/grants/com.example.ok"),
+                "packageName": "com.example.ok",
+                "appLevelPermissions": ["CAN_VIEW_NON_FINANCIAL_DATA"],
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "packageName": "com.example.ok",
+                "appLevelPermissions": ["CAN_VIEW_NON_FINANCIAL_DATA"],
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path(format!("{USERS_PATH}/{EMAIL}/grants")))
+            .respond_with(google_error(400, "Unknown package com.example.gone."))
+            .mount(&server)
+            .await;
+        Mock::given(method("DELETE"))
+            .and(path(user_path(EMAIL)))
+            .respond_with(ResponseTemplate::new(200).set_body_string("{}"))
+            .mount(&server)
+            .await;
+
+        let logs = capture_logs();
+        client(&server)
+            .invite_user(
+                DEV,
+                EMAIL,
+                &["CAN_SEE_ALL_APPS".to_string()],
+                &[
+                    PlayGrantInfo {
+                        package_name: "com.example.ok".into(),
+                        app_level_permissions: vec!["CAN_VIEW_NON_FINANCIAL_DATA".into()],
+                    },
+                    PlayGrantInfo {
+                        package_name: "com.example.gone".into(),
+                        app_level_permissions: vec![],
+                    },
+                ],
+                Some("2027-01-01T00:00:00Z"),
+            )
+            .await
+            .unwrap_err();
+
+        let user = "developers/5374/users/a***@example.com";
+        assert_eq!(
+            user_lines(&logs),
+            [
+                format!(
+                    "Info users.create {user}: 1 account permissions, 2 grants, with an expiry"
+                ),
+                format!("Info users.create {user}: done"),
+                format!("Info grants.create {user}/grants/com.example.ok (1 app permissions)"),
+                format!(
+                    "Info grants.create {user}/grants/com.example.ok (1 app permissions): done"
+                ),
+                format!("Info grants.create {user}/grants/com.example.gone (0 app permissions)"),
+                format!(
+                    "Warn grants.create {user}/grants/com.example.gone (0 app permissions): \
+                     failed: HTTP 400: Unknown package com.example.gone. [X] (HTTP 400 on \
+                     POST {user}/grants)"
+                ),
+                format!(
+                    "Warn grant for com.example.gone failed after 1 of 2 grants; rolling \
+                     back the invitation of {user}"
+                ),
+                format!("Info users.delete {user}"),
+                format!("Info users.delete {user}: done"),
+            ]
+        );
+        assert!(!logs.all_text().contains("ana@"), "{}", logs.all_text());
+    }
+
+    #[tokio::test]
+    async fn host_log_counts_users_per_page() {
+        let server = MockServer::start().await;
+        mount_token(&server, "tok-1", 1).await;
+        Mock::given(method("GET"))
+            .and(path(USERS_PATH))
+            .and(query_param_is_missing("pageToken"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "users": [{"email": "a@example.com"}, {"email": "b@example.com"}],
+                "nextPageToken": "p2"
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path(USERS_PATH))
+            .and(query_param("pageToken", "p2"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "users": [{"email": "c@example.com"}]
+            })))
+            .mount(&server)
+            .await;
+
+        let logs = capture_logs();
+        let users = client(&server).fetch_users(DEV).await.unwrap();
+        assert_eq!(users.len(), 3);
+        assert_eq!(
+            user_lines(&logs),
+            [
+                "Debug users.list developers/5374/users",
+                "Debug users.list developers/5374/users: page 1: 2 users, next page: yes",
+                "Debug users.list developers/5374/users: page 2: 1 users, next page: no",
+                "Info users.list developers/5374/users: 3 users over 2 page(s)",
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn host_log_explains_the_grant_patch_fallback_to_create() {
+        let server = MockServer::start().await;
+        mount_token(&server, "tok-1", 1).await;
+        Mock::given(method("PATCH"))
+            .and(path(grant_path(EMAIL, "com.example.app")))
+            .respond_with(google_error(404, "Grant not found."))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path(format!("{USERS_PATH}/{EMAIL}/grants")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "packageName": "com.example.app",
+                "appLevelPermissions": []
+            })))
+            .mount(&server)
+            .await;
+
+        let logs = capture_logs();
+        client(&server)
+            .set_grant(DEV, EMAIL, "com.example.app", &[])
+            .await
+            .unwrap();
+
+        let user = "developers/5374/users/a***@example.com";
+        assert_eq!(
+            user_lines(&logs),
+            [
+                format!("Info grants.patch {user}/grants/com.example.app (0 app permissions)"),
+                format!(
+                    "Info grants.patch {user}/grants/com.example.app (0 app permissions): no \
+                     grant for this app yet (HTTP 404); creating it"
+                ),
+                format!("Info grants.create {user}/grants/com.example.app (0 app permissions)"),
+                format!(
+                    "Info grants.create {user}/grants/com.example.app (0 app permissions): done"
+                ),
+            ]
+        );
     }
 
     #[tokio::test]
