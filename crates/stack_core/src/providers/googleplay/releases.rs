@@ -9,7 +9,7 @@
 
 use serde::Deserialize;
 
-use super::client::GooglePlayClient;
+use super::client::{decode_list_body, is_blank_body, GooglePlayClient};
 use super::error::{ErrorHints, GoogleApi, Target, PERMISSION_VIEW_APP_INFO};
 use super::non_blank;
 use super::timestamp::Int64;
@@ -22,8 +22,10 @@ const TRACKS: &str = "tracks";
 /// The `releases` collection under a track.
 const RELEASES: &str = "releases";
 
-/// `ListReleaseSummariesResponse`. Proto3 JSON omits an empty `releases`.
-#[derive(Deserialize)]
+/// `ListReleaseSummariesResponse`. Proto3 JSON omits an empty `releases`, and
+/// Google may answer a track without releases with `204 No Content` (no body
+/// at all), read as the empty default.
+#[derive(Deserialize, Default)]
 struct ListReleaseSummariesResponse {
     #[serde(default)]
     releases: Vec<PlayReleaseSummary>,
@@ -103,8 +105,10 @@ impl GooglePlayClient {
     /// A `404` from Google is read as "this track does not exist" and answered
     /// with an empty list (Google cannot tell an unknown track from one without
     /// releases here in any way the client may rely on: the human message is
-    /// the only difference). An invalid package name is still rejected locally
-    /// with `Http 404` before any request, as everywhere else.
+    /// the only difference). A 2xx with an empty body — what Google answers
+    /// for a track without releases, `204 No Content` — is an empty list too,
+    /// as is a body without `releases`. An invalid package name is still
+    /// rejected locally with `Http 404` before any request, as everywhere else.
     ///
     /// # Errors
     /// [`StackError::Auth`] when Google denies access or the API is disabled,
@@ -122,8 +126,11 @@ impl GooglePlayClient {
             permission: PERMISSION_VIEW_APP_INFO,
             target: Target::AppResource(package_name),
         };
-        let body = match self.execute(|| self.http().get(url.clone()), &hints).await {
-            Ok(body) => body,
+        let (status, body) = match self
+            .execute_with_status(|| self.http().get(url.clone()), &hints)
+            .await
+        {
+            Ok(reply) => reply,
             Err(StackError::Http { status: 404, .. }) => {
                 logging::info(target::PLAY_TRACKS, || {
                     format!(
@@ -135,8 +142,18 @@ impl GooglePlayClient {
             }
             Err(err) => return Err(err),
         };
-        let response: ListReleaseSummariesResponse = serde_json::from_str(&body)
-            .map_err(|e| StackError::decode(format!("tracks.releases.list response: {e}")))?;
+        if is_blank_body(&body) {
+            logging::debug(target::PLAY_TRACKS, || {
+                format!(
+                    "release summaries of {package_name} track {track}: no releases \
+                     (HTTP {}, empty body)",
+                    status.as_u16()
+                )
+            });
+            return Ok(Vec::new());
+        }
+        let response: ListReleaseSummariesResponse =
+            decode_list_body(&body, "tracks.releases.list", target::PLAY_TRACKS)?;
         let summaries: Vec<ReleaseSummaryInfo> = response
             .releases
             .into_iter()
@@ -295,6 +312,49 @@ mod tests {
         mount_token(&server, "tok-1", 1).await;
         list()
             .respond_with(ResponseTemplate::new(200).set_body_string("{}"))
+            .mount(&server)
+            .await;
+
+        assert!(client(&server)
+            .fetch_release_summaries(PACKAGE, "production")
+            .await
+            .unwrap()
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn no_content_204_is_an_empty_list() {
+        let server = MockServer::start().await;
+        mount_token(&server, "tok-1", 1).await;
+        // What Google answered on a real device for a track without releases.
+        list()
+            .respond_with(ResponseTemplate::new(204))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let logs = crate::logging::testing::capture_logs();
+        let summaries = client(&server)
+            .fetch_release_summaries(PACKAGE, "production")
+            .await
+            .unwrap();
+        assert!(summaries.is_empty());
+        assert_eq!(
+            logs.messages(crate::logging::LogLevel::Debug, "googleplay.tracks"),
+            [
+                "release summaries of com.example.app track production: no releases (HTTP 204, \
+              empty body)"
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn blank_200_body_is_an_empty_list() {
+        let server = MockServer::start().await;
+        mount_token(&server, "tok-1", 1).await;
+        list()
+            .respond_with(ResponseTemplate::new(200).set_body_string(" \r\n"))
+            .expect(1)
             .mount(&server)
             .await;
 
@@ -486,6 +546,31 @@ mod tests {
         {
             StackError::Decode { message } => {
                 assert!(message.contains("tracks.releases.list response"))
+            }
+            other => panic!("expected Decode, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn truncated_body_is_still_decode() {
+        let server = MockServer::start().await;
+        mount_token(&server, "tok-1", 1).await;
+        // Only a blank body means "no releases"; a cut-off one is an error.
+        list()
+            .respond_with(ResponseTemplate::new(200).set_body_string(r#"{"releases": ["#))
+            .mount(&server)
+            .await;
+
+        match client(&server)
+            .fetch_release_summaries(PACKAGE, "production")
+            .await
+            .unwrap_err()
+        {
+            StackError::Decode { message } => {
+                assert!(
+                    message.starts_with("tracks.releases.list response: "),
+                    "{message}"
+                )
             }
             other => panic!("expected Decode, got {other:?}"),
         }

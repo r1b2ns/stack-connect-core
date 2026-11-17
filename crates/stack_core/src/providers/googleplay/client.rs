@@ -154,6 +154,38 @@ fn ensure_developer_id(id: &str) -> Result<(), StackError> {
     ))
 }
 
+/// Whether a 2xx body carries nothing to decode: Google answers some list
+/// calls on an empty collection with `204 No Content` (seen on
+/// `tracks.releases.list` for a track without releases).
+pub(super) fn is_blank_body(body: &str) -> bool {
+    body.trim().is_empty()
+}
+
+/// Decodes the 2xx body of a **list** call (`{call}` names it in errors and
+/// logs), reading a blank body (see [`is_blank_body`]) as `T::default()`, the
+/// empty list. Only for list responses, where "nothing" is a meaningful
+/// answer; a single-resource read keeps decoding strictly, so an empty body
+/// there is still [`StackError::Decode`].
+///
+/// # Errors
+/// [`StackError::Decode`] when a non-blank body is not a valid `T`.
+pub(super) fn decode_list_body<T>(
+    body: &str,
+    call: &str,
+    log_target: &'static str,
+) -> Result<T, StackError>
+where
+    T: serde::de::DeserializeOwned + Default,
+{
+    if is_blank_body(body) {
+        logging::debug(log_target, || {
+            format!("{call}: empty response body, read as an empty list")
+        });
+        return Ok(T::default());
+    }
+    serde_json::from_str(body).map_err(|e| StackError::decode(format!("{call} response: {e}")))
+}
+
 /// Google Play client: the shared transport (bearer token, one retry on 401,
 /// debug tracing, error mapping) plus the Reporting API calls that validate
 /// credentials and list apps. Reviews and edit-based reads live in sibling
@@ -311,6 +343,24 @@ impl GooglePlayClient {
     where
         F: Fn() -> reqwest::RequestBuilder + Send + Sync,
     {
+        self.execute_with_status(build, hints)
+            .await
+            .map(|(_, body)| body)
+    }
+
+    /// [`Self::execute`], also returning the 2xx status (e.g. to tell a
+    /// `204 No Content` apart in a log line).
+    ///
+    /// # Errors
+    /// As [`Self::execute`].
+    pub(super) async fn execute_with_status<F>(
+        &self,
+        build: F,
+        hints: &ErrorHints<'_>,
+    ) -> Result<(reqwest::StatusCode, String), StackError>
+    where
+        F: Fn() -> reqwest::RequestBuilder + Send + Sync,
+    {
         let mut reply = self.send_authorized(&build).await?;
         if reply.status == reqwest::StatusCode::UNAUTHORIZED {
             logging::info(target::AUTH, || {
@@ -324,7 +374,7 @@ impl GooglePlayClient {
         }
 
         if reply.status.is_success() {
-            return Ok(reply.body);
+            return Ok((reply.status, reply.body));
         }
         let status = reply.status.as_u16();
         let err = map_google_error(
@@ -475,6 +525,42 @@ mod tests {
 
     /// The real SERVICE_DISABLED 403 (same capture as the `error` tests).
     const SERVICE_DISABLED_BODY: &str = r#"{"error":{"code":403,"message":"Google Play Developer Reporting API has not been used in project 764216752430 before or it is disabled.","status":"PERMISSION_DENIED","details":[{"@type":"type.googleapis.com/google.rpc.ErrorInfo","reason":"SERVICE_DISABLED","domain":"googleapis.com","metadata":{"service":"playdeveloperreporting.googleapis.com","consumer":"projects/764216752430","containerInfo":"764216752430","serviceTitle":"Google Play Developer Reporting API","activationUrl":"https://console.developers.google.com/apis/api/playdeveloperreporting.googleapis.com/overview?project=764216752430"}}]}}"#;
+
+    #[derive(Deserialize, Default, Debug, PartialEq)]
+    struct ThingsList {
+        #[serde(default)]
+        things: Vec<u32>,
+    }
+
+    #[test]
+    fn decode_list_body_reads_a_blank_body_as_empty() {
+        let logs = crate::logging::testing::capture_logs();
+        for body in ["", " ", "\r\n\t"] {
+            let list: ThingsList = decode_list_body(body, "things.list", target::PLAY).unwrap();
+            assert_eq!(list, ThingsList::default(), "{body:?}");
+        }
+        assert_eq!(
+            logs.messages(crate::logging::LogLevel::Debug, target::PLAY),
+            vec!["things.list: empty response body, read as an empty list"; 3]
+        );
+    }
+
+    #[test]
+    fn decode_list_body_decodes_a_body_strictly() {
+        let list: ThingsList =
+            decode_list_body(r#"{"things":[1,2]}"#, "things.list", target::PLAY).unwrap();
+        assert_eq!(list.things, [1, 2]);
+        let empty: ThingsList = decode_list_body("{}", "things.list", target::PLAY).unwrap();
+        assert!(empty.things.is_empty());
+        for body in [r#"{"things":"#, "null", r#"{"things":3}"#, "<html>"] {
+            match decode_list_body::<ThingsList>(body, "things.list", target::PLAY) {
+                Err(StackError::Decode { message }) => {
+                    assert!(message.starts_with("things.list response: "), "{message}")
+                }
+                other => panic!("expected Decode for {body:?}, got {other:?}"),
+            }
+        }
+    }
 
     fn search() -> wiremock::MockBuilder {
         Mock::given(method("GET")).and(path("/v1beta1/apps:search"))
