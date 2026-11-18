@@ -8,8 +8,9 @@ use std::sync::Mutex;
 use std::collections::HashMap;
 
 use stack_core::{
-    available_services, connect, credential_schema, set_core_logger, Capability, CoreLogger,
-    CredentialStore, LogLevel, Provider, ServiceKind, StackError,
+    available_services, connect, connect_with_access_token, credential_schema, set_core_logger,
+    AccessTokenProvider, Capability, CoreLogger, CredentialStore, LogLevel, Provider, ServiceKind,
+    StackError,
 };
 
 #[test]
@@ -260,4 +261,107 @@ async fn core_logger_receives_a_local_rejection_through_the_public_api() {
     assert!(lines
         .iter()
         .all(|(_, _, message)| !message.contains("PRIVATE KEY")));
+}
+
+// ---------------------------------------------------------------------------
+// Google Play with a host-supplied access token ("Sign in with Google")
+// ---------------------------------------------------------------------------
+
+/// A host token source that fails with a fixed error and records the account
+/// ids it was asked for, so these tests stay offline: the provider fails
+/// before any request is sent.
+struct FailingTokens {
+    error: fn() -> StackError,
+    calls: Mutex<Vec<String>>,
+}
+
+impl FailingTokens {
+    fn new(error: fn() -> StackError) -> Arc<Self> {
+        Arc::new(Self {
+            error,
+            calls: Mutex::new(Vec::new()),
+        })
+    }
+}
+
+#[async_trait::async_trait]
+impl AccessTokenProvider for FailingTokens {
+    async fn access_token(&self, account_id: String) -> Result<String, StackError> {
+        self.calls.lock().unwrap().push(account_id);
+        Err((self.error)())
+    }
+}
+
+fn connect_play_with_tokens(tokens: Arc<FailingTokens>) -> Arc<Provider> {
+    match connect_with_access_token(ServiceKind::GooglePlay, "login-1".into(), tokens, None) {
+        Ok(provider) => provider,
+        Err(err) => panic!("expected a Google Play provider, got {err:?}"),
+    }
+}
+
+#[test]
+fn connect_with_access_token_google_play_has_the_service_account_capabilities() {
+    let tokens = FailingTokens::new(|| StackError::Auth {
+        message: "unused".into(),
+    });
+    let provider = connect_play_with_tokens(tokens.clone());
+    let service_account = match connect_play(PLAY_PKCS8_PEM) {
+        Ok(provider) => provider,
+        Err(err) => panic!("expected a Google Play provider, got {err:?}"),
+    };
+
+    assert_eq!(provider.kind(), ServiceKind::GooglePlay);
+    assert_eq!(provider.capabilities(), service_account.capabilities());
+    assert!(provider.play_users().is_some());
+    // Connecting is offline: the host is not asked for a token yet.
+    assert!(tokens.calls.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn connect_with_access_token_provider_failure_is_auth() {
+    let tokens = FailingTokens::new(|| StackError::Auth {
+        message: "invalid_grant".into(),
+    });
+    let provider = connect_play_with_tokens(tokens.clone());
+
+    match provider.validate().await {
+        Err(StackError::Auth { message }) => assert_eq!(message, "invalid_grant"),
+        Err(other) => panic!("expected Auth, got {other:?}"),
+        Ok(()) => panic!("expected Auth, got Ok"),
+    }
+    assert_eq!(*tokens.calls.lock().unwrap(), vec!["login-1".to_string()]);
+}
+
+#[tokio::test]
+async fn connect_with_access_token_offline_host_is_network() {
+    let tokens = FailingTokens::new(|| StackError::Network {
+        message: "offline".into(),
+    });
+    let provider = connect_play_with_tokens(tokens);
+    assert!(matches!(
+        provider.validate().await,
+        Err(StackError::Network { .. })
+    ));
+}
+
+#[test]
+fn connect_with_access_token_rejects_app_store_connect_and_blank_ids() {
+    let tokens = || -> Arc<dyn AccessTokenProvider> {
+        FailingTokens::new(|| StackError::Auth {
+            message: "unused".into(),
+        })
+    };
+    assert!(matches!(
+        connect_with_access_token(
+            ServiceKind::AppStoreConnect,
+            "acct-1".into(),
+            tokens(),
+            None
+        ),
+        Err(StackError::Unsupported { .. })
+    ));
+    assert!(matches!(
+        connect_with_access_token(ServiceKind::GooglePlay, " ".into(), tokens(), None),
+        Err(StackError::InvalidCredentials { .. })
+    ));
 }

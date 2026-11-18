@@ -51,6 +51,7 @@ calls.
 | --- | --- |
 | Credentials | `clientEmail` / `privateKeyId` / `privateKey`, which the host extracts from the service account's JSON key file. The key is parsed eagerly at `connect` (PKCS#8 or PKCS#1, raw or JSON-escaped, RSA ≥ 2048-bit), so a bad key fails there with `InvalidCredentials`. |
 | Auth | `auth::oauth_jwt`: an RS256 JWT-bearer assertion (RFC 7523) exchanged at `https://oauth2.googleapis.com/token` for the `androidpublisher` + `playdeveloperreporting` scopes; the access token is cached with a 60 s refresh margin and dropped on a 401 (the call is then retried once). |
+| Auth with "Sign in with Google" | `connect_with_access_token(.googlePlay, account_id, token_provider, debug_logger)` instead of `connect`: the host implements the `AccessTokenProvider` foreign trait (`async access_token(account_id) -> String`), which the core asks before **every** request (`auth::host_token`). The core never caches, stores or refreshes the token and never sees a refresh token; the token must carry the same two scopes. A provider failure is `Auth` (a host `Auth` keeps its message verbatim, a host `Network` passes through, a stalled host times out after 30 s as `Network`); a Google 401 is `Auth` **without** a retry, and access errors name "the signed-in Google account" instead of a service account. Quota / rate limits keep the `Http 429` shape. The token is never logged: the opt-in `DebugLogger` trace redacts its `Authorization` header. Same capabilities as a service-account provider. App Store Connect answers `Unsupported`. |
 | `Apps` | `GET https://playdeveloperreporting.googleapis.com/v1beta1/apps:search` with `pageToken` pagination (the Android Publisher API has no list-apps endpoint). `AppInfo.id` = `bundleId` = the package name; `platform` = `"ANDROID"`. |
 | `validate()` | Token exchange, then `apps:search?pageSize=1`. `Ok` means the key works and the Reporting API is enabled, not that any app is visible yet, nor that the Android Publisher API is enabled. |
 | `Reviews` | The shared `Reviews` handle, on `androidpublisher/v3/applications/{package}/reviews`. `fetch_customer_reviews` follows `tokenPagination.nextPageToken` (`maxResults=100`, at most 100 pages). `fetch_customer_reviews_page`: Play has no server-side sort or filter, so `sort` must be `""` or `-createdDate` (Google's own order, most recent first; anything else is `Unsupported`), `filter_rating` is applied to each fetched page (a page can come back short or empty while `next_token` is still set), and `limit` is clamped to 1–100. `reply_to_review` posts `reviews/{id}:reply`; the text is sent as is and Google's own error comes back if it is too long. `delete_review_response` and the three review-submission methods are `Unsupported` (Play has no equivalent). |
@@ -201,13 +202,14 @@ crates/stack_core/                    # the core crate
   src/
     auth/es256.rs                     # ES256 (P-256 / .p8) JWT for App Store Connect
     auth/oauth_jwt.rs                 # Google service-account RS256 JWT-bearer -> access token
+    auth/host_token.rs                # host-supplied bearer token (user OAuth sign-in), asked per request
     auth/token.rs                     # token cache primitives shared by the authenticators
     http_debug.rs                     # shared HTTP send + debug tracing (runnable cURL; capped, body-less variant for HTML pages)
     logging/                          # host log sink (CoreLogger): levels, targets, redaction, HTTP line formats
     domain.rs                         # uniffi::Record value types (AppInfo, ...)
     error.rs                          # StackError (uniffi::Error)
-    ports.rs                          # foreign traits: CredentialStore, BlobStore, DebugLogger, CoreLogger
-    facade.rs                         # available_services / credential_schema / connect / make_sync_service / set_core_logger
+    ports.rs                          # foreign traits: CredentialStore, BlobStore, DebugLogger, CoreLogger, AccessTokenProvider
+    facade.rs                         # available_services / credential_schema / connect / connect_with_access_token / make_sync_service / set_core_logger
     service/
       provider.rs                     # Provider + Capability (the uniform contract)
       kind.rs                         # ServiceKind / CredentialField

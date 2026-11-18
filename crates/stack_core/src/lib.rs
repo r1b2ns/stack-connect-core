@@ -49,10 +49,11 @@ pub use domain::{
 };
 pub use error::StackError;
 pub use facade::{
-    available_services, connect, credential_schema, make_sync_service, set_core_logger,
+    available_services, connect, connect_with_access_token, credential_schema, make_sync_service,
+    set_core_logger,
 };
 pub use logging::LogLevel;
-pub use ports::{BlobStore, CoreLogger, CredentialStore};
+pub use ports::{AccessTokenProvider, BlobStore, CoreLogger, CredentialStore};
 pub use service::capabilities::analytics::Analytics;
 pub use service::capabilities::app_details::AppDetails;
 pub use service::capabilities::app_icons::AppIcons;

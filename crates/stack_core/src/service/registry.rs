@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use crate::error::StackError;
-use crate::ports::{CredentialStore, DebugLogger};
+use crate::ports::{AccessTokenProvider, CredentialStore, DebugLogger};
 use crate::providers::{appstore, googleplay};
 use crate::service::kind::{CredentialField, ServiceKind};
 use crate::service::provider::ProviderImpl;
@@ -57,6 +57,33 @@ pub(crate) fn build(
                 debug_logger,
             )?))
         }
+    }
+}
+
+/// Builds the provider for an account that authorizes with an access token the
+/// host supplies (the user's own OAuth sign-in) instead of stored secrets.
+/// Offline: the host is first asked for a token on the first request.
+///
+/// # Errors
+/// [`StackError::Unsupported`] for a service without a host-token auth path
+/// (App Store Connect only takes its API key);
+/// [`StackError::InvalidCredentials`] for a blank `account_id`.
+pub(crate) fn build_with_access_token(
+    kind: ServiceKind,
+    account_id: &str,
+    token_provider: Arc<dyn AccessTokenProvider>,
+    debug_logger: Option<Arc<dyn DebugLogger>>,
+) -> Result<Box<dyn ProviderImpl>, StackError> {
+    match kind {
+        ServiceKind::AppStoreConnect => Err(StackError::unsupported(
+            "App Store Connect cannot authorize with an access token; connect it \
+             with its API key (`connect`)",
+        )),
+        ServiceKind::GooglePlay => Ok(Box::new(googleplay::GooglePlayProvider::with_access_token(
+            account_id,
+            token_provider,
+            debug_logger,
+        )?)),
     }
 }
 
@@ -291,5 +318,77 @@ mod tests {
             Err(err) => panic!("expected a provider, got {err:?}"),
         };
         assert_eq!(provider.kind(), ServiceKind::GooglePlay);
+    }
+
+    // -----------------------------------------------------------------------
+    // build_with_access_token (host-supplied token)
+    // -----------------------------------------------------------------------
+
+    use crate::auth::host_token::testing::ScriptedTokenProvider;
+
+    fn token_provider() -> Arc<dyn AccessTokenProvider> {
+        ScriptedTokenProvider::token("ya29.tok")
+    }
+
+    #[test]
+    fn build_with_access_token_google_play_matches_the_service_account_provider() {
+        let provider = match build_with_access_token(
+            ServiceKind::GooglePlay,
+            "login-1",
+            token_provider(),
+            None,
+        ) {
+            Ok(provider) => provider,
+            Err(err) => panic!("expected a provider, got {err:?}"),
+        };
+        assert_eq!(provider.kind(), ServiceKind::GooglePlay);
+
+        let store: Arc<dyn CredentialStore> = MapStore::valid_play();
+        let service_account = match build(ServiceKind::GooglePlay, "acct-1", &store, None) {
+            Ok(provider) => provider,
+            Err(err) => panic!("expected a provider, got {err:?}"),
+        };
+        assert_eq!(provider.capabilities(), service_account.capabilities());
+    }
+
+    #[test]
+    fn build_with_access_token_is_offline() {
+        // Building asks the host for nothing: the first token request happens
+        // on the first API call.
+        let scripted = ScriptedTokenProvider::token("ya29.tok");
+        let dyn_provider: Arc<dyn AccessTokenProvider> = scripted.clone();
+        assert!(
+            build_with_access_token(ServiceKind::GooglePlay, "login-1", dyn_provider, None).is_ok()
+        );
+        assert!(scripted.calls().is_empty());
+    }
+
+    #[test]
+    fn build_with_access_token_rejects_a_blank_account_id() {
+        for blank in ["", "  \n"] {
+            match build_with_access_token(ServiceKind::GooglePlay, blank, token_provider(), None) {
+                Err(StackError::InvalidCredentials { message }) => {
+                    assert_eq!(message, "account id is empty");
+                }
+                Err(other) => panic!("expected InvalidCredentials, got {other:?}"),
+                Ok(_) => panic!("expected InvalidCredentials, got a provider"),
+            }
+        }
+    }
+
+    #[test]
+    fn build_with_access_token_app_store_connect_is_unsupported() {
+        match build_with_access_token(
+            ServiceKind::AppStoreConnect,
+            "acct-1",
+            token_provider(),
+            None,
+        ) {
+            Err(StackError::Unsupported { message }) => {
+                assert!(message.contains("App Store Connect"), "{message}");
+            }
+            Err(other) => panic!("expected Unsupported, got {other:?}"),
+            Ok(_) => panic!("expected Unsupported, got a provider"),
+        }
     }
 }

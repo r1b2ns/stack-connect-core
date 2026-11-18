@@ -3,7 +3,7 @@
 //! store-page client on the same kind of server, a token mock, and a capturing
 //! debug logger.
 
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -11,8 +11,9 @@ use wiremock::{Mock, MockServer, ResponseTemplate};
 use super::client::GooglePlayClient;
 use super::store_page::StorePageClient;
 use super::PLAY_SCOPES;
+use crate::auth::host_token::HostTokenAuthenticator;
 use crate::auth::oauth_jwt::{ServiceAccountAuthenticator, ServiceAccountKey};
-use crate::ports::DebugLogger;
+use crate::ports::{AccessTokenProvider, DebugLogger};
 
 pub(super) const PKCS8_PEM: &str =
     include_str!("../../../tests/fixtures/test_rsa_private_pkcs8.pem");
@@ -31,6 +32,20 @@ pub(super) fn client(server: &MockServer) -> GooglePlayClient {
         format!("{}/token", server.uri()),
     );
     GooglePlayClient::with_base_urls(auth, http, server.uri(), server.uri())
+}
+
+/// The account id host-token clients ask their provider for.
+pub(super) const HOST_ACCOUNT: &str = "ana.dev@example.com";
+
+/// A client authorized by a host-supplied token (the user's own Google
+/// sign-in) instead of a service account; both APIs go to the mock server, and
+/// there is no token endpoint.
+pub(super) fn host_token_client(
+    server: &MockServer,
+    provider: Arc<dyn AccessTokenProvider>,
+) -> GooglePlayClient {
+    let auth = HostTokenAuthenticator::new(HOST_ACCOUNT, provider);
+    GooglePlayClient::with_base_urls(auth, reqwest::Client::new(), server.uri(), server.uri())
 }
 
 /// A store-page client whose public store pages are served by the mock server.

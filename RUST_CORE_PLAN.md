@@ -365,6 +365,16 @@ becomes a problem.
   account: the permission the caller needs (expected: Admin), whether `users.list` lists
   service accounts, whether a grant patch on a missing grant answers `404`, whether a
   mask with an absent `expirationTime` clears it, and the `pageSize` maximum.
+- **Google Play — "Sign in with Google" (user OAuth bearer token). ✅ IN THE CORE.**
+  New facade entry `connect_with_access_token(kind, account_id, token_provider,
+  debug_logger)` next to the unchanged `connect`, and a new foreign trait
+  `AccessTokenProvider` (`async fn access_token(account_id) -> Result<String,
+  StackError>`). `auth::host_token::HostTokenAuthenticator` asks the host before every
+  request (no core-side cache; the host owns the refresh token). The Google Play client
+  holds a `PlayAuth` enum (`ServiceAccount` | `HostToken`); the service-account path is
+  byte-for-byte unchanged. On the host-token path a 401 is `Auth` with no retry, error
+  wording names "the signed-in Google account" (`error::Principal`), and the debug
+  trace redacts the `Authorization` header. App Store Connect answers `Unsupported`.
 
 > **Out of scope (for now): Firebase.** It is **not** being migrated to the core at this
 > time — it remains implemented **natively in the iOS app** (`APIProviderFirebase`). If it

@@ -137,6 +137,29 @@ impl ErrorHints<'_> {
     };
 }
 
+/// Who authorized a failed call, so [`map_google_error`] can say whose access
+/// is missing. It only changes the wording, never the [`StackError`] variant.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Principal<'a> {
+    /// A service account, by its `client_email` (not secret: it is what a Play
+    /// Console admin invites).
+    ServiceAccount(&'a str),
+    /// The user's own Google login ("Sign in with Google"), whose access token
+    /// the host supplies. Not named: the host's account id may be a personal
+    /// e-mail address, and an error message is shown and logged by the host.
+    SignedInUser,
+}
+
+impl Principal<'_> {
+    /// How log lines and messages name the principal.
+    pub(super) fn describe(self) -> String {
+        match self {
+            Self::ServiceAccount(email) => email.to_string(),
+            Self::SignedInUser => "the signed-in Google account".to_string(),
+        }
+    }
+}
+
 #[derive(Deserialize)]
 struct GoogleErrorEnvelope {
     error: GoogleErrorBody,
@@ -259,7 +282,7 @@ pub(super) fn map_google_error(
     status: u16,
     body: &str,
     retry_after_secs: Option<u64>,
-    client_email: &str,
+    principal: Principal<'_>,
     hints: &ErrorHints<'_>,
 ) -> StackError {
     let parsed = parse_error_body(body);
@@ -274,14 +297,10 @@ pub(super) fn map_google_error(
             .as_ref()
             .is_some_and(|e| e.has_legacy_reason(LEGACY_PERMISSION_DENIED)) =>
         {
-            no_access(client_email, hints, &google_msg)
+            no_access(principal, hints, &google_msg)
         }
-        401 => StackError::auth(format!(
-            "Google did not accept the service account's authorization (HTTP 401): \
-             the access token may be invalid or revoked, or the service account may \
-             lack access in Play Console. Google said: {google_msg}"
-        )),
-        403 => map_forbidden(parsed.as_ref(), &google_msg, client_email, hints),
+        401 => unauthorized(principal, &google_msg),
+        403 => map_forbidden(parsed.as_ref(), &google_msg, principal, hints),
         404 => StackError::Http {
             status,
             message: match hints.target {
@@ -410,45 +429,83 @@ fn quota_exceeded(status: u16, google_msg: &str, retry_after_secs: Option<u64>) 
 fn map_forbidden(
     parsed: Option<&GoogleErrorBody>,
     google_msg: &str,
-    client_email: &str,
+    principal: Principal<'_>,
     hints: &ErrorHints<'_>,
 ) -> StackError {
     let infos = parsed.map(|e| error_infos(&e.details)).unwrap_or_default();
     let has_legacy_reason = |reason: &str| parsed.is_some_and(|e| e.has_legacy_reason(reason));
 
     if let Some(info) = infos.iter().find(|i| i.reason == REASON_SERVICE_DISABLED) {
-        return service_disabled(Some(info), hints.api);
+        return service_disabled(Some(info), hints.api, principal);
     }
     if has_legacy_reason(LEGACY_ACCESS_NOT_CONFIGURED) {
-        return service_disabled(None, hints.api);
+        return service_disabled(None, hints.api, principal);
     }
     if infos.iter().any(|i| i.reason == REASON_SCOPE_INSUFFICIENT) {
-        return StackError::auth(format!(
-            "The access token is missing a required OAuth scope: {google_msg}"
-        ));
+        return StackError::auth(match principal {
+            Principal::ServiceAccount(_) => {
+                format!("The access token is missing a required OAuth scope: {google_msg}")
+            }
+            Principal::SignedInUser => format!(
+                "The Google sign-in did not grant access to Google Play: sign in with \
+                 Google again and allow the Google Play permissions. Google said: \
+                 {google_msg}"
+            ),
+        });
     }
 
-    no_access(client_email, hints, google_msg)
+    no_access(principal, hints, google_msg)
+}
+
+/// The plain 401 branch of [`map_google_error`]: worded neutrally, since Google
+/// answers 401 both for a bad token and for missing Play Console access.
+fn unauthorized(principal: Principal<'_>, google_msg: &str) -> StackError {
+    StackError::auth(match principal {
+        Principal::ServiceAccount(_) => format!(
+            "Google did not accept the service account's authorization (HTTP 401): \
+             the access token may be invalid or revoked, or the service account may \
+             lack access in Play Console. Google said: {google_msg}"
+        ),
+        Principal::SignedInUser => format!(
+            "Google did not accept the signed-in Google account's authorization \
+             (HTTP 401): the sign-in may have expired or been revoked (sign in with \
+             Google again), or the account may lack access in Play Console. Google \
+             said: {google_msg}"
+        ),
+    })
 }
 
 /// The "invite the service account in Play Console" message, naming the app
 /// when the call targets one and the permission the call needs.
-fn no_access(client_email: &str, hints: &ErrorHints<'_>, google_msg: &str) -> StackError {
+fn no_access(principal: Principal<'_>, hints: &ErrorHints<'_>, google_msg: &str) -> StackError {
     let subject = hints
         .target
         .subject()
         .unwrap_or_else(|| "this Google Play data".to_string());
-    StackError::auth(format!(
-        "The service account {client_email} cannot access {subject}. \
-         Invite it in Play Console > Users and permissions with at least \"{}\"; \
-         new access can take a while to propagate. Google said: {google_msg}",
-        hints.permission
-    ))
+    StackError::auth(match principal {
+        Principal::ServiceAccount(client_email) => format!(
+            "The service account {client_email} cannot access {subject}. \
+             Invite it in Play Console > Users and permissions with at least \"{}\"; \
+             new access can take a while to propagate. Google said: {google_msg}",
+            hints.permission
+        ),
+        Principal::SignedInUser => format!(
+            "The signed-in Google account cannot access {subject}. \
+             Ask an admin to grant it at least \"{}\" in Play Console > Users and \
+             permissions; new access can take a while to propagate. Google said: \
+             {google_msg}",
+            hints.permission
+        ),
+    })
 }
 
 /// The "enable the API" message, naming the service and its activation URL
 /// when the `ErrorInfo` metadata carries them, else `api`.
-fn service_disabled(info: Option<&ErrorInfo<'_>>, api: GoogleApi) -> StackError {
+fn service_disabled(
+    info: Option<&ErrorInfo<'_>>,
+    api: GoogleApi,
+    principal: Principal<'_>,
+) -> StackError {
     let title = info
         .and_then(|i| i.metadata("serviceTitle").or_else(|| i.metadata("service")))
         .unwrap_or(api.title());
@@ -456,9 +513,12 @@ fn service_disabled(info: Option<&ErrorInfo<'_>>, api: GoogleApi) -> StackError 
         Some(url) => format!("Enable it at {url}"),
         None => "Enable it in the Google Cloud console".to_string(),
     };
+    let project = match principal {
+        Principal::ServiceAccount(_) => "this service account's Google Cloud project",
+        Principal::SignedInUser => "the Google Cloud project this Google sign-in uses",
+    };
     StackError::auth(format!(
-        "{title} is not enabled for this service account's Google Cloud project. \
-         {action}, wait a few minutes, then retry."
+        "{title} is not enabled for {project}. {action}, wait a few minutes, then retry."
     ))
 }
 
@@ -467,6 +527,7 @@ mod tests {
     use super::*;
 
     const EMAIL: &str = "play-bot@my-project.iam.gserviceaccount.com";
+    const SA: Principal<'static> = Principal::ServiceAccount(EMAIL);
 
     /// The real 403 Google returned for every Reporting API call of a project
     /// without the API enabled (captured 2026-09-11, see the design notes).
@@ -484,7 +545,13 @@ mod tests {
 
     /// The mapping for an `apps:search` (Reporting API) failure.
     fn map_reporting_error(status: u16, body: &str, client_email: &str) -> StackError {
-        map_google_error(status, body, None, client_email, &ErrorHints::REPORTING)
+        map_google_error(
+            status,
+            body,
+            None,
+            Principal::ServiceAccount(client_email),
+            &ErrorHints::REPORTING,
+        )
     }
 
     fn auth_message(err: StackError) -> String {
@@ -716,7 +783,7 @@ mod tests {
             403,
             PUBLISHER_SERVICE_DISABLED_BODY,
             None,
-            EMAIL,
+            SA,
             &hints,
         ));
         assert_eq!(
@@ -737,7 +804,7 @@ mod tests {
             403,
             body,
             None,
-            EMAIL,
+            SA,
             &publisher(PERMISSION_VIEW_APP_INFO, Target::App(PACKAGE)),
         ));
         assert!(publisher_message.starts_with("Google Play Android Developer API is not enabled"));
@@ -754,7 +821,7 @@ mod tests {
             403,
             body,
             None,
-            EMAIL,
+            SA,
             &publisher(PERMISSION_REPLY_TO_REVIEWS, Target::AppResource(PACKAGE)),
         ));
         assert_eq!(
@@ -774,7 +841,7 @@ mod tests {
             401,
             PERMISSION_DENIED_401_BODY,
             None,
-            EMAIL,
+            SA,
             &publisher(PERMISSION_VIEW_APP_INFO, Target::App(PACKAGE)),
         ));
         assert!(message.starts_with(&format!(
@@ -795,7 +862,7 @@ mod tests {
             401,
             body,
             None,
-            EMAIL,
+            SA,
             &publisher(PERMISSION_VIEW_APP_INFO, Target::App(PACKAGE)),
         ));
         assert!(message
@@ -809,7 +876,7 @@ mod tests {
             404,
             body,
             None,
-            EMAIL,
+            SA,
             &publisher(PERMISSION_VIEW_APP_INFO, Target::App(PACKAGE)),
         ));
         assert_eq!(status, 404);
@@ -827,7 +894,7 @@ mod tests {
             404,
             body,
             None,
-            EMAIL,
+            SA,
             &publisher(PERMISSION_REPLY_TO_REVIEWS, Target::AppResource(PACKAGE)),
         ));
         assert_eq!(status, 404);
@@ -842,7 +909,7 @@ mod tests {
                 status,
                 &body,
                 None,
-                EMAIL,
+                SA,
                 &publisher(PERMISSION_VIEW_APP_INFO, Target::App(PACKAGE)),
             ));
             assert_eq!(mapped, status);
@@ -858,7 +925,7 @@ mod tests {
             404,
             body,
             None,
-            EMAIL,
+            SA,
             &publisher(PERMISSION_ADMIN, Target::Developer("1234")),
         ));
         assert_eq!(status, 404);
@@ -872,7 +939,7 @@ mod tests {
             404,
             body,
             None,
-            EMAIL,
+            SA,
             &publisher(PERMISSION_ADMIN, Target::DeveloperResource("1234")),
         ));
         assert_eq!(message, "Developer not found. [NOT_FOUND]");
@@ -885,7 +952,7 @@ mod tests {
             403,
             body,
             None,
-            EMAIL,
+            SA,
             &publisher(PERMISSION_ADMIN, Target::DeveloperResource("1234")),
         ));
         assert_eq!(
@@ -985,7 +1052,7 @@ mod tests {
             403,
             RELEASES_QUOTA_BODY,
             None,
-            EMAIL,
+            SA,
             &app_hints(),
         ));
         assert_eq!(status, 429);
@@ -1011,7 +1078,7 @@ mod tests {
             403,
             body,
             None,
-            EMAIL,
+            SA,
             &publisher(PERMISSION_ADMIN, Target::Developer("5374")),
         ));
         assert_eq!(status, 429);
@@ -1023,7 +1090,7 @@ mod tests {
             403,
             RELEASES_QUOTA_BODY,
             Some(30),
-            EMAIL,
+            SA,
             &app_hints(),
         ));
         assert_eq!(status, 429);
@@ -1040,7 +1107,7 @@ mod tests {
             r#"{"error":{"code":429,"message":"boom"}}"#,
             "Too Many Requests",
         ] {
-            let (status, message) = http(map_google_error(429, body, Some(5), EMAIL, &app_hints()));
+            let (status, message) = http(map_google_error(429, body, Some(5), SA, &app_hints()));
             assert_eq!(status, 429);
             assert!(message.contains(QUOTA_NOTE), "{message}");
             assert!(message.ends_with("(Retry-After: 5 s)"), "{message}");
@@ -1074,7 +1141,7 @@ mod tests {
                 "errors":[{"domain":"usageLimits","reason":"quotaExceeded"}]}}"#,
         ];
         for body in bodies {
-            let (status, message) = http(map_google_error(403, body, None, EMAIL, &app_hints()));
+            let (status, message) = http(map_google_error(403, body, None, SA, &app_hints()));
             assert_eq!(status, 429, "{body}");
             assert!(message.ends_with(QUOTA_NOTE), "{message}");
         }
@@ -1084,7 +1151,7 @@ mod tests {
     fn real_permission_403_is_still_auth() {
         let body = r#"{"error":{"code":403,"message":"The caller does not have permission","status":"PERMISSION_DENIED"}}"#;
         let logs = crate::logging::testing::capture_logs();
-        let message = auth_message(map_google_error(403, body, Some(30), EMAIL, &app_hints()));
+        let message = auth_message(map_google_error(403, body, Some(30), SA, &app_hints()));
         assert!(message.contains("cannot access the app com.example.app"));
         assert!(!message.contains("quota"));
         assert!(!message.contains("Retry-After"));
@@ -1101,14 +1168,14 @@ mod tests {
             "status":"PERMISSION_DENIED",
             "details":[{"@type":"type.googleapis.com/google.rpc.ErrorInfo","reason":"SERVICE_DISABLED",
               "metadata":{"serviceTitle":"Google Play Android Developer API"}}]}}"#;
-        let message = auth_message(map_google_error(403, body, None, EMAIL, &app_hints()));
+        let message = auth_message(map_google_error(403, body, None, SA, &app_hints()));
         assert!(message.starts_with("Google Play Android Developer API is not enabled"));
     }
 
     #[test]
     fn quota_wording_outside_403_and_429_is_not_a_quota() {
         let body = r#"{"error":{"code":400,"message":"Invalid quota project.","status":"INVALID_ARGUMENT"}}"#;
-        let (status, message) = http(map_google_error(400, body, None, EMAIL, &app_hints()));
+        let (status, message) = http(map_google_error(400, body, None, SA, &app_hints()));
         assert_eq!(status, 400);
         assert_eq!(message, "Invalid quota project. [INVALID_ARGUMENT]");
     }
@@ -1123,7 +1190,7 @@ mod tests {
             )
             .unwrap(),
         );
-        let err = map_google_error(403, RELEASES_QUOTA_BODY, None, EMAIL, &app_hints());
+        let err = map_google_error(403, RELEASES_QUOTA_BODY, None, SA, &app_hints());
         let (status, message) = http(with_request_context(err, 403, &releases));
         assert_eq!(status, 429);
         assert_eq!(
@@ -1133,5 +1200,109 @@ mod tests {
                  GET applications/com.example.app/tracks/production/releases)"
             )
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // Signed-in user (host-supplied token): same variants, own wording
+    // -----------------------------------------------------------------------
+
+    const USER: Principal<'static> = Principal::SignedInUser;
+
+    #[test]
+    fn principal_describes_itself() {
+        assert_eq!(SA.describe(), EMAIL);
+        assert_eq!(USER.describe(), "the signed-in Google account");
+    }
+
+    #[test]
+    fn user_permission_denied_401_reads_as_no_access_for_the_account() {
+        let hints = publisher(PERMISSION_VIEW_APP_INFO, Target::App(PACKAGE));
+        let message = auth_message(map_google_error(
+            401,
+            PERMISSION_DENIED_401_BODY,
+            None,
+            USER,
+            &hints,
+        ));
+        assert!(
+            message.starts_with(
+                "The signed-in Google account cannot access the app com.example.app. \
+                 Ask an admin to grant it at least \"View app information (read-only)\""
+            ),
+            "{message}"
+        );
+        assert!(!message.contains("service account"), "{message}");
+    }
+
+    #[test]
+    fn user_service_disabled_names_the_sign_in_project() {
+        let message = auth_message(map_google_error(
+            403,
+            SERVICE_DISABLED_BODY,
+            None,
+            USER,
+            &ErrorHints::REPORTING,
+        ));
+        assert_eq!(
+            message,
+            format!(
+                "Google Play Developer Reporting API is not enabled for the Google Cloud \
+                 project this Google sign-in uses. Enable it at {ACTIVATION_URL}, wait a \
+                 few minutes, then retry."
+            )
+        );
+    }
+
+    #[test]
+    fn user_scope_insufficient_asks_to_sign_in_again() {
+        let body = serde_json::json!({
+            "error": {
+                "code": 403,
+                "message": "Request had insufficient authentication scopes.",
+                "status": "PERMISSION_DENIED",
+                "details": [{
+                    "@type": "type.googleapis.com/google.rpc.ErrorInfo",
+                    "reason": "ACCESS_TOKEN_SCOPE_INSUFFICIENT",
+                    "domain": "googleapis.com"
+                }]
+            }
+        })
+        .to_string();
+        let message = auth_message(map_google_error(
+            403,
+            &body,
+            None,
+            USER,
+            &ErrorHints::REPORTING,
+        ));
+        assert!(
+            message.starts_with(
+                "The Google sign-in did not grant access to Google Play: sign in with \
+                 Google again"
+            ),
+            "{message}"
+        );
+        // The service-account wording is untouched.
+        let sa = auth_message(map_google_error(
+            403,
+            &body,
+            None,
+            SA,
+            &ErrorHints::REPORTING,
+        ));
+        assert!(
+            sa.starts_with("The access token is missing a required OAuth scope: "),
+            "{sa}"
+        );
+    }
+
+    #[test]
+    fn user_quota_is_the_same_http_429_as_a_service_account() {
+        let body = r#"{"error":{"code":429,"message":"Too many requests.","status":"RESOURCE_EXHAUSTED"}}"#;
+        let (user_status, user_message) =
+            http(map_google_error(429, body, Some(5), USER, &app_hints()));
+        let (sa_status, sa_message) = http(map_google_error(429, body, Some(5), SA, &app_hints()));
+        assert_eq!((user_status, &user_message), (sa_status, &sa_message));
+        assert_eq!(user_status, 429);
     }
 }

@@ -144,7 +144,7 @@ fn is_token_byte(b: u8) -> bool {
 }
 
 /// `Bearer <token>` → `Bearer [redacted]` (scheme matched case-insensitively).
-fn redact_bearer(text: &str) -> String {
+pub(crate) fn redact_bearer(text: &str) -> String {
     const SCHEME: &str = "bearer ";
     let lower = text.to_ascii_lowercase();
     let bytes = text.as_bytes();

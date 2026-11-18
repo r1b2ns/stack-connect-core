@@ -4,8 +4,10 @@ use std::time::Duration;
 use async_trait::async_trait;
 
 use super::client::GooglePlayClient;
+use super::play_auth::PlayAuth;
 use super::store_page::StorePageClient;
 use super::PLAY_SCOPES;
+use crate::auth::host_token::HostTokenAuthenticator;
 use crate::auth::oauth_jwt::{ServiceAccountAuthenticator, ServiceAccountKey};
 use crate::domain::{
     AppDetailsInfo, AppInfo, BundleInfo, CommitOptions, CustomerReview, CustomerReviewsPage,
@@ -13,7 +15,7 @@ use crate::domain::{
     ReviewSubmission, StoreListingInfo, TrackInfo,
 };
 use crate::error::StackError;
-use crate::ports::DebugLogger;
+use crate::ports::{AccessTokenProvider, DebugLogger};
 use crate::service::capabilities::app_details::{AppDetails, AppDetailsImpl};
 use crate::service::capabilities::app_icons::{AppIcons, AppIconsImpl};
 use crate::service::capabilities::play_users::{PlayUsers, PlayUsersImpl};
@@ -68,20 +70,64 @@ impl GooglePlayProvider {
         debug_logger: Option<Arc<dyn DebugLogger>>,
     ) -> Result<Self, StackError> {
         let key = ServiceAccountKey::parse(client_email, private_key_id, private_key)?;
-        let http = reqwest::Client::builder()
-            .connect_timeout(CONNECT_TIMEOUT)
-            .timeout(REQUEST_TIMEOUT)
-            .build()
-            .map_err(|e| StackError::network(format!("HTTP client setup failed: {e}")))?;
-
+        let http = http_client()?;
         // `reqwest::Client` is an `Arc` internally: the clones share one pool.
         let auth = ServiceAccountAuthenticator::new(key, PLAY_SCOPES, http.clone());
+        Ok(Self::from_auth(auth.into(), http, debug_logger))
+    }
+
+    /// Builds the provider for an account added with the user's own Google
+    /// sign-in: every request is authorized with the access token `provider`
+    /// returns for `account_id` (the core never caches, stores or refreshes
+    /// it; see [`AccessTokenProvider`]). The token must carry the
+    /// [`PLAY_SCOPES`]. Offline, like [`Self::try_new`]: nothing is asked of
+    /// the host until the first request.
+    ///
+    /// When `debug_logger` is `Some`, API calls are traced with the
+    /// `Authorization` header redacted.
+    ///
+    /// # Errors
+    /// [`StackError::InvalidCredentials`] if `account_id` is blank;
+    /// [`StackError::Network`] if the HTTP client cannot be built.
+    pub(crate) fn with_access_token(
+        account_id: &str,
+        provider: Arc<dyn AccessTokenProvider>,
+        debug_logger: Option<Arc<dyn DebugLogger>>,
+    ) -> Result<Self, StackError> {
+        if account_id.trim().is_empty() {
+            return Err(StackError::invalid_credentials("account id is empty"));
+        }
+        let http = http_client()?;
+        let auth = HostTokenAuthenticator::new(account_id, provider);
+        Ok(Self::from_auth(auth.into(), http, debug_logger))
+    }
+
+    /// Wires one authenticator and one shared HTTP client into the API client
+    /// and the store-page client.
+    fn from_auth(
+        auth: PlayAuth,
+        http: reqwest::Client,
+        debug_logger: Option<Arc<dyn DebugLogger>>,
+    ) -> Self {
         let store_page = StorePageClient::new(http.clone()).with_debug_logger(debug_logger.clone());
-        Ok(Self {
+        Self {
             client: Arc::new(GooglePlayClient::new(auth, http).with_debug_logger(debug_logger)),
             store_page: Arc::new(store_page),
-        })
+        }
     }
+}
+
+/// One `reqwest::Client` with connect and request timeouts, shared by the
+/// authenticator, the API client and the store-page client.
+///
+/// # Errors
+/// [`StackError::Network`] if the client cannot be built.
+fn http_client() -> Result<reqwest::Client, StackError> {
+    reqwest::Client::builder()
+        .connect_timeout(CONNECT_TIMEOUT)
+        .timeout(REQUEST_TIMEOUT)
+        .build()
+        .map_err(|e| StackError::network(format!("HTTP client setup failed: {e}")))
 }
 
 #[async_trait]

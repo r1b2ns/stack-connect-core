@@ -5,7 +5,7 @@ use serde::Deserialize;
 use tokio::sync::Mutex;
 
 use super::error::{local_rejection, map_google_error, with_request_context, ErrorHints};
-use crate::auth::oauth_jwt::ServiceAccountAuthenticator;
+use super::play_auth::PlayAuth;
 use crate::domain::AppInfo;
 use crate::error::StackError;
 use crate::http_debug::{send, HttpReply};
@@ -201,7 +201,8 @@ pub(crate) struct GooglePlayClient {
     publisher_base_url: String,
     /// Shared with the authenticator (one connection pool, one set of timeouts).
     http: reqwest::Client,
-    auth: ServiceAccountAuthenticator,
+    /// A service account the core signs for, or a host-supplied user token.
+    auth: PlayAuth,
     /// Optional HTTP tracing sink. `None` by default; set via
     /// [`Self::with_debug_logger`], which also hands it to the authenticator so
     /// the token exchange is traced too.
@@ -213,7 +214,7 @@ pub(crate) struct GooglePlayClient {
 }
 
 impl GooglePlayClient {
-    pub(crate) fn new(auth: ServiceAccountAuthenticator, http: reqwest::Client) -> Self {
+    pub(crate) fn new(auth: impl Into<PlayAuth>, http: reqwest::Client) -> Self {
         Self::with_base_urls(
             auth,
             http,
@@ -223,7 +224,7 @@ impl GooglePlayClient {
     }
 
     pub(crate) fn with_base_urls(
-        auth: ServiceAccountAuthenticator,
+        auth: impl Into<PlayAuth>,
         http: reqwest::Client,
         reporting_base_url: String,
         publisher_base_url: String,
@@ -232,7 +233,7 @@ impl GooglePlayClient {
             reporting_base_url: reporting_base_url.trim_end_matches('/').to_string(),
             publisher_base_url: publisher_base_url.trim_end_matches('/').to_string(),
             http,
-            auth,
+            auth: auth.into(),
             debug_logger: None,
             edit_lock: Mutex::new(()),
         }
@@ -240,9 +241,13 @@ impl GooglePlayClient {
 
     /// Attaches an optional HTTP tracing sink to this client and its
     /// authenticator. Builder-style; `None` is a no-op (no logging).
+    ///
+    /// With a host-supplied token the API calls trace through a
+    /// [`crate::http_debug::BearerRedactingLogger`], so the user's token never
+    /// reaches the sink; the service-account trace stays verbatim.
     pub(crate) fn with_debug_logger(mut self, logger: Option<Arc<dyn DebugLogger>>) -> Self {
         self.auth = self.auth.with_debug_logger(logger.clone());
-        self.debug_logger = logger;
+        self.debug_logger = self.auth.api_debug_logger(logger);
         self
     }
 
@@ -329,9 +334,11 @@ impl GooglePlayClient {
     /// token, and returns the 2xx body. `build` is called again for the retry,
     /// so it must not consume anything.
     ///
-    /// On a 401 the cached access token is dropped and the call retried once
-    /// with a fresh one: Google decides token validity server-side, so a cached
-    /// token can die before its `expires_in`.
+    /// On a 401 with a service account, the cached access token is dropped and
+    /// the call retried once with a fresh one: Google decides token validity
+    /// server-side, so a cached token can die before its `expires_in`. With a
+    /// host-supplied token the 401 is reported straight away as
+    /// [`StackError::Auth`] (see [`PlayAuth::retries_unauthorized`]).
     ///
     /// # Errors
     /// The authenticator's errors, [`StackError::Network`] on transport failure,
@@ -364,14 +371,24 @@ impl GooglePlayClient {
     {
         let mut reply = self.send_authorized(&build).await?;
         if reply.status == reqwest::StatusCode::UNAUTHORIZED {
-            logging::info(target::AUTH, || {
-                format!(
-                    "Google answered HTTP 401 on {}; retrying once with a new access token",
-                    reply.request.resource()
-                )
-            });
-            self.auth.invalidate().await;
-            reply = self.send_authorized(&build).await?;
+            if self.auth.retries_unauthorized() {
+                logging::info(target::AUTH, || {
+                    format!(
+                        "Google answered HTTP 401 on {}; retrying once with a new access token",
+                        reply.request.resource()
+                    )
+                });
+                self.auth.invalidate().await;
+                reply = self.send_authorized(&build).await?;
+            } else {
+                logging::info(target::AUTH, || {
+                    format!(
+                        "Google answered HTTP 401 on {} to the host-supplied access token; \
+                         not retrying (the host refreshes its own tokens)",
+                        reply.request.resource()
+                    )
+                });
+            }
         }
 
         if reply.status.is_success() {
@@ -382,7 +399,7 @@ impl GooglePlayClient {
             status,
             &reply.body,
             reply.retry_after_secs,
-            self.auth.client_email(),
+            self.auth.principal(),
             hints,
         );
         Err(with_request_context(err, status, &reply.request))
@@ -490,7 +507,7 @@ impl GooglePlayClient {
                         format!(
                             "apps:search: {} apps visible to {} over {page_number} page(s)",
                             apps.len(),
-                            self.auth.client_email()
+                            self.auth.principal().describe()
                         )
                     });
                     return Ok(apps);
@@ -512,7 +529,7 @@ impl GooglePlayClient {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::auth::oauth_jwt::ServiceAccountKey;
+    use crate::auth::oauth_jwt::{ServiceAccountAuthenticator, ServiceAccountKey};
     use crate::providers::googleplay::test_support::{
         client, mount_token, CapturingLogger, EMAIL, KID, PKCS8_PEM,
     };

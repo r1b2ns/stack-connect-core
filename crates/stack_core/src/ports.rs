@@ -44,6 +44,11 @@ pub trait BlobStore: Send + Sync {
 /// request body. Each grants API access until it expires (an assertion can be
 /// exchanged again for a fresh one-hour token until its own `exp`). Private keys
 /// never appear in any request.
+///
+/// One exception: a provider built by
+/// [`crate::facade::connect_with_access_token`] redacts the `Authorization`
+/// header (`Bearer [redacted]`), since that token is the user's own
+/// credential supplied by the host ([`AccessTokenProvider`]).
 #[uniffi::export(with_foreign)]
 pub trait DebugLogger: Send + Sync {
     /// Emits one already-formatted, possibly multi-line debug message.
@@ -64,4 +69,36 @@ pub trait CoreLogger: Send + Sync {
     /// Emits one single-line message. `target` names the area (`http`,
     /// `auth`, `googleplay.users`, …; see the README's *Logging* section).
     fn log(&self, level: crate::logging::LogLevel, target: String, message: String);
+}
+
+/// Hands the core a ready-to-use OAuth 2.0 access token for one account that
+/// was added with the user's own Google sign-in ("Sign in with Google"),
+/// instead of a service-account key. Implemented natively (iOS: an adapter
+/// over the app's Google sign-in service) and injected across the FFI boundary
+/// as a foreign trait through
+/// [`crate::facade::connect_with_access_token`].
+///
+/// The core calls it before **every** request and never caches, stores or
+/// refreshes the value: the host owns the refresh token, caches the access
+/// token and refreshes it before it expires. The core never sees a refresh
+/// token. The token must carry the scopes of the service it is used for
+/// (Google Play: `androidpublisher` and `playdeveloperreporting`).
+///
+/// The returned value is a bearer credential: the core never logs it, neither
+/// through [`CoreLogger`] nor through [`DebugLogger`] (the `Authorization`
+/// header is redacted in the debug trace of this auth path).
+#[uniffi::export(with_foreign)]
+#[async_trait::async_trait]
+pub trait AccessTokenProvider: Send + Sync {
+    /// A currently valid access token for `account_id` (the id the host
+    /// passed to `connect_with_access_token`).
+    ///
+    /// # Errors
+    /// Any [`crate::error::StackError`]. The core reports a failure as
+    /// [`crate::error::StackError::Auth`] (an `Auth` error keeps its message
+    /// verbatim, so a host marker such as `invalid_grant` round-trips), except
+    /// [`crate::error::StackError::Network`], which passes through unchanged
+    /// so an offline device is not reported as a sign-in problem. Throwing an
+    /// error that is not a `StackError` also ends up as `Auth`.
+    async fn access_token(&self, account_id: String) -> Result<String, crate::error::StackError>;
 }

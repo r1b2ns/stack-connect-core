@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use crate::error::StackError;
 use crate::logging::{self, LogLevel};
-use crate::ports::{BlobStore, CoreLogger, CredentialStore, DebugLogger};
+use crate::ports::{AccessTokenProvider, BlobStore, CoreLogger, CredentialStore, DebugLogger};
 use crate::service::kind::{CredentialField, ServiceKind};
 use crate::service::provider::Provider;
 use crate::service::registry;
@@ -53,6 +53,41 @@ pub fn connect(
     debug_logger: Option<Arc<dyn DebugLogger>>,
 ) -> Result<Arc<Provider>, StackError> {
     let inner = registry::build(kind, &account_id, &store, debug_logger)?;
+    Ok(Provider::new(inner))
+}
+
+/// Builds a connected [`Provider`] for an account added with the user's own
+/// OAuth sign-in (Google Play: "Sign in with Google"), authorized with the
+/// access token `token_provider` returns for `account_id` instead of the
+/// service-account secrets [`connect`] reads.
+///
+/// The core asks `token_provider` before every request and never caches,
+/// stores or refreshes the token; the host owns the refresh token. The token
+/// must carry the service's scopes (Google Play: `androidpublisher` and
+/// `playdeveloperreporting`). The returned provider exposes the same
+/// capabilities as one built by [`connect`].
+///
+/// Errors on this path: a `token_provider` failure surfaces as
+/// [`StackError::Auth`] (a host `Auth` keeps its message verbatim; a host
+/// `Network` passes through unchanged), and an HTTP 401 from Google is
+/// [`StackError::Auth`] without a retry. Quota / rate limits keep the same
+/// [`StackError::Http`] `429` shape as the service-account path.
+///
+/// Synchronous and offline, like [`connect`]. When `debug_logger` is `Some`,
+/// requests are traced like [`connect`]'s, except that the `Authorization`
+/// header is redacted.
+///
+/// # Errors
+/// [`StackError::Unsupported`] for a service without this auth path (App
+/// Store Connect); [`StackError::InvalidCredentials`] for a blank `account_id`.
+#[uniffi::export]
+pub fn connect_with_access_token(
+    kind: ServiceKind,
+    account_id: String,
+    token_provider: Arc<dyn AccessTokenProvider>,
+    debug_logger: Option<Arc<dyn DebugLogger>>,
+) -> Result<Arc<Provider>, StackError> {
+    let inner = registry::build_with_access_token(kind, &account_id, token_provider, debug_logger)?;
     Ok(Provider::new(inner))
 }
 

@@ -5,12 +5,14 @@
 //! perform HTTP — e.g. an OAuth token exchange — and must trace through the same
 //! function, while `auth` must not depend on `providers`.
 
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::error::StackError;
 use crate::logging::http::{
     millis, request_id, summarize_error_body, transport_failure, RequestInfo,
 };
+use crate::logging::redact::redact_bearer;
 use crate::logging::{self, target, LogLevel};
 use crate::ports::DebugLogger;
 
@@ -329,6 +331,27 @@ pub(crate) fn pretty_json(bytes: &[u8]) -> String {
         .unwrap_or_else(|| String::from_utf8_lossy(bytes).into_owned())
 }
 
+/// A [`DebugLogger`] decorator that replaces every `Bearer <token>` with
+/// `Bearer [redacted]` before forwarding, and changes nothing else (bodies,
+/// URLs and other headers stay verbatim). For auth paths whose token the core
+/// must never print, even to the opt-in debug sink: a host-supplied user
+/// access token.
+pub(crate) struct BearerRedactingLogger {
+    inner: Arc<dyn DebugLogger>,
+}
+
+impl BearerRedactingLogger {
+    pub(crate) fn new(inner: Arc<dyn DebugLogger>) -> Self {
+        Self { inner }
+    }
+}
+
+impl DebugLogger for BearerRedactingLogger {
+    fn log(&self, message: String) {
+        self.inner.log(redact_bearer(&message));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -445,6 +468,35 @@ mod tests {
         assert!(curl.contains(" \\\n  -H 'x-custom: v'"));
         // A GET has no body → no `-d` line.
         assert!(!curl.contains("-d '"));
+    }
+
+    #[test]
+    fn bearer_redacting_logger_redacts_only_the_bearer_token() {
+        #[derive(Default)]
+        struct Sink(std::sync::Mutex<Vec<String>>);
+        impl DebugLogger for Sink {
+            fn log(&self, message: String) {
+                self.0.lock().unwrap().push(message);
+            }
+        }
+
+        let sink = Arc::new(Sink::default());
+        let logger = BearerRedactingLogger::new(sink.clone());
+        let req = reqwest::Client::new()
+            .get("https://api.example.test/v1/apps?limit=1")
+            .bearer_auth("ya29.user-token")
+            .header("x-custom", "v")
+            .build()
+            .unwrap();
+        logger.log(render_curl(&req));
+
+        let lines = sink.0.lock().unwrap().clone();
+        assert_eq!(lines.len(), 1);
+        assert!(!lines[0].contains("ya29.user-token"), "{}", lines[0]);
+        assert!(lines[0].contains("-H 'authorization: Bearer [redacted]'"));
+        // Everything else stays verbatim.
+        assert!(lines[0].contains("curl -X GET 'https://api.example.test/v1/apps?limit=1'"));
+        assert!(lines[0].contains("-H 'x-custom: v'"));
     }
 
     #[test]

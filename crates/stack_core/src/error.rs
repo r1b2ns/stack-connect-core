@@ -93,3 +93,16 @@ impl StackError {
         }
     }
 }
+
+/// Turns an error a host callback threw that is not a [`StackError`] (or that
+/// UniFFI could not lift) into one. The only fallible host callback is
+/// [`crate::ports::AccessTokenProvider::access_token`], whose failures are
+/// authentication failures, hence [`StackError::Auth`].
+impl From<uniffi::UnexpectedUniFFICallbackError> for StackError {
+    fn from(err: uniffi::UnexpectedUniFFICallbackError) -> Self {
+        Self::auth(format!(
+            "the host's access token provider failed: {}",
+            err.reason
+        ))
+    }
+}
