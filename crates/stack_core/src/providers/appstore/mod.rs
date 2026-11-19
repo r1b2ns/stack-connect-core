@@ -1,13 +1,16 @@
 //! App Store Connect plugin (the first concrete provider).
 //!
-//! Auth is an ES256 team JWT (`auth::es256`); the API is JSON:API with
-//! `links.next` pagination.
+//! Auth is an ES256 team JWT (`crate::auth::es256`) or, for accounts signed
+//! in with an Apple ID, the web session (see [`auth`]); the API is JSON:API
+//! with `links.next` pagination.
 
+mod auth;
 mod client;
 mod provider;
 
 use crate::service::kind::CredentialField;
 
+pub(crate) use auth::SessionAuth;
 pub(crate) use provider::AppStoreProvider;
 
 /// Credential keys this provider reads from the host `CredentialStore`, in the

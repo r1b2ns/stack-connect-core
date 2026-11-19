@@ -42,6 +42,16 @@ pub enum StackError {
     /// Appended last: both bindings encode a variant by its position.
     #[error("release not found: {message}")]
     ReleaseNotFound { message: String },
+
+    /// The Apple ID web session of an account added with "Sign in with Apple
+    /// ID" is no longer accepted (App Store Connect answered HTTP 401, or
+    /// refused the session while selecting its team). Nothing was retried: the
+    /// core never holds the password, so the host must ask the user to sign in
+    /// again. Never raised for an API-key account.
+    ///
+    /// Appended last: both bindings encode a variant by its position.
+    #[error("session expired: {message}")]
+    SessionExpired { message: String },
 }
 
 impl StackError {
@@ -89,6 +99,12 @@ impl StackError {
 
     pub(crate) fn release_not_found(message: impl Into<String>) -> Self {
         Self::ReleaseNotFound {
+            message: message.into(),
+        }
+    }
+
+    pub(crate) fn session_expired(message: impl Into<String>) -> Self {
+        Self::SessionExpired {
             message: message.into(),
         }
     }

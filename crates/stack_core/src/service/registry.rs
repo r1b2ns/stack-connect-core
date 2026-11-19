@@ -1,7 +1,9 @@
 use std::sync::Arc;
 
+use crate::auth::apple_session::session::{AppleSession, SessionBlob};
+use crate::auth::apple_session::AppleEndpoints;
 use crate::error::StackError;
-use crate::ports::{AccessTokenProvider, CredentialStore, DebugLogger};
+use crate::ports::{AccessTokenProvider, CredentialStore, DebugLogger, SessionStore};
 use crate::providers::{appstore, googleplay};
 use crate::service::kind::{CredentialField, ServiceKind};
 use crate::service::provider::ProviderImpl;
@@ -87,6 +89,56 @@ pub(crate) fn build_with_access_token(
     }
 }
 
+/// Builds the App Store Connect provider for an account added with "Sign in
+/// with Apple ID": restores the session `session_store` holds for
+/// `account_id` and acts for the team `team_id` (an App Store Connect
+/// provider id). Offline: the team is checked on the first request.
+///
+/// # Errors
+/// [`StackError::InvalidCredentials`] for a blank `account_id` or when the
+/// store has no session for it; [`StackError::Decode`] for a blob this core
+/// did not write (or a newer format).
+pub(crate) fn build_with_apple_session(
+    account_id: &str,
+    team_id: u64,
+    session_store: Arc<dyn SessionStore>,
+    debug_logger: Option<Arc<dyn DebugLogger>>,
+) -> Result<Box<dyn ProviderImpl>, StackError> {
+    build_with_apple_session_on(
+        AppleEndpoints::default(),
+        account_id,
+        team_id,
+        session_store,
+        debug_logger,
+    )
+}
+
+/// [`build_with_apple_session`] against `endpoints` (tests: a mock server).
+pub(crate) fn build_with_apple_session_on(
+    endpoints: AppleEndpoints,
+    account_id: &str,
+    team_id: u64,
+    session_store: Arc<dyn SessionStore>,
+    debug_logger: Option<Arc<dyn DebugLogger>>,
+) -> Result<Box<dyn ProviderImpl>, StackError> {
+    if account_id.trim().is_empty() {
+        return Err(StackError::invalid_credentials(
+            "empty account id for an Apple ID session",
+        ));
+    }
+    let blob = session_store.load(account_id.to_string()).ok_or_else(|| {
+        StackError::invalid_credentials(
+            "no saved Apple ID session for this account; sign in with the Apple ID",
+        )
+    })?;
+    let session = AppleSession::restore(&SessionBlob::from_bytes(blob), endpoints)?;
+    let auth = appstore::SessionAuth::new(account_id.to_string(), team_id, session, session_store);
+    Ok(Box::new(appstore::AppStoreProvider::with_session(
+        auth,
+        debug_logger,
+    )))
+}
+
 /// Reads a required secret or fails with a deterministic error naming the key.
 fn require(
     store: &Arc<dyn CredentialStore>,
@@ -116,6 +168,169 @@ fn require_non_blank(
 
 #[cfg(test)]
 mod tests {
+    mod apple_session {
+        use super::*;
+        use crate::auth::apple_session::test_support::session_on;
+        use crate::service::provider::Capability;
+        use wiremock::matchers::{header, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        /// Hands out one blob and records saves.
+        struct OneBlob {
+            blob: Option<Vec<u8>>,
+            saves: Mutex<Vec<String>>,
+        }
+
+        impl SessionStore for OneBlob {
+            fn load(&self, account_id: String) -> Option<Vec<u8>> {
+                (account_id == "acct").then(|| self.blob.clone()).flatten()
+            }
+            fn save(&self, account_id: String, _blob: Vec<u8>) {
+                self.saves.lock().unwrap().push(account_id);
+            }
+        }
+
+        fn store(blob: Option<Vec<u8>>) -> Arc<OneBlob> {
+            Arc::new(OneBlob {
+                blob,
+                saves: Mutex::new(Vec::new()),
+            })
+        }
+
+        fn blob_for(endpoints: &AppleEndpoints, team: Option<u64>) -> Vec<u8> {
+            let session = session_on(endpoints, Some("widget".into()));
+            let session = if let Some(team) = team {
+                let (endpoints, jar, http, widget) = session.into_parts();
+                AppleSession::from_parts(endpoints, jar, http, widget, Some(team))
+            } else {
+                session
+            };
+            session.to_blob().unwrap().as_bytes().to_vec()
+        }
+
+        fn build(
+            endpoints: AppleEndpoints,
+            account: &str,
+            store: Arc<OneBlob>,
+        ) -> Result<Box<dyn ProviderImpl>, StackError> {
+            build_with_apple_session_on(endpoints, account, 7, store, None)
+        }
+
+        #[test]
+        fn refuses_a_blank_account_a_missing_session_and_a_foreign_blob() {
+            let endpoints = AppleEndpoints::default();
+            let blob = blob_for(&endpoints, Some(7));
+            assert!(matches!(
+                build(endpoints.clone(), " ", store(Some(blob))).err(),
+                Some(StackError::InvalidCredentials { .. })
+            ));
+            assert!(matches!(
+                build(endpoints.clone(), "acct", store(None)).err(),
+                Some(StackError::InvalidCredentials { message }) if message.contains("sign in")
+            ));
+            assert!(matches!(
+                build(endpoints, "acct", store(Some(b"{}".to_vec()))).err(),
+                Some(StackError::Decode { .. })
+            ));
+        }
+
+        #[tokio::test]
+        async fn a_session_provider_drops_analytics_and_talks_to_iris() {
+            let server = MockServer::start().await;
+            let endpoints = AppleEndpoints::with_base_urls(&server.uri(), &server.uri());
+            Mock::given(method("GET"))
+                .and(path("/iris/v1/apps"))
+                .and(header("x-csrf-itc", "[asc-ui]"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "data": [], "links": {}
+                })))
+                .expect(2)
+                .mount(&server)
+                .await;
+            let provider = build(
+                endpoints.clone(),
+                "acct",
+                store(Some(blob_for(&endpoints, Some(7)))),
+            )
+            .unwrap();
+
+            assert_eq!(provider.kind(), ServiceKind::AppStoreConnect);
+            let capabilities = provider.capabilities();
+            assert!(!capabilities.contains(&Capability::Analytics));
+            for kept in [
+                Capability::Apps,
+                Capability::Reviews,
+                Capability::BetaGroups,
+                Capability::Users,
+                Capability::Devices,
+                Capability::BundleIds,
+                Capability::Certificates,
+                Capability::Profiles,
+            ] {
+                assert!(capabilities.contains(&kept), "{kept:?}");
+            }
+            provider.validate().await.unwrap();
+            assert!(provider.fetch_apps().await.unwrap().is_empty());
+
+            // The API-key provider keeps every capability.
+            let key = super::super::build(
+                ServiceKind::AppStoreConnect,
+                "acct",
+                &(MapStore::new(&[("issuerId", "i"), ("keyId", "k"), ("privateKeyP8", "p")])
+                    as Arc<dyn CredentialStore>),
+                None,
+            )
+            .unwrap();
+            assert_eq!(key.capabilities().len(), capabilities.len() + 1);
+        }
+
+        #[tokio::test]
+        async fn a_session_provider_lists_devices_on_the_developer_portal() {
+            let server = MockServer::start().await;
+            let endpoints = AppleEndpoints::with_base_urls(&server.uri(), &server.uri())
+                .with_developer_base_url(&server.uri());
+            Mock::given(method("GET"))
+                .and(path("/olympus/v1/session"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "provider": {"providerId": 7, "name": "Seven"},
+                    "availableProviders": [{"providerId": 7, "name": "Seven"}]
+                })))
+                .expect(1)
+                .mount(&server)
+                .await;
+            Mock::given(method("POST"))
+                .and(path("/services-account/QH65B2/account/listTeams.action"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "resultCode": 0,
+                    "teams": [{"teamId": "SEVEN77777", "name": "Seven", "type": "Individual"}]
+                })))
+                .expect(1)
+                .mount(&server)
+                .await;
+            Mock::given(method("POST"))
+                .and(path("/services-account/v1/devices"))
+                .and(header("x-http-method-override", "GET"))
+                .and(wiremock::matchers::body_json(serde_json::json!({
+                    "urlEncodedQueryParams": "limit=200&sort=name",
+                    "teamId": "SEVEN77777"
+                })))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "data": [{"type": "devices", "id": "D1", "attributes": {"name": "Phone"}}],
+                    "links": {}
+                })))
+                .expect(1)
+                .mount(&server)
+                .await;
+            let sessions = store(Some(blob_for(&endpoints, Some(7))));
+            let provider = build(endpoints, "acct", Arc::clone(&sessions)).unwrap();
+
+            let devices = provider.devices().unwrap().fetch_devices().await.unwrap();
+            assert_eq!(devices[0].id, "D1");
+            // The resolved portal team is saved with the session.
+            assert_eq!(sessions.saves.lock().unwrap().as_slice(), ["acct"]);
+        }
+    }
+
     use super::*;
     use std::collections::HashMap;
     use std::sync::Mutex;

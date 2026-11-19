@@ -49,6 +49,9 @@ use std::sync::{Arc, Mutex};
 
 use flutter_rust_bridge::DartFnFuture;
 
+use crate::apple_id::AppleIdSignIn;
+use crate::auth::apple_session::flow::{AppleCodeMethod, AppleSignInStep};
+use crate::auth::apple_session::session::AppleTeam;
 use crate::crypto::{self, CryptoError, ScexportPayload};
 use crate::domain::{
     AccessibilityDeclarationInfo, AccountExport, AnalyticsReportData, AnalyticsReportInstancesPage,
@@ -61,7 +64,7 @@ use crate::domain::{
     ReviewResponse, ScreenshotInfo, ScreenshotSetInfo, TeamMemberInfo, UserInfo,
 };
 use crate::error::StackError;
-use crate::ports::{BlobStore, CredentialStore, DebugLogger};
+use crate::ports::{BlobStore, CredentialStore, DebugLogger, SessionStore};
 use crate::service::kind::{CredentialField, ServiceKind};
 use crate::service::provider::{Capability, Provider};
 use crate::service::registry;
@@ -170,7 +173,136 @@ pub fn connect(
     Ok(FrbProvider {
         inner: Provider::new(inner),
         log_buffer,
+        session_buffer: None,
     })
+}
+
+/// Builds a connected App Store Connect provider for an account added with
+/// "Sign in with Apple ID", from the session blob [`FrbAppleSignIn::finish`]
+/// returned.
+///
+/// Mirror of [`crate::facade::connect_with_apple_session`]. The UniFFI version
+/// takes the host's (sync) `SessionStore` foreign trait; FRB cannot reuse it
+/// and its Dart callbacks are async, so the Dart host passes the blob it
+/// stored as plain data, and the core keeps every refreshed session in an
+/// in-memory store the host drains with
+/// [`FrbProvider::take_refreshed_session`] after its calls (then writes it to
+/// its secure storage). `team_id`, the session-only capability set
+/// (Analytics Reports are left out; provisioning goes to the Developer Portal,
+/// except renaming or deleting a bundle id, which return
+/// `StackError::Unsupported`) and `StackError::SessionExpired` on an HTTP 401
+/// are as in the UniFFI version. `debug_logging` / `debug_logger` are as in
+/// [`connect`]; session secrets are redacted from the trace.
+///
+/// # Errors
+/// [`StackError::InvalidCredentials`] for a blank `account_id` or an empty
+/// blob; [`StackError::Decode`] for a blob the core cannot read.
+pub fn connect_with_apple_session(
+    account_id: String,
+    team_id: u64,
+    session_blob: Vec<u8>,
+    debug_logging: bool,
+    debug_logger: impl Fn(String) -> DartFnFuture<()> + Send + Sync + 'static,
+) -> Result<FrbProvider, StackError> {
+    let (core_logger, log_buffer): (Option<Arc<dyn DebugLogger>>, Option<Arc<LogBuffer>>) =
+        if debug_logging {
+            let buffer = Arc::new(LogBuffer::new(debug_logger));
+            (Some(buffer.clone()), Some(buffer))
+        } else {
+            (None, None)
+        };
+    let sessions = Arc::new(LatestSessionStore::new(&account_id, session_blob));
+    let store: Arc<dyn SessionStore> = sessions.clone();
+    let inner = registry::build_with_apple_session(&account_id, team_id, store, core_logger)?;
+    Ok(FrbProvider {
+        inner: Provider::new(inner),
+        log_buffer,
+        session_buffer: Some(sessions),
+    })
+}
+
+/// Starts an Apple ID sign-in ("Sign in with Apple ID" for App Store Connect)
+/// against Apple's production hosts. Mirror of the UniFFI
+/// [`AppleIdSignIn`] constructor. Offline.
+///
+/// # Errors
+/// [`StackError::Network`] when the HTTP client cannot be built.
+#[flutter_rust_bridge::frb(sync)]
+pub fn apple_sign_in() -> Result<FrbAppleSignIn, StackError> {
+    Ok(FrbAppleSignIn {
+        inner: AppleIdSignIn::new()?,
+    })
+}
+
+/// Starts an Apple ID sign-in over a saved session blob (signing in again
+/// after `StackError::SessionExpired`; the trust cookie can spare the code).
+/// Mirror of [`AppleIdSignIn::with_saved_session`]. Offline.
+///
+/// # Errors
+/// [`StackError::Decode`] when `blob` is not a session this core wrote.
+#[flutter_rust_bridge::frb(sync)]
+pub fn apple_sign_in_with_saved_session(blob: Vec<u8>) -> Result<FrbAppleSignIn, StackError> {
+    Ok(FrbAppleSignIn {
+        inner: AppleIdSignIn::with_saved_session(blob)?,
+    })
+}
+
+/// FRB-exposed Apple ID sign-in: a thin opaque wrapper over the core
+/// [`AppleIdSignIn`] (same methods, same errors; see its docs).
+#[flutter_rust_bridge::frb(opaque)]
+pub struct FrbAppleSignIn {
+    inner: Arc<AppleIdSignIn>,
+}
+
+impl FrbAppleSignIn {
+    /// Starts the sign-in with the Apple ID and its password (used once,
+    /// never stored). See [`AppleIdSignIn::start`].
+    ///
+    /// # Errors
+    /// See [`AppleIdSignIn`].
+    pub async fn start(
+        &self,
+        email: String,
+        password: String,
+    ) -> Result<AppleSignInStep, StackError> {
+        self.inner.start(email, password).await
+    }
+
+    /// Asks Apple to text a code to `phone_id`. See
+    /// [`AppleIdSignIn::request_sms`].
+    ///
+    /// # Errors
+    /// See [`AppleIdSignIn`].
+    pub async fn request_sms(&self, phone_id: u64) -> Result<AppleSignInStep, StackError> {
+        self.inner.request_sms(phone_id).await
+    }
+
+    /// Submits the two-factor code. See [`AppleIdSignIn::submit_code`].
+    ///
+    /// # Errors
+    /// `StackError::InvalidCredentials` for a wrong code; see
+    /// [`AppleIdSignIn`].
+    pub async fn submit_code(
+        &self,
+        code: String,
+        method: AppleCodeMethod,
+    ) -> Result<AppleSignInStep, StackError> {
+        self.inner.submit_code(code, method).await
+    }
+
+    /// The Apple ID's teams once signed in (empty before).
+    pub async fn teams(&self) -> Vec<AppleTeam> {
+        self.inner.teams().await
+    }
+
+    /// Ends the sign-in and returns the session blob to store securely. See
+    /// [`AppleIdSignIn::finish`].
+    ///
+    /// # Errors
+    /// See [`AppleIdSignIn::finish`].
+    pub async fn finish(&self) -> Result<Vec<u8>, StackError> {
+        self.inner.finish().await
+    }
 }
 
 /// Builds an [`FrbSyncService`] that syncs `provider` for `account_id`.
@@ -402,6 +534,9 @@ pub struct FrbProvider {
     /// Present only when a Dart debug logger was supplied to [`connect`]; drained
     /// to Dart after each async call so the sync core `log` never blocks.
     log_buffer: Option<Arc<LogBuffer>>,
+    /// Present only for an Apple ID session account
+    /// ([`connect_with_apple_session`]): the newest refreshed session blob.
+    session_buffer: Option<Arc<LatestSessionStore>>,
 }
 
 impl FrbProvider {
@@ -630,6 +765,16 @@ impl FrbProvider {
         if let Some(buffer) = &self.log_buffer {
             buffer.flush().await;
         }
+    }
+
+    /// The newest session blob the core saved since the last call (Apple
+    /// refreshed the cookies, or the team was switched), for the Dart host to
+    /// write to its secure storage; `None` when nothing changed or for an
+    /// API-key account. Call it after the provider's (or any capability
+    /// handle's) async calls.
+    #[flutter_rust_bridge::frb(sync)]
+    pub fn take_refreshed_session(&self) -> Option<Vec<u8>> {
+        self.session_buffer.as_ref().and_then(|b| b.take())
     }
 }
 
@@ -2957,6 +3102,58 @@ impl DebugLogger for LogBuffer {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .push(message);
+    }
+}
+
+/// [`SessionStore`] for one account over the blob the Dart host passed in:
+/// `load` returns the latest blob; `save` replaces it and marks it pending for
+/// [`FrbProvider::take_refreshed_session`]. Never calls Dart (see the module
+/// docs on sync ports).
+///
+/// `#[frb(ignore)]`: an internal port adapter, never crosses the boundary.
+#[flutter_rust_bridge::frb(ignore)]
+struct LatestSessionStore {
+    account_id: String,
+    state: Mutex<(Option<Vec<u8>>, bool)>,
+}
+
+impl LatestSessionStore {
+    fn new(account_id: &str, blob: Vec<u8>) -> Self {
+        let blob = (!blob.is_empty()).then_some(blob);
+        Self {
+            account_id: account_id.to_string(),
+            state: Mutex::new((blob, false)),
+        }
+    }
+
+    /// The pending blob, once.
+    fn take(&self) -> Option<Vec<u8>> {
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        if !state.1 {
+            return None;
+        }
+        state.1 = false;
+        state.0.clone()
+    }
+}
+
+impl SessionStore for LatestSessionStore {
+    fn load(&self, account_id: String) -> Option<Vec<u8>> {
+        if account_id != self.account_id {
+            return None;
+        }
+        self.state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .0
+            .clone()
+    }
+
+    fn save(&self, account_id: String, blob: Vec<u8>) {
+        if account_id != self.account_id {
+            return;
+        }
+        *self.state.lock().unwrap_or_else(|e| e.into_inner()) = (Some(blob), true);
     }
 }
 

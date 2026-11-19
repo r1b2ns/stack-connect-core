@@ -33,6 +33,20 @@ uuid = { version = "1", features = ["v4"] }
 flate2 = "1"
 # Decodes request paths for the diagnostic log (already in the tree via reqwest/url).
 percent-encoding = "2"
+# Apple ID web sign-in (auth/apple_session). The cookie jar is reqwest's own
+# cookie store crate (same version reqwest's `cookies` feature uses), kept here
+# so the session can be serialized to the host's opaque blob.
+cookie_store = "0.22"
+# SRP-6a big-number arithmetic (already in the tree via jsonwebtoken).
+num-bigint = "0.4"
+# Hashcash proof of work (X-Apple-HC): SHA-1, same RustCrypto family as sha2.
+sha1 = "0.10"
+# Wipes the password and the derived SRP key after use (already in the tree).
+zeroize = "1"
+# The SRP private ephemeral `a` (already in the tree via ring).
+getrandom = "0.2"
+# Hidden password prompt for the dev-only apple_signin_probe binary.
+rpassword = "7"
 
 [profile.release]
 opt-level = "z"

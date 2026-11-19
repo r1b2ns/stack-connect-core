@@ -6,7 +6,9 @@ use std::sync::Arc;
 
 use crate::error::StackError;
 use crate::logging::{self, LogLevel};
-use crate::ports::{AccessTokenProvider, BlobStore, CoreLogger, CredentialStore, DebugLogger};
+use crate::ports::{
+    AccessTokenProvider, BlobStore, CoreLogger, CredentialStore, DebugLogger, SessionStore,
+};
 use crate::service::kind::{CredentialField, ServiceKind};
 use crate::service::provider::Provider;
 use crate::service::registry;
@@ -88,6 +90,54 @@ pub fn connect_with_access_token(
     debug_logger: Option<Arc<dyn DebugLogger>>,
 ) -> Result<Arc<Provider>, StackError> {
     let inner = registry::build_with_access_token(kind, &account_id, token_provider, debug_logger)?;
+    Ok(Provider::new(inner))
+}
+
+/// Builds a connected App Store Connect [`Provider`] for an account added with
+/// "Sign in with Apple ID", authorized with the web session `session_store`
+/// holds for `account_id` (the blob [`crate::apple_id::AppleIdSignIn::finish`]
+/// returned) instead of an API key.
+///
+/// `team_id` is the account's App Store Connect team (an
+/// [`crate::auth::apple_session::session::AppleTeam::provider_id`]); the
+/// session is switched to it before the first request when it acts for
+/// another team. Requests go to App Store Connect's web API
+/// (`appstoreconnect.apple.com/iris/v1`). After every response that refreshes
+/// cookies the core saves the session back through `session_store`.
+///
+/// Provisioning (devices, bundle ids, certificates, profiles) goes to the
+/// Apple Developer Portal (`developer.apple.com/services-account`) with the
+/// account's *Developer Portal* team, which the core resolves from the Apple
+/// ID's portal teams on the first provisioning call (matched to the App Store
+/// Connect team by name) and saves with the session; a team it cannot match
+/// unambiguously makes provisioning calls fail with
+/// [`StackError::Unsupported`]. Renaming or deleting a bundle id and
+/// Analytics Reports are not reachable with a session: Analytics Reports are
+/// left out of `capabilities()`, and those calls fail with
+/// [`StackError::Unsupported`] without a request.
+///
+/// Errors on this path: an HTTP 401 from App Store Connect, or a session it
+/// refuses while switching the team, is [`StackError::SessionExpired`]: the
+/// host must ask the user to sign in again (the core has no password to retry
+/// with).
+///
+/// Synchronous and offline, like [`connect`]. When `debug_logger` is `Some`,
+/// requests are traced like [`connect`]'s, with the session's cookies, CSRF
+/// tokens and sign-in headers redacted.
+///
+/// # Errors
+/// [`StackError::InvalidCredentials`] for a blank `account_id` or when the
+/// store has no session for it; [`StackError::Decode`] for a blob the core
+/// cannot read.
+#[uniffi::export]
+pub fn connect_with_apple_session(
+    account_id: String,
+    team_id: u64,
+    session_store: Arc<dyn SessionStore>,
+    debug_logger: Option<Arc<dyn DebugLogger>>,
+) -> Result<Arc<Provider>, StackError> {
+    let inner =
+        registry::build_with_apple_session(&account_id, team_id, session_store, debug_logger)?;
     Ok(Provider::new(inner))
 }
 

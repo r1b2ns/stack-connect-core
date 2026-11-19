@@ -8,9 +8,9 @@ use std::sync::Mutex;
 use std::collections::HashMap;
 
 use stack_core::{
-    available_services, connect, connect_with_access_token, credential_schema, set_core_logger,
-    AccessTokenProvider, Capability, CoreLogger, CredentialStore, LogLevel, Provider, ServiceKind,
-    StackError,
+    available_services, connect, connect_with_access_token, connect_with_apple_session,
+    credential_schema, set_core_logger, AccessTokenProvider, AppleIdSignIn, Capability, CoreLogger,
+    CredentialStore, LogLevel, Provider, ServiceKind, SessionStore, StackError,
 };
 
 #[test]
@@ -363,5 +363,41 @@ fn connect_with_access_token_rejects_app_store_connect_and_blank_ids() {
     assert!(matches!(
         connect_with_access_token(ServiceKind::GooglePlay, " ".into(), tokens(), None),
         Err(StackError::InvalidCredentials { .. })
+    ));
+}
+
+/// A `SessionStore` holding at most one blob.
+struct OneSession(Option<Vec<u8>>);
+
+impl SessionStore for OneSession {
+    fn load(&self, _account_id: String) -> Option<Vec<u8>> {
+        self.0.clone()
+    }
+    fn save(&self, _account_id: String, _blob: Vec<u8>) {}
+}
+
+#[test]
+fn connect_with_apple_session_needs_a_saved_session_the_core_wrote() {
+    let missing = connect_with_apple_session("acct".into(), 1, Arc::new(OneSession(None)), None);
+    assert!(matches!(
+        missing,
+        Err(StackError::InvalidCredentials { .. })
+    ));
+    let foreign = connect_with_apple_session(
+        "acct".into(),
+        1,
+        Arc::new(OneSession(Some(b"{}".to_vec()))),
+        None,
+    );
+    assert!(matches!(foreign, Err(StackError::Decode { .. })));
+}
+
+#[tokio::test]
+async fn apple_id_sign_in_is_constructible_offline_and_not_finished() {
+    let sign_in = AppleIdSignIn::new().unwrap();
+    assert!(sign_in.teams().await.is_empty());
+    assert!(matches!(
+        sign_in.finish().await,
+        Err(StackError::Auth { .. })
     ));
 }

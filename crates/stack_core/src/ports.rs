@@ -102,3 +102,26 @@ pub trait AccessTokenProvider: Send + Sync {
     /// error that is not a `StackError` also ends up as `Auth`.
     async fn access_token(&self, account_id: String) -> Result<String, crate::error::StackError>;
 }
+
+/// Secure storage for the Apple ID web session of App Store Connect accounts
+/// added with "Sign in with Apple ID", implemented natively (the Keychain on
+/// iOS) and injected across the FFI boundary as a foreign trait through
+/// [`crate::facade::connect_with_apple_session`]. Mirrors [`CredentialStore`].
+///
+/// The blob is opaque, versioned bytes the core wrote (the session cookies,
+/// the widget key and the last selected team). It is a credential: store it
+/// like a password and never log it. The core never stores the Apple ID
+/// password, so nothing here can sign in again by itself.
+///
+/// The core reads the blob once, when the provider is built, and writes it
+/// back after every response that set cookies (Apple refreshes them), so the
+/// next launch restores the newest session. Several accounts (one per team)
+/// may share one Apple ID session: the host decides how `account_id` maps to
+/// its storage item, e.g. one item per Apple ID.
+#[uniffi::export(with_foreign)]
+pub trait SessionStore: Send + Sync {
+    /// The session blob saved for `account_id`, if any.
+    fn load(&self, account_id: String) -> Option<Vec<u8>>;
+    /// Stores or replaces the session blob for `account_id`.
+    fn save(&self, account_id: String, blob: Vec<u8>);
+}
