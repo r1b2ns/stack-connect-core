@@ -5,7 +5,7 @@
 > others in the future) enters as a **plugin** (`Provider`) that implements a
 > common contract. Consumed natively by iOS via **UniFFI**
 > (`StackCoreRust.xcframework`).
-> Historical companion: `../stack-connect/SHARED_CORE_PLAN.md` and `FLUTTER_PLAN.md`.
+> Historical companion: `../stack-connect-flutter/SHARED_CORE_PLAN.md` and `FLUTTER_PLAN.md`.
 >
 > **Central principle:** adding a new service = adding a `providers/<x>/` module
 > (+ an authenticator, if needed) and registering it. **Nothing** in the core, the
@@ -41,7 +41,7 @@
                           └─────────┬──────────┘
         ┌──────────────┬───────────┼───────────┬───────────────┐
         ▼              ▼           ▼           ▼               ▼
-  providers/appstore  firebase  googleplay   (aws)         (github)   ← plugins
+  providers/appstore (firebase) googleplay   (aws)         (github)   ← plugins
         │              │           │           │               │
         └──────────────┴─────┬─────┴───────────┴───────────────┘
                              │ use
@@ -112,6 +112,20 @@ adding a **new capability** = one more method in `Provider`. (Alternative for
 very rich APIs: sub-objects per capability, e.g. `fn reviews(&self) -> Option<Arc<dyn Reviews>>` —
 adopt only if the capability becomes too large for a single method.)
 
+**As built**, the sub-object form won: `Provider` is a concrete exported object (UniFFI
+cannot export an async trait cleanly) that wraps the internal `ProviderImpl` trait, and
+each capability is a handle off it (`provider.reviews()`, `provider.builds()`, …,
+`None` when the service lacks it). `Capability` today is `Apps`, `Reviews`,
+`AppStoreVersions`, `Builds`, `BetaGroups`, `BetaBuildLocalizations`,
+`BetaAppLocalizations`, `BetaAppReviewDetail`, `AppMetadata`,
+`AccessibilityDeclarations`, `Users`, `Devices`, `BundleIds`, `Certificates`, `Profiles`,
+`Analytics`, `AppDetails`, `StoreListings`, `Tracks`, `AppIcons`, `ReleaseManagement`,
+`PlayUsers` (append-only; both bindings encode variants by position). The factory grew
+two alternative entry points next to `connect`: `connect_with_access_token` (Google Play
+with a host-supplied user token) and `connect_with_apple_session` (App Store Connect on
+an Apple ID web session). See `service/provider.rs` and `facade.rs` for the real
+signatures.
+
 ## 4. How to Add a New Service (e.g. AWS, GitHub)
 
 Without touching `domain`, `facade`, `service::provider` or the other plugins:
@@ -162,7 +176,7 @@ stack-connect-core/
 ├── rust-toolchain.toml
 ├── crates/
 │   └── stack_core/
-│       ├── Cargo.toml         # features: frb (Dart binding), cli (bindgen); no per-service features
+│       ├── Cargo.toml         # features: frb (Dart binding), cli (bindgen), apple-signin-probe (dev CLI); no per-service features
 │       ├── uniffi.toml
 │       ├── src/
 │       │   ├── lib.rs         # uniffi::setup_scaffolding!; re-exports
@@ -246,7 +260,14 @@ uniffi       = { version = "0.31", features = ["tokio"] }  # async → Swift; pu
 [features]
 cli = ["uniffi/cli"]               # embedded uniffi-bindgen binary
 frb = ["dep:flutter_rust_bridge"]  # Dart binding (flutter_rust_bridge), off by default
+apple-signin-probe = ["dep:rpassword"]  # dev-only Apple ID sign-in CLI, off by default
 ```
+
+This was the starting set. As built, `stack_core` also depends on `base64`,
+`async-trait`, `uuid`, `percent-encoding`, `flate2` (analytics segments), `md-5`
+(screenshot upload checksum), the `.scexport` crypto (`aes-gcm`, `pbkdf2`, `hkdf`,
+`hmac`, `sha2`) and the Apple ID sign-in (`cookie_store`, `num-bigint`, `sha1`,
+`zeroize`, `getrandom`); the root `Cargo.toml` is the source of truth.
 
 As built there are **no per-service or per-auth-scheme cargo features**: every provider
 and authenticator is always compiled in. Google Play needed no new dependency
@@ -258,8 +279,20 @@ becomes a problem.
 
 - **Phase 0 — Skeleton + proof of binding. ✅ COMPLETE.** Cargo workspace; UniFFI facade; `CredentialStore` callback (foreign trait); typed error `StackError`; `build-xcframework.sh`/`gen-swift.sh`/`swift-smoke.sh`; host Swift smoke + **XCTest on iOS simulator** crossing the boundary. fmt/clippy passing. Rust toolchain 1.96. *(Used a disposable example provider; to be replaced by the service contract.)*
 - **Phase 1 — Service contract + 1st plugin (App Store Connect). ✅ COMPLETE.** `service::{provider, kind, registry}` (`Provider`/`ServiceKind`/`Capability`/`CredentialField`); `auth::es256`; `providers/appstore` with `validate` + `fetch_apps` (`GET /v1/apps`, `links.next` pagination); facade `connect`/`credential_schema`/`available_services`. Google sample removed. 17 Rust tests + host smoke + simulator XCTest passing. *Remains to plug into iOS app (strangler) — start of Phase 2.*
-- **Phase 2 — Full ASC capabilities + sync.** The ~31 resources as capabilities; 403 error *pending agreements*; generic `SyncService` over `BlobStore`. Migrate the rest of `AppleAccountConnection`.
-- **Phase 3 — Cleanup.** Remove legacy Swift packages + `appstoreconnect-swift-sdk` usage; keep native only `WidgetIconCache`/`Log`/`AppGroup`.
+- **Phase 2 — Full ASC capabilities + sync. ✅ COMPLETE.** The ~31 resources as capabilities; 403 error *pending agreements*; generic `SyncService` over `BlobStore`. Migrate the rest of `AppleAccountConnection`.
+- **Phase 3 — Cleanup. ✅ COMPLETE.** Remove legacy Swift packages + `appstoreconnect-swift-sdk` usage; keep native only `WidgetIconCache`/`Log`/`AppGroup`. The SDK is gone and the iOS app runs on the core only.
+- **App Store Connect — Analytics Reports. ✅ IN THE CORE.** `Capability::Analytics`: report requests (create + list), reports, instances and segments (download, gunzip, TSV parse). API key only: an Apple ID web session leaves it out of `capabilities()`.
+- **App Store Connect — "Sign in with Apple ID" (web session). ✅ IN THE CORE.**
+  `AppleIdSignIn` (SRP-6a with Apple's s2k derivation, hashcash, two-factor code by
+  trusted device or SMS, trust) produces an opaque, versioned session blob (v2, with
+  the Developer Portal teams) that the host keeps behind the new `SessionStore` foreign
+  trait. `connect_with_apple_session(account_id, team_id, session_store, debug_logger)`
+  runs the App Store Connect client on that session (`AppStoreAuth { ApiKey,
+  WebSession }`): iris for App Store Connect, services-account for provisioning, CSRF
+  tokens echoed per host, team switching, refreshed cookies saved back. New
+  `StackError::SessionExpired` (a 401); Analytics Reports and bundle id rename/delete are
+  `Unsupported` on a session. Exposed to UniFFI and FRB. Dev CLI `apple_signin_probe`
+  (feature `apple-signin-probe`) for live checks.
 
 - **Google Play — first slice (connect + list apps). ✅ IN THE CORE.** `ServiceKind::GooglePlay`
   (appended); credential keys `clientEmail`/`privateKeyId`/`privateKey`, which the host
@@ -381,7 +414,7 @@ becomes a problem.
 > is ported later, it is just a `providers/firebase/` + registration reusing
 > `auth::oauth_jwt` (see §4), without touching core or facade.
 - **Dart binding (flutter_rust_bridge).** Second binding generator, alongside UniFFI, for the
-  Flutter Android + desktop apps (`../stack-connect/FLUTTER_PLAN.md`). FRB is a *separate* toolchain
+  Flutter Android + desktop apps (`../stack-connect-flutter/FLUTTER_PLAN.md`). FRB is a *separate* toolchain
   from UniFFI (not a `uniffi.toml` backend): add an **FRB facade behind a `frb` cargo feature**
   (e.g. `src/frb_api.rs` / `bindings/dart/`), mirroring the UniFFI `facade.rs` / `bindings/swift`
   split — the core modules and the UniFFI facade stay untouched. Re-expose `available_services` /
