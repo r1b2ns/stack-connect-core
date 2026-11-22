@@ -53,3 +53,12 @@ opt-level = "z"
 lto = true
 codegen-units = 1
 strip = true
+
+# Smaller dev artifacts: line tables keep file:line in backtraces/panics but
+# drop full variable debuginfo (lldb won't show locals). Third-party crates get
+# no debuginfo at all.
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+debug = false
