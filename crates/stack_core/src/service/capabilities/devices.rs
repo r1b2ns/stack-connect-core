@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 
+use crate::audit::{AuditBinding, AuditTarget};
 use crate::domain::DeviceInfo;
 use crate::error::StackError;
 
@@ -46,12 +47,23 @@ pub(crate) trait DevicesImpl: Send + Sync {
 #[derive(uniffi::Object)]
 pub struct Devices {
     inner: Box<dyn DevicesImpl>,
+    /// The audit target the provider bound this handle to (see
+    /// [`crate::audit`]).
+    audit: AuditBinding,
 }
 
 impl Devices {
     /// Wraps a concrete capability impl into the exported handle.
     pub(crate) fn new(inner: Box<dyn DevicesImpl>) -> Arc<Self> {
-        Arc::new(Self { inner })
+        Arc::new(Self {
+            inner,
+            audit: AuditBinding::default(),
+        })
+    }
+
+    /// Audits this handle's calls into `target` (no-op for `None`).
+    pub(crate) fn bind_audit(&self, target: Option<&AuditTarget>) {
+        self.audit.bind(target);
     }
 }
 
@@ -66,7 +78,9 @@ impl Devices {
     /// [`StackError::Decode`] on malformed JSON, or [`StackError::Network`] on
     /// transport failure.
     pub async fn fetch_devices(&self) -> Result<Vec<DeviceInfo>, StackError> {
-        self.inner.fetch_devices().await
+        self.audit
+            .run("devices.fetch_devices", self.inner.fetch_devices())
+            .await
     }
 
     /// Registers a new device with `name`, ASC `platform` (a raw
@@ -85,7 +99,12 @@ impl Devices {
         platform: String,
         udid: String,
     ) -> Result<DeviceInfo, StackError> {
-        self.inner.create_device(name, platform, udid).await
+        self.audit
+            .run(
+                "devices.create_device",
+                self.inner.create_device(name, platform, udid),
+            )
+            .await
     }
 
     /// Updates the device `id`, sending only the attributes that are `Some`:
@@ -103,6 +122,11 @@ impl Devices {
         name: Option<String>,
         status: Option<String>,
     ) -> Result<(), StackError> {
-        self.inner.update_device(id, name, status).await
+        self.audit
+            .run(
+                "devices.update_device",
+                self.inner.update_device(id, name, status),
+            )
+            .await
     }
 }

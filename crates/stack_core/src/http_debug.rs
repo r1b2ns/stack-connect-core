@@ -4,10 +4,16 @@
 //! Lives at the crate root (not under `providers/`) because authenticators also
 //! perform HTTP — e.g. an OAuth token exchange — and must trace through the same
 //! function, while `auth` must not depend on `providers`.
+//!
+//! It is also where the network audit ([`crate::audit`]) records each
+//! exchange: every send function below hands the request and its outcome to
+//! [`crate::audit::recorder`], which emits an entry only when the running
+//! task is audited.
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use crate::audit::recorder::{Body, Exchange, StreamAudit};
 use crate::error::StackError;
 use crate::logging::http::{
     millis, request_id, summarize_error_body, transport_failure, RequestInfo,
@@ -55,6 +61,9 @@ fn retry_after_secs(headers: &reqwest::header::HeaderMap) -> Option<u64> {
 ///   summary of the error body (Google's `code` / `status` / `message` /
 ///   `details[]`, an OAuth error, App Store Connect `errors[]`).
 ///
+/// When the call is audited (see [`crate::audit`]), one entry is recorded
+/// for the exchange, including a transport failure.
+///
 /// This is the single choke point every HTTP call routes through, so logging
 /// lives in one place and the send/read boilerplate is not duplicated.
 ///
@@ -71,20 +80,41 @@ pub(crate) async fn send(
         logger.log(render_curl(&request));
     }
     let info = RequestInfo::of(&request);
+    let mut audit = Exchange::begin(&request);
     let started = Instant::now();
 
     let response = match client.execute(request).await {
         Ok(response) => response,
-        Err(err) => return Err(transport_error(&info, started.elapsed(), err)),
+        Err(err) => {
+            return Err(audited_transport_error(
+                audit,
+                &info,
+                started.elapsed(),
+                err,
+            ))
+        }
     };
+    audit.response(&response);
     let status = response.status();
     let request_id = request_id(response.headers());
     let retry_after_secs = retry_after_secs(response.headers());
     let headers = response.headers().clone();
-    let body = match response.text().await {
-        Ok(body) => body,
-        Err(err) => return Err(transport_error(&info, started.elapsed(), err)),
+    // Exactly what `Response::text` does without reqwest's `charset` feature
+    // (off in this crate): lossy UTF-8 of the whole body. Reading the bytes
+    // first lets the audit see the real size and spot a binary body.
+    let raw = match response.bytes().await {
+        Ok(raw) => raw,
+        Err(err) => {
+            return Err(audited_transport_error(
+                audit,
+                &info,
+                started.elapsed(),
+                err,
+            ))
+        }
     };
+    audit.finish(Body::Bytes(&raw));
+    let body = String::from_utf8_lossy(&raw).into_owned();
 
     if let Some(logger) = logger {
         logger.log(render_response(status, &body));
@@ -124,21 +154,45 @@ pub(crate) async fn send_decoding(
         logger.log(render_curl(&request));
     }
     let info = RequestInfo::of(&request);
+    let mut audit = Exchange::begin(&request);
     let started = Instant::now();
 
     let response = match client.execute(request).await {
         Ok(response) => response,
-        Err(err) => return Err(transport_error(&info, started.elapsed(), err)),
+        Err(err) => {
+            return Err(audited_transport_error(
+                audit,
+                &info,
+                started.elapsed(),
+                err,
+            ))
+        }
     };
+    audit.response(&response);
     let status = response.status();
     let request_id = request_id(response.headers());
     let retry_after_secs = retry_after_secs(response.headers());
     let headers = response.headers().clone();
     let raw = match response.bytes().await {
         Ok(raw) => raw.to_vec(),
-        Err(err) => return Err(transport_error(&info, started.elapsed(), err)),
+        Err(err) => {
+            return Err(audited_transport_error(
+                audit,
+                &info,
+                started.elapsed(),
+                err,
+            ))
+        }
     };
-    let body = String::from_utf8_lossy(&decode(&headers, raw)?).into_owned();
+    let decoded = match decode(&headers, raw) {
+        Ok(decoded) => decoded,
+        Err(err) => {
+            audit.fail(&err.to_string());
+            return Err(err);
+        }
+    };
+    audit.finish(Body::Bytes(&decoded));
+    let body = String::from_utf8_lossy(&decoded).into_owned();
 
     if let Some(logger) = logger {
         logger.log(render_response(status, &body));
@@ -225,10 +279,15 @@ pub(crate) async fn send_and_read_capped(
 /// line (status, duration, request id; never a body summary) is already
 /// written; reading the body through it logs a failure the same way [`send`]
 /// does.
+///
+/// When the call is audited, the entry is emitted once the body has been read
+/// ([`Self::text`], or [`Self::chunk`] reaching the end) or when the response
+/// is dropped (a caller that stops reading early).
 pub(crate) struct Unbuffered {
     response: reqwest::Response,
     info: RequestInfo,
     started: Instant,
+    audit: StreamAudit,
 }
 
 impl Unbuffered {
@@ -254,8 +313,19 @@ impl Unbuffered {
         &mut self,
     ) -> Result<Option<impl std::ops::Deref<Target = [u8]>>, StackError> {
         match self.response.chunk().await {
-            Ok(chunk) => Ok(chunk),
-            Err(err) => Err(transport_error(&self.info, self.started.elapsed(), err)),
+            Ok(Some(chunk)) => {
+                self.audit.chunk(&chunk);
+                Ok(Some(chunk))
+            }
+            Ok(None) => {
+                self.audit.end();
+                Ok(None)
+            }
+            Err(err) => {
+                let audit = std::mem::replace(&mut self.audit, StreamAudit::new(Exchange::none()));
+                audit.fail(&err.to_string());
+                Err(transport_error(&self.info, self.started.elapsed(), err))
+            }
         }
     }
 
@@ -268,11 +338,18 @@ impl Unbuffered {
             response,
             info,
             started,
+            audit,
         } = self;
-        response
-            .text()
-            .await
-            .map_err(|err| transport_error(&info, started.elapsed(), err))
+        match response.text().await {
+            Ok(text) => {
+                audit.finish_text(&text);
+                Ok(text)
+            }
+            Err(err) => {
+                audit.fail(&err.to_string());
+                Err(transport_error(&info, started.elapsed(), err))
+            }
+        }
     }
 }
 
@@ -291,12 +368,21 @@ pub(crate) async fn send_unbuffered(
     let request = request.map_err(|e| StackError::network(e.to_string()))?;
     trace(&request);
     let info = RequestInfo::of(&request);
+    let mut audit = Exchange::begin(&request);
     let started = Instant::now();
 
     let response = match client.execute(request).await {
         Ok(response) => response,
-        Err(err) => return Err(transport_error(&info, started.elapsed(), err)),
+        Err(err) => {
+            return Err(audited_transport_error(
+                audit,
+                &info,
+                started.elapsed(),
+                err,
+            ))
+        }
     };
+    audit.response(&response);
     log_response(
         &info,
         response.status(),
@@ -308,7 +394,20 @@ pub(crate) async fn send_unbuffered(
         response,
         info,
         started,
+        audit: StreamAudit::new(audit),
     })
+}
+
+/// [`transport_error`], also emitting the audit entry of the failed exchange
+/// (with reqwest's own error text, as [`StackError::Network`] carries it).
+fn audited_transport_error(
+    audit: Exchange,
+    info: &RequestInfo,
+    elapsed: Duration,
+    err: reqwest::Error,
+) -> StackError {
+    audit.fail(&err.to_string());
+    transport_error(info, elapsed, err)
 }
 
 /// Logs a transport failure (without the URL's query) and maps it to

@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 
+use crate::audit::{AuditBinding, AuditTarget};
 use crate::domain::BetaAppReviewDetailInfo;
 use crate::error::StackError;
 
@@ -49,12 +50,23 @@ pub(crate) trait BetaAppReviewDetailImpl: Send + Sync {
 #[derive(uniffi::Object)]
 pub struct BetaAppReviewDetail {
     inner: Box<dyn BetaAppReviewDetailImpl>,
+    /// The audit target the provider bound this handle to (see
+    /// [`crate::audit`]).
+    audit: AuditBinding,
 }
 
 impl BetaAppReviewDetail {
     /// Wraps a concrete capability impl into the exported handle.
     pub(crate) fn new(inner: Box<dyn BetaAppReviewDetailImpl>) -> Arc<Self> {
-        Arc::new(Self { inner })
+        Arc::new(Self {
+            inner,
+            audit: AuditBinding::default(),
+        })
+    }
+
+    /// Audits this handle's calls into `target` (no-op for `None`).
+    pub(crate) fn bind_audit(&self, target: Option<&AuditTarget>) {
+        self.audit.bind(target);
     }
 }
 
@@ -73,7 +85,12 @@ impl BetaAppReviewDetail {
         &self,
         app_id: String,
     ) -> Result<BetaAppReviewDetailInfo, StackError> {
-        self.inner.fetch_beta_app_review_detail(app_id).await
+        self.audit
+            .run(
+                "beta_app_review_detail.fetch_beta_app_review_detail",
+                self.inner.fetch_beta_app_review_detail(app_id),
+            )
+            .await
     }
 
     /// Updates the beta app review detail `detail_id`, replacing only the
@@ -100,17 +117,20 @@ impl BetaAppReviewDetail {
         is_demo_account_required: Option<bool>,
         notes: Option<String>,
     ) -> Result<BetaAppReviewDetailInfo, StackError> {
-        self.inner
-            .update_beta_app_review_detail(
-                detail_id,
-                contact_first_name,
-                contact_last_name,
-                contact_email,
-                contact_phone,
-                demo_account_name,
-                demo_account_password,
-                is_demo_account_required,
-                notes,
+        self.audit
+            .run(
+                "beta_app_review_detail.update_beta_app_review_detail",
+                self.inner.update_beta_app_review_detail(
+                    detail_id,
+                    contact_first_name,
+                    contact_last_name,
+                    contact_email,
+                    contact_phone,
+                    demo_account_name,
+                    demo_account_password,
+                    is_demo_account_required,
+                    notes,
+                ),
             )
             .await
     }

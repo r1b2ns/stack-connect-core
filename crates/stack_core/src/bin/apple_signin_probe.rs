@@ -334,8 +334,8 @@ async fn provisioning(options: &Options) -> Result<(), String> {
 async fn client(options: &Options) -> Result<(), String> {
     let (path, team_id) = client_target(options)?;
     let store = Arc::new(FileSessionStore { path: path.clone() });
-    let provider =
-        connect_with_apple_session("probe".into(), team_id, store, None).map_err(describe_stack)?;
+    let provider = connect_with_apple_session("probe".into(), team_id, store, None, None)
+        .map_err(describe_stack)?;
     println!("connected for team {team_id}");
     println!("capabilities: {:?}", provider.capabilities());
     match provider.validate().await {
@@ -357,8 +357,8 @@ async fn client(options: &Options) -> Result<(), String> {
 async fn provisioning_client(options: &Options) -> Result<(), String> {
     let (path, team_id) = client_target(options)?;
     let store = Arc::new(FileSessionStore { path: path.clone() });
-    let provider =
-        connect_with_apple_session("probe".into(), team_id, store, None).map_err(describe_stack)?;
+    let provider = connect_with_apple_session("probe".into(), team_id, store, None, None)
+        .map_err(describe_stack)?;
     println!("connected for team {team_id}");
     let missing = |name: &str| format!("the provider has no {name} capability");
 
@@ -434,8 +434,8 @@ async fn beta_groups(options: &Options) -> Result<(), String> {
         .ok_or(format!("beta-groups needs --app\n{USAGE}"))?;
     let (path, team_id) = client_target(options)?;
     let store = Arc::new(FileSessionStore { path });
-    let provider =
-        connect_with_apple_session("probe".into(), team_id, store, None).map_err(describe_stack)?;
+    let provider = connect_with_apple_session("probe".into(), team_id, store, None, None)
+        .map_err(describe_stack)?;
     let groups = provider
         .beta_groups()
         .ok_or("the provider has no beta groups capability")?
@@ -474,8 +474,8 @@ async fn write_test(options: &Options) -> Result<(), String> {
         .ok_or(format!("write-test needs --group\n{USAGE}"))?;
     let (path, team_id) = client_target(options)?;
     let store = Arc::new(FileSessionStore { path });
-    let provider =
-        connect_with_apple_session("probe".into(), team_id, store, None).map_err(describe_stack)?;
+    let provider = connect_with_apple_session("probe".into(), team_id, store, None, None)
+        .map_err(describe_stack)?;
     let groups = provider
         .beta_groups()
         .ok_or("the provider has no beta groups capability")?;

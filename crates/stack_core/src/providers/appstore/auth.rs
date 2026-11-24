@@ -50,6 +50,7 @@ use reqwest::{RequestBuilder, StatusCode, Url};
 use serde_json::Value;
 use tokio::sync::OnceCell;
 
+use crate::audit;
 use crate::auth::apple_session::portal::{self, ProxiedMethod};
 use crate::auth::apple_session::session::AppleSession;
 use crate::auth::es256::AppStoreAuthenticator;
@@ -309,7 +310,13 @@ impl SessionAuth {
     /// [`StackError::Http`] for transport and server failures.
     pub(crate) async fn portal_team_id(&self) -> Result<&str, StackError> {
         self.portal_team
-            .get_or_try_init(|| self.resolve_portal_team())
+            .get_or_try_init(|| {
+                audit::scope::operation(
+                    None,
+                    audit::ops::APPLE_SESSION_PORTAL_TEAM,
+                    self.resolve_portal_team(),
+                )
+            })
             .await
             .map(String::as_str)
     }
@@ -492,10 +499,13 @@ impl SessionAuth {
         if session.team_id() == Some(self.team_id) {
             return Ok(());
         }
-        session
-            .select_team(self.team_id)
-            .await
-            .map_err(StackError::from)?;
+        audit::scope::operation(
+            None,
+            audit::ops::APPLE_SESSION_SELECT_TEAM,
+            session.select_team(self.team_id),
+        )
+        .await
+        .map_err(StackError::from)?;
         drop(session);
         // The switch sets a new team cookie; keep the saved session in step.
         self.persist().await;

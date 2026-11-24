@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 
+use crate::audit::{AuditBinding, AuditTarget};
 use crate::domain::{BuildDetailInfo, BuildInfo, BuildsPage};
 use crate::error::StackError;
 
@@ -82,12 +83,23 @@ pub(crate) trait BuildsImpl: Send + Sync {
 #[derive(uniffi::Object)]
 pub struct Builds {
     inner: Box<dyn BuildsImpl>,
+    /// The audit target the provider bound this handle to (see
+    /// [`crate::audit`]).
+    audit: AuditBinding,
 }
 
 impl Builds {
     /// Wraps a concrete capability impl into the exported handle.
     pub(crate) fn new(inner: Box<dyn BuildsImpl>) -> Arc<Self> {
-        Arc::new(Self { inner })
+        Arc::new(Self {
+            inner,
+            audit: AuditBinding::default(),
+        })
+    }
+
+    /// Audits this handle's calls into `target` (no-op for `None`).
+    pub(crate) fn bind_audit(&self, target: Option<&AuditTarget>) {
+        self.audit.bind(target);
     }
 }
 
@@ -104,7 +116,12 @@ impl Builds {
         app_id: String,
         limit: u32,
     ) -> Result<Vec<BuildInfo>, StackError> {
-        self.inner.fetch_builds(app_id, limit).await
+        self.audit
+            .run(
+                "builds.fetch_builds",
+                self.inner.fetch_builds(app_id, limit),
+            )
+            .await
     }
 
     /// Fetches a single page of builds for `app_id`, newest first (by upload
@@ -126,8 +143,17 @@ impl Builds {
         limit: u32,
         page_token: Option<String>,
     ) -> Result<BuildsPage, StackError> {
-        self.inner
-            .fetch_builds_page(app_id, platform, processing_states, limit, page_token)
+        self.audit
+            .run(
+                "builds.fetch_builds_page",
+                self.inner.fetch_builds_page(
+                    app_id,
+                    platform,
+                    processing_states,
+                    limit,
+                    page_token,
+                ),
+            )
             .await
     }
 
@@ -144,7 +170,12 @@ impl Builds {
         group_id: String,
         limit: u32,
     ) -> Result<Vec<BuildInfo>, StackError> {
-        self.inner.fetch_builds_for_group(group_id, limit).await
+        self.audit
+            .run(
+                "builds.fetch_builds_for_group",
+                self.inner.fetch_builds_for_group(group_id, limit),
+            )
+            .await
     }
 
     /// Fetches the full detail of the build `build_id`: the enriched build plus
@@ -159,7 +190,12 @@ impl Builds {
         &self,
         build_id: String,
     ) -> Result<BuildDetailInfo, StackError> {
-        self.inner.fetch_build_detail(build_id).await
+        self.audit
+            .run(
+                "builds.fetch_build_detail",
+                self.inner.fetch_build_detail(build_id),
+            )
+            .await
     }
 
     /// Fetches the build currently attached to the App Store version `version_id`,
@@ -174,7 +210,12 @@ impl Builds {
         &self,
         version_id: String,
     ) -> Result<Option<BuildInfo>, StackError> {
-        self.inner.fetch_current_build(version_id).await
+        self.audit
+            .run(
+                "builds.fetch_current_build",
+                self.inner.fetch_current_build(version_id),
+            )
+            .await
     }
 
     /// Marks the build `build_id` as expired (sets its `expired` attribute to
@@ -185,7 +226,9 @@ impl Builds {
     /// agreements, [`StackError::Http`] on any other non-2xx response, or
     /// [`StackError::Network`] on transport failure.
     pub async fn expire_build(&self, build_id: String) -> Result<(), StackError> {
-        self.inner.expire_build(build_id).await
+        self.audit
+            .run("builds.expire_build", self.inner.expire_build(build_id))
+            .await
     }
 
     /// Attaches the build `build_id` to the App Store version `version_id` (sets
@@ -200,7 +243,12 @@ impl Builds {
         version_id: String,
         build_id: String,
     ) -> Result<(), StackError> {
-        self.inner.attach_build(version_id, build_id).await
+        self.audit
+            .run(
+                "builds.attach_build",
+                self.inner.attach_build(version_id, build_id),
+            )
+            .await
     }
 
     /// Submits the build `build_id` for beta (TestFlight) review by creating a
@@ -211,7 +259,12 @@ impl Builds {
     /// agreements, [`StackError::Http`] on any other non-2xx response, or
     /// [`StackError::Network`] on transport failure.
     pub async fn submit_build_for_beta_review(&self, build_id: String) -> Result<(), StackError> {
-        self.inner.submit_build_for_beta_review(build_id).await
+        self.audit
+            .run(
+                "builds.submit_build_for_beta_review",
+                self.inner.submit_build_for_beta_review(build_id),
+            )
+            .await
     }
 
     /// Adds the build `build_id` to each beta group in `group_ids` (appends to the
@@ -227,7 +280,12 @@ impl Builds {
         build_id: String,
         group_ids: Vec<String>,
     ) -> Result<(), StackError> {
-        self.inner.add_build_to_groups(build_id, group_ids).await
+        self.audit
+            .run(
+                "builds.add_build_to_groups",
+                self.inner.add_build_to_groups(build_id, group_ids),
+            )
+            .await
     }
 
     /// Removes the build `build_id` from the beta group `group_id` (deletes the
@@ -242,6 +300,11 @@ impl Builds {
         build_id: String,
         group_id: String,
     ) -> Result<(), StackError> {
-        self.inner.remove_build_from_group(build_id, group_id).await
+        self.audit
+            .run(
+                "builds.remove_build_from_group",
+                self.inner.remove_build_from_group(build_id, group_id),
+            )
+            .await
     }
 }

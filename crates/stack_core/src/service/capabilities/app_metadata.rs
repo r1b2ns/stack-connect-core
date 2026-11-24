@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 
+use crate::audit::{AuditBinding, AuditTarget};
 use crate::domain::{AppCategoryInfo, AppInfoDetails, AppInfoLocalizationInfo};
 use crate::error::StackError;
 
@@ -130,12 +131,23 @@ pub(crate) trait AppMetadataImpl: Send + Sync {
 #[derive(uniffi::Object)]
 pub struct AppMetadata {
     inner: Box<dyn AppMetadataImpl>,
+    /// The audit target the provider bound this handle to (see
+    /// [`crate::audit`]).
+    audit: AuditBinding,
 }
 
 impl AppMetadata {
     /// Wraps a concrete capability impl into the exported handle.
     pub(crate) fn new(inner: Box<dyn AppMetadataImpl>) -> Arc<Self> {
-        Arc::new(Self { inner })
+        Arc::new(Self {
+            inner,
+            audit: AuditBinding::default(),
+        })
+    }
+
+    /// Audits this handle's calls into `target` (no-op for `None`).
+    pub(crate) fn bind_audit(&self, target: Option<&AuditTarget>) {
+        self.audit.bind(target);
     }
 }
 
@@ -154,7 +166,12 @@ impl AppMetadata {
         &self,
         app_info_id: String,
     ) -> Result<Vec<AppInfoLocalizationInfo>, StackError> {
-        self.inner.fetch_app_info_localizations(app_info_id).await
+        self.audit
+            .run(
+                "app_metadata.fetch_app_info_localizations",
+                self.inner.fetch_app_info_localizations(app_info_id),
+            )
+            .await
     }
 
     /// Updates the app-info localization `id`, returning the updated
@@ -171,8 +188,11 @@ impl AppMetadata {
         name: String,
         subtitle: Option<String>,
     ) -> Result<AppInfoLocalizationInfo, StackError> {
-        self.inner
-            .update_app_info_localization(id, name, subtitle)
+        self.audit
+            .run(
+                "app_metadata.update_app_info_localization",
+                self.inner.update_app_info_localization(id, name, subtitle),
+            )
             .await
     }
 
@@ -193,12 +213,15 @@ impl AppMetadata {
         privacy_choices_url: Option<String>,
         privacy_policy_text: Option<String>,
     ) -> Result<AppInfoLocalizationInfo, StackError> {
-        self.inner
-            .update_app_info_localization_privacy(
-                id,
-                privacy_policy_url,
-                privacy_choices_url,
-                privacy_policy_text,
+        self.audit
+            .run(
+                "app_metadata.update_app_info_localization_privacy",
+                self.inner.update_app_info_localization_privacy(
+                    id,
+                    privacy_policy_url,
+                    privacy_choices_url,
+                    privacy_policy_text,
+                ),
             )
             .await
     }
@@ -219,8 +242,12 @@ impl AppMetadata {
         name: String,
         subtitle: Option<String>,
     ) -> Result<AppInfoLocalizationInfo, StackError> {
-        self.inner
-            .create_app_info_localization(app_info_id, locale, name, subtitle)
+        self.audit
+            .run(
+                "app_metadata.create_app_info_localization",
+                self.inner
+                    .create_app_info_localization(app_info_id, locale, name, subtitle),
+            )
             .await
     }
 
@@ -231,7 +258,12 @@ impl AppMetadata {
     /// agreements, [`StackError::Http`] on any other non-2xx response, or
     /// [`StackError::Network`] on transport failure.
     pub async fn delete_app_info_localization(&self, id: String) -> Result<(), StackError> {
-        self.inner.delete_app_info_localization(id).await
+        self.audit
+            .run(
+                "app_metadata.delete_app_info_localization",
+                self.inner.delete_app_info_localization(id),
+            )
+            .await
     }
 
     /// Fetches the full App Info detail for `app_id`: the app-info ids,
@@ -244,7 +276,12 @@ impl AppMetadata {
     /// [`StackError::Decode`] on malformed JSON, or [`StackError::Network`] on
     /// transport failure.
     pub async fn fetch_app_info(&self, app_id: String) -> Result<AppInfoDetails, StackError> {
-        self.inner.fetch_app_info(app_id).await
+        self.audit
+            .run(
+                "app_metadata.fetch_app_info",
+                self.inner.fetch_app_info(app_id),
+            )
+            .await
     }
 
     /// Lists the top-level App Store categories (iOS), each with the ids of its
@@ -256,7 +293,12 @@ impl AppMetadata {
     /// [`StackError::Decode`] on malformed JSON, or [`StackError::Network`] on
     /// transport failure.
     pub async fn fetch_app_categories(&self) -> Result<Vec<AppCategoryInfo>, StackError> {
-        self.inner.fetch_app_categories().await
+        self.audit
+            .run(
+                "app_metadata.fetch_app_categories",
+                self.inner.fetch_app_categories(),
+            )
+            .await
     }
 
     /// Updates the category relationships of the app-info `app_info_id`. Each of
@@ -276,13 +318,16 @@ impl AppMetadata {
         secondary_category_id: Option<String>,
         secondary_subcategory_one_id: Option<String>,
     ) -> Result<(), StackError> {
-        self.inner
-            .update_app_info_category(
-                app_info_id,
-                primary_category_id,
-                subcategory_one_id,
-                secondary_category_id,
-                secondary_subcategory_one_id,
+        self.audit
+            .run(
+                "app_metadata.update_app_info_category",
+                self.inner.update_app_info_category(
+                    app_info_id,
+                    primary_category_id,
+                    subcategory_one_id,
+                    secondary_category_id,
+                    secondary_subcategory_one_id,
+                ),
             )
             .await
     }
@@ -300,8 +345,12 @@ impl AppMetadata {
         content_rights_declaration: Option<String>,
         primary_locale: Option<String>,
     ) -> Result<(), StackError> {
-        self.inner
-            .update_app(id, content_rights_declaration, primary_locale)
+        self.audit
+            .run(
+                "app_metadata.update_app",
+                self.inner
+                    .update_app(id, content_rights_declaration, primary_locale),
+            )
             .await
     }
 
@@ -335,27 +384,30 @@ impl AppMetadata {
         is_user_generated_content: bool,
         age_rating_override: String,
     ) -> Result<(), StackError> {
-        self.inner
-            .update_age_rating(
-                id,
-                alcohol_tobacco,
-                contests,
-                gambling_simulated,
-                guns_or_other_weapons,
-                medical_information,
-                profanity,
-                sexual_content_graphic,
-                sexual_content_or_nudity,
-                horror_or_fear,
-                mature_or_suggestive,
-                violence_cartoon,
-                violence_realistic,
-                violence_graphic,
-                is_advertising,
-                is_gambling,
-                is_unrestricted_web_access,
-                is_user_generated_content,
-                age_rating_override,
+        self.audit
+            .run(
+                "app_metadata.update_age_rating",
+                self.inner.update_age_rating(
+                    id,
+                    alcohol_tobacco,
+                    contests,
+                    gambling_simulated,
+                    guns_or_other_weapons,
+                    medical_information,
+                    profanity,
+                    sexual_content_graphic,
+                    sexual_content_or_nudity,
+                    horror_or_fear,
+                    mature_or_suggestive,
+                    violence_cartoon,
+                    violence_realistic,
+                    violence_graphic,
+                    is_advertising,
+                    is_gambling,
+                    is_unrestricted_web_access,
+                    is_user_generated_content,
+                    age_rating_override,
+                ),
             )
             .await
     }
@@ -369,6 +421,11 @@ impl AppMetadata {
     /// [`StackError::Decode`] on malformed JSON, or [`StackError::Network`] on
     /// transport failure.
     pub async fn fetch_icon_url(&self, app_id: String) -> Result<Option<String>, StackError> {
-        self.inner.fetch_icon_url(app_id).await
+        self.audit
+            .run(
+                "app_metadata.fetch_icon_url",
+                self.inner.fetch_icon_url(app_id),
+            )
+            .await
     }
 }

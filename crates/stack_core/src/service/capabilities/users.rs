@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 
+use crate::audit::{AuditBinding, AuditTarget};
 use crate::domain::{TeamMemberInfo, UserInfo};
 use crate::error::StackError;
 
@@ -69,12 +70,23 @@ pub(crate) trait UsersImpl: Send + Sync {
 #[derive(uniffi::Object)]
 pub struct Users {
     inner: Box<dyn UsersImpl>,
+    /// The audit target the provider bound this handle to (see
+    /// [`crate::audit`]).
+    audit: AuditBinding,
 }
 
 impl Users {
     /// Wraps a concrete capability impl into the exported handle.
     pub(crate) fn new(inner: Box<dyn UsersImpl>) -> Arc<Self> {
-        Arc::new(Self { inner })
+        Arc::new(Self {
+            inner,
+            audit: AuditBinding::default(),
+        })
+    }
+
+    /// Audits this handle's calls into `target` (no-op for `None`).
+    pub(crate) fn bind_audit(&self, target: Option<&AuditTarget>) {
+        self.audit.bind(target);
     }
 }
 
@@ -90,7 +102,9 @@ impl Users {
     /// [`StackError::Decode`] on malformed JSON, or [`StackError::Network`] on
     /// transport failure.
     pub async fn fetch_team_members(&self) -> Result<Vec<TeamMemberInfo>, StackError> {
-        self.inner.fetch_team_members().await
+        self.audit
+            .run("users.fetch_team_members", self.inner.fetch_team_members())
+            .await
     }
 
     /// Lists every user of the connected account: the active members (`users`)
@@ -105,7 +119,9 @@ impl Users {
     /// [`StackError::Decode`] on malformed JSON, or [`StackError::Network`] on
     /// transport failure.
     pub async fn fetch_users(&self) -> Result<Vec<UserInfo>, StackError> {
-        self.inner.fetch_users().await
+        self.audit
+            .run("users.fetch_users", self.inner.fetch_users())
+            .await
     }
 
     /// Invites a new user to the connected account, granting the raw ASC `roles`
@@ -127,14 +143,17 @@ impl Users {
         all_apps_visible: bool,
         provisioning_allowed: bool,
     ) -> Result<(), StackError> {
-        self.inner
-            .invite_user(
-                email,
-                first_name,
-                last_name,
-                roles,
-                all_apps_visible,
-                provisioning_allowed,
+        self.audit
+            .run(
+                "users.invite_user",
+                self.inner.invite_user(
+                    email,
+                    first_name,
+                    last_name,
+                    roles,
+                    all_apps_visible,
+                    provisioning_allowed,
+                ),
             )
             .await
     }
@@ -148,7 +167,9 @@ impl Users {
     /// agreements, [`StackError::Http`] on any other non-2xx response, or
     /// [`StackError::Network`] on transport failure.
     pub async fn delete_user(&self, id: String, is_pending: bool) -> Result<(), StackError> {
-        self.inner.delete_user(id, is_pending).await
+        self.audit
+            .run("users.delete_user", self.inner.delete_user(id, is_pending))
+            .await
     }
 
     /// Updates the active member `id`, replacing the raw ASC `roles` (e.g.
@@ -167,8 +188,12 @@ impl Users {
         all_apps_visible: bool,
         provisioning_allowed: bool,
     ) -> Result<(), StackError> {
-        self.inner
-            .update_user(id, roles, all_apps_visible, provisioning_allowed)
+        self.audit
+            .run(
+                "users.update_user",
+                self.inner
+                    .update_user(id, roles, all_apps_visible, provisioning_allowed),
+            )
             .await
     }
 
@@ -183,7 +208,12 @@ impl Users {
     /// [`StackError::Decode`] on malformed JSON, or [`StackError::Network`] on
     /// transport failure.
     pub async fn fetch_user_visible_apps(&self, id: String) -> Result<Vec<String>, StackError> {
-        self.inner.fetch_user_visible_apps(id).await
+        self.audit
+            .run(
+                "users.fetch_user_visible_apps",
+                self.inner.fetch_user_visible_apps(id),
+            )
+            .await
     }
 
     /// Replaces the full set of apps visible to the member `id` with `app_ids`
@@ -199,6 +229,11 @@ impl Users {
         id: String,
         app_ids: Vec<String>,
     ) -> Result<(), StackError> {
-        self.inner.update_user_visible_apps(id, app_ids).await
+        self.audit
+            .run(
+                "users.update_user_visible_apps",
+                self.inner.update_user_visible_apps(id, app_ids),
+            )
+            .await
     }
 }

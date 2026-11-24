@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 
+use crate::audit::{AuditBinding, AuditTarget};
 use crate::domain::{
     AnalyticsReportData, AnalyticsReportInstancesPage, AnalyticsReportRequest,
     AnalyticsReportRequestsPage, AnalyticsReportSegmentsPage, AnalyticsReportsPage,
@@ -89,12 +90,23 @@ pub(crate) trait AnalyticsImpl: Send + Sync {
 #[derive(uniffi::Object)]
 pub struct Analytics {
     inner: Box<dyn AnalyticsImpl>,
+    /// The audit target the provider bound this handle to (see
+    /// [`crate::audit`]).
+    audit: AuditBinding,
 }
 
 impl Analytics {
     /// Wraps a concrete capability impl into the exported handle.
     pub(crate) fn new(inner: Box<dyn AnalyticsImpl>) -> Arc<Self> {
-        Arc::new(Self { inner })
+        Arc::new(Self {
+            inner,
+            audit: AuditBinding::default(),
+        })
+    }
+
+    /// Audits this handle's calls into `target` (no-op for `None`).
+    pub(crate) fn bind_audit(&self, target: Option<&AuditTarget>) {
+        self.audit.bind(target);
     }
 }
 
@@ -114,8 +126,12 @@ impl Analytics {
         app_id: String,
         access_type: String,
     ) -> Result<AnalyticsReportRequest, StackError> {
-        self.inner
-            .create_analytics_report_request(app_id, access_type)
+        self.audit
+            .run(
+                "analytics.create_analytics_report_request",
+                self.inner
+                    .create_analytics_report_request(app_id, access_type),
+            )
             .await
     }
 
@@ -138,8 +154,16 @@ impl Analytics {
         limit: u32,
         page_token: Option<String>,
     ) -> Result<AnalyticsReportRequestsPage, StackError> {
-        self.inner
-            .fetch_analytics_report_requests_page(app_id, filter_access_type, limit, page_token)
+        self.audit
+            .run(
+                "analytics.fetch_analytics_report_requests_page",
+                self.inner.fetch_analytics_report_requests_page(
+                    app_id,
+                    filter_access_type,
+                    limit,
+                    page_token,
+                ),
+            )
             .await
     }
 
@@ -161,8 +185,16 @@ impl Analytics {
         limit: u32,
         page_token: Option<String>,
     ) -> Result<AnalyticsReportsPage, StackError> {
-        self.inner
-            .fetch_analytics_reports_page(request_id, filter_category, limit, page_token)
+        self.audit
+            .run(
+                "analytics.fetch_analytics_reports_page",
+                self.inner.fetch_analytics_reports_page(
+                    request_id,
+                    filter_category,
+                    limit,
+                    page_token,
+                ),
+            )
             .await
     }
 
@@ -184,8 +216,16 @@ impl Analytics {
         limit: u32,
         page_token: Option<String>,
     ) -> Result<AnalyticsReportInstancesPage, StackError> {
-        self.inner
-            .fetch_analytics_report_instances_page(report_id, filter_granularity, limit, page_token)
+        self.audit
+            .run(
+                "analytics.fetch_analytics_report_instances_page",
+                self.inner.fetch_analytics_report_instances_page(
+                    report_id,
+                    filter_granularity,
+                    limit,
+                    page_token,
+                ),
+            )
             .await
     }
 
@@ -205,8 +245,12 @@ impl Analytics {
         limit: u32,
         page_token: Option<String>,
     ) -> Result<AnalyticsReportSegmentsPage, StackError> {
-        self.inner
-            .fetch_analytics_report_segments_page(instance_id, limit, page_token)
+        self.audit
+            .run(
+                "analytics.fetch_analytics_report_segments_page",
+                self.inner
+                    .fetch_analytics_report_segments_page(instance_id, limit, page_token),
+            )
             .await
     }
 
@@ -227,6 +271,11 @@ impl Analytics {
         url: String,
         max_bytes: u64,
     ) -> Result<AnalyticsReportData, StackError> {
-        self.inner.download_analytics_segment(url, max_bytes).await
+        self.audit
+            .run(
+                "analytics.download_analytics_segment",
+                self.inner.download_analytics_segment(url, max_bytes),
+            )
+            .await
     }
 }

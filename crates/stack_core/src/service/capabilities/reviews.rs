@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 
+use crate::audit::{AuditBinding, AuditTarget};
 use crate::domain::{CustomerReview, CustomerReviewsPage, ReviewResponse, ReviewSubmission};
 use crate::error::StackError;
 
@@ -68,12 +69,23 @@ pub(crate) trait ReviewsImpl: Send + Sync {
 #[derive(uniffi::Object)]
 pub struct Reviews {
     inner: Box<dyn ReviewsImpl>,
+    /// The audit target the provider bound this handle to (see
+    /// [`crate::audit`]).
+    audit: AuditBinding,
 }
 
 impl Reviews {
     /// Wraps a concrete capability impl into the exported handle.
     pub(crate) fn new(inner: Box<dyn ReviewsImpl>) -> Arc<Self> {
-        Arc::new(Self { inner })
+        Arc::new(Self {
+            inner,
+            audit: AuditBinding::default(),
+        })
+    }
+
+    /// Audits this handle's calls into `target` (no-op for `None`).
+    pub(crate) fn bind_audit(&self, target: Option<&AuditTarget>) {
+        self.audit.bind(target);
     }
 }
 
@@ -89,7 +101,12 @@ impl Reviews {
         &self,
         app_id: String,
     ) -> Result<Vec<CustomerReview>, StackError> {
-        self.inner.fetch_customer_reviews(app_id).await
+        self.audit
+            .run(
+                "reviews.fetch_customer_reviews",
+                self.inner.fetch_customer_reviews(app_id),
+            )
+            .await
     }
 
     /// Fetches a single page of customer reviews for incremental (load-more)
@@ -114,8 +131,17 @@ impl Reviews {
         limit: u32,
         page_token: Option<String>,
     ) -> Result<CustomerReviewsPage, StackError> {
-        self.inner
-            .fetch_customer_reviews_page(app_id, sort, filter_rating, limit, page_token)
+        self.audit
+            .run(
+                "reviews.fetch_customer_reviews_page",
+                self.inner.fetch_customer_reviews_page(
+                    app_id,
+                    sort,
+                    filter_rating,
+                    limit,
+                    page_token,
+                ),
+            )
             .await
     }
 
@@ -129,7 +155,12 @@ impl Reviews {
         &self,
         app_id: String,
     ) -> Result<Vec<ReviewSubmission>, StackError> {
-        self.inner.fetch_review_submissions(app_id).await
+        self.audit
+            .run(
+                "reviews.fetch_review_submissions",
+                self.inner.fetch_review_submissions(app_id),
+            )
+            .await
     }
 
     /// Creates or replaces the developer response for `review_id` with `body`,
@@ -144,7 +175,12 @@ impl Reviews {
         review_id: String,
         body: String,
     ) -> Result<ReviewResponse, StackError> {
-        self.inner.reply_to_review(review_id, body).await
+        self.audit
+            .run(
+                "reviews.reply_to_review",
+                self.inner.reply_to_review(review_id, body),
+            )
+            .await
     }
 
     /// Deletes the developer response identified by `response_id`.
@@ -153,7 +189,12 @@ impl Reviews {
     /// [`StackError::Http`] on a non-2xx response or [`StackError::Network`] on
     /// transport failure.
     pub async fn delete_review_response(&self, response_id: String) -> Result<(), StackError> {
-        self.inner.delete_review_response(response_id).await
+        self.audit
+            .run(
+                "reviews.delete_review_response",
+                self.inner.delete_review_response(response_id),
+            )
+            .await
     }
 
     /// Resubmits the draft review submission identified by `submission_id` by
@@ -165,7 +206,12 @@ impl Reviews {
     /// agreements, [`StackError::Http`] on any other non-2xx response, or
     /// [`StackError::Network`] on transport failure.
     pub async fn submit_review_submission(&self, submission_id: String) -> Result<(), StackError> {
-        self.inner.submit_review_submission(submission_id).await
+        self.audit
+            .run(
+                "reviews.submit_review_submission",
+                self.inner.submit_review_submission(submission_id),
+            )
+            .await
     }
 
     /// Discards the review submission identified by `submission_id`, branching on
@@ -183,6 +229,11 @@ impl Reviews {
     /// [`StackError::Decode`] on malformed JSON, or [`StackError::Network`] on
     /// transport failure.
     pub async fn discard_review_submission(&self, submission_id: String) -> Result<(), StackError> {
-        self.inner.discard_review_submission(submission_id).await
+        self.audit
+            .run(
+                "reviews.discard_review_submission",
+                self.inner.discard_review_submission(submission_id),
+            )
+            .await
     }
 }

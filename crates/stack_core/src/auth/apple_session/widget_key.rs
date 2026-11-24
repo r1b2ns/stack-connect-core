@@ -55,7 +55,12 @@ pub(crate) async fn fetch_from_signout(endpoints: &AppleEndpoints) -> Option<Str
             return None;
         }
     };
-    let reply = match transport::send(client.head(endpoints.app_store_connect("logout"))).await {
+    // The bare client sends no session cookie.
+    let probe = crate::audit::scope::credential(
+        crate::audit::NetworkAuditCredentialKind::Unauthenticated,
+        transport::send(client.head(endpoints.app_store_connect("logout"))),
+    );
+    let reply = match probe.await {
         Ok(reply) => reply,
         Err(err) => {
             logging::warn(target::AUTH, || {

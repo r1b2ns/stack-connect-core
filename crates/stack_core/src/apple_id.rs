@@ -17,11 +17,13 @@ use std::sync::Arc;
 
 use tokio::sync::Mutex;
 
+use crate::audit::{AuditBinding, AuditTarget, NetworkAuditProvider};
 use crate::auth::apple_session::flow::{AppleCodeMethod, AppleSignIn, AppleSignInStep};
 use crate::auth::apple_session::session::{AppleSession, AppleTeam, SessionBlob};
 use crate::auth::apple_session::srp::Password;
 use crate::auth::apple_session::AppleEndpoints;
 use crate::error::StackError;
+use crate::ports::NetworkAuditSink;
 
 /// One Apple ID sign-in, from the password to the saved session.
 ///
@@ -36,23 +38,37 @@ use crate::error::StackError;
 pub struct AppleIdSignIn {
     /// `None` once [`Self::finish`] handed the session over.
     inner: Mutex<Option<AppleSignIn>>,
+    /// Where the sign-in's HTTP exchanges are audited (provider
+    /// `AppleWebSession`, no account id: none exists yet).
+    audit: AuditBinding,
 }
 
 impl AppleIdSignIn {
-    fn wrap(sign_in: AppleSignIn) -> Arc<Self> {
+    fn wrap(sign_in: AppleSignIn, audit_sink: Option<Arc<dyn NetworkAuditSink>>) -> Arc<Self> {
         Arc::new(Self {
             inner: Mutex::new(Some(sign_in)),
+            audit: AuditBinding::new(AuditTarget::new(
+                audit_sink,
+                None,
+                NetworkAuditProvider::AppleWebSession,
+            )),
         })
     }
 
-    fn with_endpoints(endpoints: AppleEndpoints) -> Result<Arc<Self>, StackError> {
-        Ok(Self::wrap(AppleSignIn::new(endpoints)?))
+    fn with_endpoints(
+        endpoints: AppleEndpoints,
+        audit_sink: Option<Arc<dyn NetworkAuditSink>>,
+    ) -> Result<Arc<Self>, StackError> {
+        Ok(Self::wrap(AppleSignIn::new(endpoints)?, audit_sink))
     }
 
     /// The object over a prepared flow (tests: fixed SRP ephemeral and clock).
     #[cfg(test)]
-    pub(crate) fn from_flow(flow: AppleSignIn) -> Arc<Self> {
-        Self::wrap(flow)
+    pub(crate) fn from_flow(
+        flow: AppleSignIn,
+        audit_sink: Option<Arc<dyn NetworkAuditSink>>,
+    ) -> Arc<Self> {
+        Self::wrap(flow, audit_sink)
     }
 }
 
@@ -64,11 +80,16 @@ fn finished() -> StackError {
 impl AppleIdSignIn {
     /// A fresh sign-in against Apple's production hosts. Offline.
     ///
+    /// When `audit_sink` is `Some`, every HTTP exchange of the sign-in is
+    /// handed to it raw (see [`NetworkAuditSink`]): the password never goes on
+    /// the wire, but the SRP values, the two-factor code, the session headers
+    /// and `Set-Cookie` do appear. Defaults to `None`.
+    ///
     /// # Errors
     /// [`StackError::Network`] when the HTTP client cannot be built.
-    #[uniffi::constructor]
-    pub fn new() -> Result<Arc<Self>, StackError> {
-        Self::with_endpoints(AppleEndpoints::default())
+    #[uniffi::constructor(default(audit_sink = None))]
+    pub fn new(audit_sink: Option<Arc<dyn NetworkAuditSink>>) -> Result<Arc<Self>, StackError> {
+        Self::with_endpoints(AppleEndpoints::default(), audit_sink)
     }
 
     /// A sign-in over a saved session blob: its cookies (the two-factor trust
@@ -78,11 +99,15 @@ impl AppleIdSignIn {
     /// # Errors
     /// [`StackError::Decode`] when `blob` is not a session this core wrote;
     /// [`StackError::Network`] when the HTTP client cannot be built.
-    #[uniffi::constructor]
-    pub fn with_saved_session(blob: Vec<u8>) -> Result<Arc<Self>, StackError> {
+    /// `audit_sink` is as in [`Self::new`].
+    #[uniffi::constructor(default(audit_sink = None))]
+    pub fn with_saved_session(
+        blob: Vec<u8>,
+        audit_sink: Option<Arc<dyn NetworkAuditSink>>,
+    ) -> Result<Arc<Self>, StackError> {
         let session =
             AppleSession::restore(&SessionBlob::from_bytes(blob), AppleEndpoints::default())?;
-        Ok(Self::wrap(AppleSignIn::from_session(session)))
+        Ok(Self::wrap(AppleSignIn::from_session(session), audit_sink))
     }
 
     /// Starts the sign-in with the Apple ID `email` and its `password`. The
@@ -97,9 +122,13 @@ impl AppleIdSignIn {
         password: String,
     ) -> Result<AppleSignInStep, StackError> {
         let password = Password::new(password);
-        let mut guard = self.inner.lock().await;
-        let flow = guard.as_mut().ok_or_else(finished)?;
-        Ok(flow.start(&email, password).await?)
+        self.audit
+            .run("apple_id.start", async move {
+                let mut guard = self.inner.lock().await;
+                let flow = guard.as_mut().ok_or_else(finished)?;
+                Ok(flow.start(&email, password).await?)
+            })
+            .await
     }
 
     /// Asks Apple to text a code to the trusted phone `phone_id` (one of the
@@ -108,9 +137,13 @@ impl AppleIdSignIn {
     /// # Errors
     /// See the type docs.
     pub async fn request_sms(&self, phone_id: u64) -> Result<AppleSignInStep, StackError> {
-        let mut guard = self.inner.lock().await;
-        let flow = guard.as_mut().ok_or_else(finished)?;
-        Ok(flow.request_sms(phone_id).await?)
+        self.audit
+            .run("apple_id.request_sms", async move {
+                let mut guard = self.inner.lock().await;
+                let flow = guard.as_mut().ok_or_else(finished)?;
+                Ok(flow.request_sms(phone_id).await?)
+            })
+            .await
     }
 
     /// Submits the two-factor `code` the way `method` says (the trusted
@@ -124,9 +157,13 @@ impl AppleIdSignIn {
         code: String,
         method: AppleCodeMethod,
     ) -> Result<AppleSignInStep, StackError> {
-        let mut guard = self.inner.lock().await;
-        let flow = guard.as_mut().ok_or_else(finished)?;
-        Ok(flow.submit_code(&code, method).await?)
+        self.audit
+            .run("apple_id.submit_code", async move {
+                let mut guard = self.inner.lock().await;
+                let flow = guard.as_mut().ok_or_else(finished)?;
+                Ok(flow.submit_code(&code, method).await?)
+            })
+            .await
     }
 
     /// Every team the Apple ID belongs to, once signed in (empty before).
@@ -170,10 +207,10 @@ mod tests {
     #[tokio::test]
     async fn a_foreign_blob_is_a_decode_error_and_a_fresh_object_is_not_finished() {
         assert!(matches!(
-            AppleIdSignIn::with_saved_session(b"not a blob".to_vec()),
+            AppleIdSignIn::with_saved_session(b"not a blob".to_vec(), None),
             Err(StackError::Decode { .. })
         ));
-        let object = AppleIdSignIn::new().unwrap();
+        let object = AppleIdSignIn::new(None).unwrap();
         assert!(object.teams().await.is_empty());
         // Finishing too early fails and leaves the object usable.
         for _ in 0..2 {
@@ -188,7 +225,7 @@ mod tests {
     #[test]
     fn exported_futures_are_send() {
         fn assert_send<T: Send>(_: &T) {}
-        let object = AppleIdSignIn::new().unwrap();
+        let object = AppleIdSignIn::new(None).unwrap();
         assert_send(&object.start("a@b.c".into(), "pw".into()));
         assert_send(&object.request_sms(1));
         assert_send(&object.submit_code("123456".into(), AppleCodeMethod::TrustedDevice));

@@ -4,10 +4,12 @@
 
 use std::sync::Arc;
 
+use crate::audit::{AuditTarget, NetworkAuditProvider};
 use crate::error::StackError;
 use crate::logging::{self, LogLevel};
 use crate::ports::{
-    AccessTokenProvider, BlobStore, CoreLogger, CredentialStore, DebugLogger, SessionStore,
+    AccessTokenProvider, BlobStore, CoreLogger, CredentialStore, DebugLogger, NetworkAuditSink,
+    SessionStore,
 };
 use crate::service::kind::{CredentialField, ServiceKind};
 use crate::service::provider::Provider;
@@ -44,18 +46,29 @@ pub fn credential_schema(kind: ServiceKind) -> Vec<CredentialField> {
 /// its response (status + pretty-printed JSON). The host passes `None` in
 /// release builds and a native logger only when its debug launch flag is set.
 ///
+/// When `audit_sink` is `Some`, every HTTP exchange of the provider and of
+/// the capability handles it returns is handed to it as a structured, raw
+/// [`crate::audit::NetworkAuditEntry`] (see [`NetworkAuditSink`]), tagged
+/// with `account_id`. Independent of `debug_logger`. Defaults to `None`.
+///
 /// # Errors
 /// [`StackError::InvalidCredentials`] if a required secret is missing, or, for
 /// Google Play, if a field is blank or the private key is not a usable RSA key.
-#[uniffi::export]
+#[uniffi::export(default(audit_sink = None))]
 pub fn connect(
     kind: ServiceKind,
     account_id: String,
     store: Arc<dyn CredentialStore>,
     debug_logger: Option<Arc<dyn DebugLogger>>,
+    audit_sink: Option<Arc<dyn NetworkAuditSink>>,
 ) -> Result<Arc<Provider>, StackError> {
     let inner = registry::build(kind, &account_id, &store, debug_logger)?;
-    Ok(Provider::new(inner))
+    let provider = match kind {
+        ServiceKind::AppStoreConnect => NetworkAuditProvider::AppleApi,
+        ServiceKind::GooglePlay => NetworkAuditProvider::GooglePlay,
+    };
+    let audit = AuditTarget::new(audit_sink, Some(&account_id), provider);
+    Ok(Provider::audited(inner, audit))
 }
 
 /// Builds a connected [`Provider`] for an account added with the user's own
@@ -77,20 +90,27 @@ pub fn connect(
 ///
 /// Synchronous and offline, like [`connect`]. When `debug_logger` is `Some`,
 /// requests are traced like [`connect`]'s, except that the `Authorization`
-/// header is redacted.
+/// header is redacted. `audit_sink` is as in [`connect`]; its entries carry
+/// the host's token verbatim (the sink is the host's own).
 ///
 /// # Errors
 /// [`StackError::Unsupported`] for a service without this auth path (App
 /// Store Connect); [`StackError::InvalidCredentials`] for a blank `account_id`.
-#[uniffi::export]
+#[uniffi::export(default(audit_sink = None))]
 pub fn connect_with_access_token(
     kind: ServiceKind,
     account_id: String,
     token_provider: Arc<dyn AccessTokenProvider>,
     debug_logger: Option<Arc<dyn DebugLogger>>,
+    audit_sink: Option<Arc<dyn NetworkAuditSink>>,
 ) -> Result<Arc<Provider>, StackError> {
     let inner = registry::build_with_access_token(kind, &account_id, token_provider, debug_logger)?;
-    Ok(Provider::new(inner))
+    let audit = AuditTarget::new(
+        audit_sink,
+        Some(&account_id),
+        NetworkAuditProvider::GooglePlay,
+    );
+    Ok(Provider::audited(inner, audit))
 }
 
 /// Builds a connected App Store Connect [`Provider`] for an account added with
@@ -123,22 +143,30 @@ pub fn connect_with_access_token(
 ///
 /// Synchronous and offline, like [`connect`]. When `debug_logger` is `Some`,
 /// requests are traced like [`connect`]'s, with the session's cookies, CSRF
-/// tokens and sign-in headers redacted.
+/// tokens and sign-in headers redacted. `audit_sink` is as in [`connect`]
+/// (provider `AppleWebSession`; the jar's cookies are not in the entries'
+/// request headers, the CSRF and session headers and every `Set-Cookie` are).
 ///
 /// # Errors
 /// [`StackError::InvalidCredentials`] for a blank `account_id` or when the
 /// store has no session for it; [`StackError::Decode`] for a blob the core
 /// cannot read.
-#[uniffi::export]
+#[uniffi::export(default(audit_sink = None))]
 pub fn connect_with_apple_session(
     account_id: String,
     team_id: u64,
     session_store: Arc<dyn SessionStore>,
     debug_logger: Option<Arc<dyn DebugLogger>>,
+    audit_sink: Option<Arc<dyn NetworkAuditSink>>,
 ) -> Result<Arc<Provider>, StackError> {
     let inner =
         registry::build_with_apple_session(&account_id, team_id, session_store, debug_logger)?;
-    Ok(Provider::new(inner))
+    let audit = AuditTarget::new(
+        audit_sink,
+        Some(&account_id),
+        NetworkAuditProvider::AppleWebSession,
+    );
+    Ok(Provider::audited(inner, audit))
 }
 
 /// Builds a [`SyncService`] that syncs `provider` into the host `store` for

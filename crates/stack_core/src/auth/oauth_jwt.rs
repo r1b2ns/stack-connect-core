@@ -13,6 +13,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 
 use super::token::{needs_refresh, unix_now, CachedToken};
+use crate::audit::{self, NetworkAuditCredentialKind, NetworkAuditProvider};
 use crate::error::StackError;
 use crate::http_debug::send_and_read;
 use crate::logging::{self, target};
@@ -538,7 +539,13 @@ impl ServiceAccountAuthenticator {
             ("grant_type", JWT_BEARER_GRANT_TYPE),
             ("assertion", assertion.as_str()),
         ]);
-        let (status, body) = send_and_read(request, self.debug_logger.as_deref()).await?;
+        let (status, body) = audit::scope::sub_operation(
+            audit::ops::GOOGLE_OAUTH_TOKEN,
+            NetworkAuditProvider::GoogleOauth,
+            NetworkAuditCredentialKind::OauthAssertion,
+            send_and_read(request, self.debug_logger.as_deref()),
+        )
+        .await?;
         let (token, expires_in) = map_token_response(status, &body).inspect_err(|err| {
             logging::warn(target::AUTH, || {
                 format!(

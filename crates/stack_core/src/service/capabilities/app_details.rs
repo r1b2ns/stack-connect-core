@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 
+use crate::audit::{AuditBinding, AuditTarget};
 use crate::domain::AppDetailsInfo;
 use crate::error::StackError;
 
@@ -27,12 +28,23 @@ pub(crate) trait AppDetailsImpl: Send + Sync {
 #[derive(uniffi::Object)]
 pub struct AppDetails {
     inner: Box<dyn AppDetailsImpl>,
+    /// The audit target the provider bound this handle to (see
+    /// [`crate::audit`]).
+    audit: AuditBinding,
 }
 
 impl AppDetails {
     /// Wraps a concrete capability impl into the exported handle.
     pub(crate) fn new(inner: Box<dyn AppDetailsImpl>) -> Arc<Self> {
-        Arc::new(Self { inner })
+        Arc::new(Self {
+            inner,
+            audit: AuditBinding::default(),
+        })
+    }
+
+    /// Audits this handle's calls into `target` (no-op for `None`).
+    pub(crate) fn bind_audit(&self, target: Option<&AuditTarget>) {
+        self.audit.bind(target);
     }
 }
 
@@ -60,6 +72,11 @@ impl AppDetails {
     /// [`StackError::Decode`] on malformed JSON, or [`StackError::Network`] on
     /// transport failure.
     pub async fn fetch_app_details(&self, app_id: String) -> Result<AppDetailsInfo, StackError> {
-        self.inner.fetch_app_details(app_id).await
+        self.audit
+            .run(
+                "app_details.fetch_app_details",
+                self.inner.fetch_app_details(app_id),
+            )
+            .await
     }
 }

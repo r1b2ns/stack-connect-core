@@ -55,6 +55,38 @@ pub trait DebugLogger: Send + Sync {
     fn log(&self, message: String);
 }
 
+/// Optional structured network audit, implemented natively and injected
+/// across the FFI boundary as a foreign trait: through the `audit_sink`
+/// argument of [`crate::facade::connect`],
+/// [`crate::facade::connect_with_access_token`],
+/// [`crate::facade::connect_with_apple_session`] and the
+/// [`crate::apple_id::AppleIdSignIn`] constructors. Without one (the
+/// default), nothing is captured.
+///
+/// The core calls [`Self::record`] once per finished HTTP exchange of that
+/// provider or sign-in: every App Store Connect API, Apple ID web session
+/// (sign-in, olympus, iris, Developer Portal), Google Play and Google OAuth
+/// call, each retry attempt separately, transport failures included. Entries
+/// are **raw**: credentials (bearer tokens, OAuth assertions and the access
+/// tokens in their responses, CSRF tokens, `Set-Cookie`) appear verbatim, so
+/// the host must keep them encrypted at rest and mask them itself. The core
+/// logs none of it.
+///
+/// Both methods are called synchronously on whichever thread the core is
+/// running: implement them as a cheap, non-blocking hand-off (e.g. append to
+/// a queue a background task drains). A panic in either is caught (the entry
+/// is dropped, the request is unaffected).
+#[uniffi::export(with_foreign)]
+pub trait NetworkAuditSink: Send + Sync {
+    /// Receives one finished exchange.
+    fn record(&self, entry: crate::audit::NetworkAuditEntry);
+    /// Whether entries should carry the request and response bodies. Asked
+    /// once per exchange; when `false`, bodies are omitted
+    /// ([`crate::audit::NetworkAuditBodyState::NotCaptured`]) and only their
+    /// sizes are reported.
+    fn capture_bodies(&self) -> bool;
+}
+
 /// Process-wide diagnostic log sink, installed with
 /// [`crate::facade::set_core_logger`]. Unlike [`DebugLogger`], it is meant to
 /// stay on in release builds: every message is **redacted** before it gets

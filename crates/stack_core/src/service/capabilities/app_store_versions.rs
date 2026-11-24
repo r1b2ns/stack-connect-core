@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 
+use crate::audit::{AuditBinding, AuditTarget};
 use crate::domain::{
     AppReviewDetailInfo, AppStoreLocalizationInfo, AppStoreVersionInfo, PhasedReleaseInfo,
     ScreenshotInfo, ScreenshotSetInfo,
@@ -186,12 +187,23 @@ pub(crate) trait AppStoreVersionsImpl: Send + Sync {
 #[derive(uniffi::Object)]
 pub struct AppStoreVersions {
     inner: Box<dyn AppStoreVersionsImpl>,
+    /// The audit target the provider bound this handle to (see
+    /// [`crate::audit`]).
+    audit: AuditBinding,
 }
 
 impl AppStoreVersions {
     /// Wraps a concrete capability impl into the exported handle.
     pub(crate) fn new(inner: Box<dyn AppStoreVersionsImpl>) -> Arc<Self> {
-        Arc::new(Self { inner })
+        Arc::new(Self {
+            inner,
+            audit: AuditBinding::default(),
+        })
+    }
+
+    /// Audits this handle's calls into `target` (no-op for `None`).
+    pub(crate) fn bind_audit(&self, target: Option<&AuditTarget>) {
+        self.audit.bind(target);
     }
 }
 
@@ -207,7 +219,12 @@ impl AppStoreVersions {
         app_id: String,
         limit: u32,
     ) -> Result<Vec<AppStoreVersionInfo>, StackError> {
-        self.inner.fetch_versions(app_id, limit).await
+        self.audit
+            .run(
+                "app_store_versions.fetch_versions",
+                self.inner.fetch_versions(app_id, limit),
+            )
+            .await
     }
 
     /// Creates a new App Store version for `app_id` on `platform` with
@@ -223,8 +240,11 @@ impl AppStoreVersions {
         platform: String,
         version_string: String,
     ) -> Result<AppStoreVersionInfo, StackError> {
-        self.inner
-            .create_version(app_id, platform, version_string)
+        self.audit
+            .run(
+                "app_store_versions.create_version",
+                self.inner.create_version(app_id, platform, version_string),
+            )
             .await
     }
 
@@ -243,13 +263,16 @@ impl AppStoreVersions {
         release_type: Option<String>,
         earliest_release_date: Option<String>,
     ) -> Result<(), StackError> {
-        self.inner
-            .update_version(
-                id,
-                version_string,
-                copyright,
-                release_type,
-                earliest_release_date,
+        self.audit
+            .run(
+                "app_store_versions.update_version",
+                self.inner.update_version(
+                    id,
+                    version_string,
+                    copyright,
+                    release_type,
+                    earliest_release_date,
+                ),
             )
             .await
     }
@@ -260,7 +283,12 @@ impl AppStoreVersions {
     /// [`StackError::Http`] on a non-2xx response or [`StackError::Network`] on
     /// transport failure.
     pub async fn delete_version(&self, id: String) -> Result<(), StackError> {
-        self.inner.delete_version(id).await
+        self.audit
+            .run(
+                "app_store_versions.delete_version",
+                self.inner.delete_version(id),
+            )
+            .await
     }
 
     /// Submits the version `version_id` of `app_id` for App Store review.
@@ -281,8 +309,11 @@ impl AppStoreVersions {
         version_id: String,
         platform: Option<String>,
     ) -> Result<(), StackError> {
-        self.inner
-            .submit_for_review(app_id, version_id, platform)
+        self.audit
+            .run(
+                "app_store_versions.submit_for_review",
+                self.inner.submit_for_review(app_id, version_id, platform),
+            )
             .await
     }
 
@@ -297,7 +328,12 @@ impl AppStoreVersions {
     /// [`StackError::Http`] on any other non-2xx response, [`StackError::Decode`]
     /// on malformed JSON, or [`StackError::Network`] on transport failure.
     pub async fn cancel_review(&self, app_id: String) -> Result<(), StackError> {
-        self.inner.cancel_review(app_id).await
+        self.audit
+            .run(
+                "app_store_versions.cancel_review",
+                self.inner.cancel_review(app_id),
+            )
+            .await
     }
 
     /// Manually releases the approved version identified by `version_id`.
@@ -310,7 +346,12 @@ impl AppStoreVersions {
     /// [`StackError::Http`] on any other non-2xx response, or
     /// [`StackError::Network`] on transport failure.
     pub async fn release_version(&self, version_id: String) -> Result<(), StackError> {
-        self.inner.release_version(version_id).await
+        self.audit
+            .run(
+                "app_store_versions.release_version",
+                self.inner.release_version(version_id),
+            )
+            .await
     }
 
     /// Cancels the active submission for `app_id`, removing a not-yet-approved
@@ -328,7 +369,12 @@ impl AppStoreVersions {
     /// [`StackError::Http`] on any other non-2xx response, [`StackError::Decode`]
     /// on malformed JSON, or [`StackError::Network`] on transport failure.
     pub async fn cancel_submission(&self, app_id: String) -> Result<(), StackError> {
-        self.inner.cancel_submission(app_id).await
+        self.audit
+            .run(
+                "app_store_versions.cancel_submission",
+                self.inner.cancel_submission(app_id),
+            )
+            .await
     }
 
     /// Rejects the approved version identified by `version_id`.
@@ -344,7 +390,12 @@ impl AppStoreVersions {
     /// [`StackError::Http`] on any other non-2xx response, [`StackError::Decode`]
     /// on malformed JSON, or [`StackError::Network`] on transport failure.
     pub async fn reject_version(&self, version_id: String) -> Result<(), StackError> {
-        self.inner.reject_version(version_id).await
+        self.audit
+            .run(
+                "app_store_versions.reject_version",
+                self.inner.reject_version(version_id),
+            )
+            .await
     }
 
     /// Fetches the phased (staged) release for `version_id`.
@@ -361,7 +412,12 @@ impl AppStoreVersions {
         &self,
         version_id: String,
     ) -> Result<Option<PhasedReleaseInfo>, StackError> {
-        self.inner.fetch_phased_release(version_id).await
+        self.audit
+            .run(
+                "app_store_versions.fetch_phased_release",
+                self.inner.fetch_phased_release(version_id),
+            )
+            .await
     }
 
     /// Creates a phased (staged) release for `version_id` with the initial
@@ -378,7 +434,12 @@ impl AppStoreVersions {
         version_id: String,
         state: String,
     ) -> Result<PhasedReleaseInfo, StackError> {
-        self.inner.create_phased_release(version_id, state).await
+        self.audit
+            .run(
+                "app_store_versions.create_phased_release",
+                self.inner.create_phased_release(version_id, state),
+            )
+            .await
     }
 
     /// Deletes the phased release identified by `id`.
@@ -388,7 +449,12 @@ impl AppStoreVersions {
     /// [`StackError::Http`] on any other non-2xx response, or
     /// [`StackError::Network`] on transport failure.
     pub async fn delete_phased_release(&self, id: String) -> Result<(), StackError> {
-        self.inner.delete_phased_release(id).await
+        self.audit
+            .run(
+                "app_store_versions.delete_phased_release",
+                self.inner.delete_phased_release(id),
+            )
+            .await
     }
 
     /// Updates the `state` of the phased release identified by `id`, returning
@@ -404,7 +470,12 @@ impl AppStoreVersions {
         id: String,
         state: String,
     ) -> Result<PhasedReleaseInfo, StackError> {
-        self.inner.update_phased_release_state(id, state).await
+        self.audit
+            .run(
+                "app_store_versions.update_phased_release_state",
+                self.inner.update_phased_release_state(id, state),
+            )
+            .await
     }
 
     /// Lists the version localizations for `version_id`.
@@ -422,7 +493,12 @@ impl AppStoreVersions {
         &self,
         version_id: String,
     ) -> Result<Vec<AppStoreLocalizationInfo>, StackError> {
-        self.inner.fetch_localizations(version_id).await
+        self.audit
+            .run(
+                "app_store_versions.fetch_localizations",
+                self.inner.fetch_localizations(version_id),
+            )
+            .await
     }
 
     /// Updates the version localization identified by `id`, sending only the
@@ -447,15 +523,18 @@ impl AppStoreVersions {
         marketing_url: Option<String>,
         whats_new: Option<String>,
     ) -> Result<(), StackError> {
-        self.inner
-            .update_localization(
-                id,
-                description,
-                keywords,
-                promotional_text,
-                support_url,
-                marketing_url,
-                whats_new,
+        self.audit
+            .run(
+                "app_store_versions.update_localization",
+                self.inner.update_localization(
+                    id,
+                    description,
+                    keywords,
+                    promotional_text,
+                    support_url,
+                    marketing_url,
+                    whats_new,
+                ),
             )
             .await
     }
@@ -478,7 +557,12 @@ impl AppStoreVersions {
         &self,
         localization_id: String,
     ) -> Result<Vec<ScreenshotSetInfo>, StackError> {
-        self.inner.fetch_screenshot_sets(localization_id).await
+        self.audit
+            .run(
+                "app_store_versions.fetch_screenshot_sets",
+                self.inner.fetch_screenshot_sets(localization_id),
+            )
+            .await
     }
 
     /// Creates a new (empty) screenshot set of `display_type` in the version
@@ -498,8 +582,12 @@ impl AppStoreVersions {
         localization_id: String,
         display_type: String,
     ) -> Result<ScreenshotSetInfo, StackError> {
-        self.inner
-            .create_screenshot_set(localization_id, display_type)
+        self.audit
+            .run(
+                "app_store_versions.create_screenshot_set",
+                self.inner
+                    .create_screenshot_set(localization_id, display_type),
+            )
             .await
     }
 
@@ -521,8 +609,12 @@ impl AppStoreVersions {
         file_name: String,
         file_data: Vec<u8>,
     ) -> Result<ScreenshotInfo, StackError> {
-        self.inner
-            .upload_screenshot(screenshot_set_id, file_name, file_data)
+        self.audit
+            .run(
+                "app_store_versions.upload_screenshot",
+                self.inner
+                    .upload_screenshot(screenshot_set_id, file_name, file_data),
+            )
             .await
     }
 
@@ -533,7 +625,12 @@ impl AppStoreVersions {
     /// [`StackError::Http`] on any other non-2xx response, or
     /// [`StackError::Network`] on transport failure.
     pub async fn delete_screenshot(&self, screenshot_id: String) -> Result<(), StackError> {
-        self.inner.delete_screenshot(screenshot_id).await
+        self.audit
+            .run(
+                "app_store_versions.delete_screenshot",
+                self.inner.delete_screenshot(screenshot_id),
+            )
+            .await
     }
 
     /// Deletes the screenshot set identified by `screenshot_set_id`.
@@ -543,7 +640,12 @@ impl AppStoreVersions {
     /// [`StackError::Http`] on any other non-2xx response, or
     /// [`StackError::Network`] on transport failure.
     pub async fn delete_screenshot_set(&self, screenshot_set_id: String) -> Result<(), StackError> {
-        self.inner.delete_screenshot_set(screenshot_set_id).await
+        self.audit
+            .run(
+                "app_store_versions.delete_screenshot_set",
+                self.inner.delete_screenshot_set(screenshot_set_id),
+            )
+            .await
     }
 
     /// Fetches the single app review detail for `version_id` — the version's
@@ -563,7 +665,12 @@ impl AppStoreVersions {
         &self,
         version_id: String,
     ) -> Result<Option<AppReviewDetailInfo>, StackError> {
-        self.inner.fetch_app_review_detail(version_id).await
+        self.audit
+            .run(
+                "app_store_versions.fetch_app_review_detail",
+                self.inner.fetch_app_review_detail(version_id),
+            )
+            .await
     }
 
     /// Updates the app review detail `detail_id`, replacing only the provided
@@ -592,17 +699,20 @@ impl AppStoreVersions {
         demo_account_password: Option<String>,
         is_demo_account_required: Option<bool>,
     ) -> Result<AppReviewDetailInfo, StackError> {
-        self.inner
-            .update_app_review_detail(
-                detail_id,
-                contact_first_name,
-                contact_last_name,
-                contact_email,
-                contact_phone,
-                notes,
-                demo_account_name,
-                demo_account_password,
-                is_demo_account_required,
+        self.audit
+            .run(
+                "app_store_versions.update_app_review_detail",
+                self.inner.update_app_review_detail(
+                    detail_id,
+                    contact_first_name,
+                    contact_last_name,
+                    contact_email,
+                    contact_phone,
+                    notes,
+                    demo_account_name,
+                    demo_account_password,
+                    is_demo_account_required,
+                ),
             )
             .await
     }

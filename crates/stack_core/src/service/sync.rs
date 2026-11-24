@@ -78,6 +78,18 @@ impl SyncService {
     /// Propagates whatever [`Provider::fetch_apps`] returns (HTTP/Decode/Network),
     /// or [`StackError::Decode`] if an app fails to serialize.
     pub async fn sync_apps(&self) -> Result<Vec<AppInfo>, StackError> {
+        crate::audit::scope::operation(
+            self.provider.audit_target(),
+            "sync.sync_apps",
+            self.sync_apps_audited(),
+        )
+        .await
+    }
+}
+
+impl SyncService {
+    /// [`Self::sync_apps`], inside its audit operation.
+    async fn sync_apps_audited(&self) -> Result<Vec<AppInfo>, StackError> {
         let apps = self.provider.fetch_apps().await?;
         for app in &apps {
             let blob = AppBlob {

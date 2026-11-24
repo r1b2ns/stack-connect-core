@@ -163,4 +163,31 @@ do {
     fail("unexpected error type: \(error)")
 }
 
+// Network audit: a Swift NetworkAuditSink crosses the FFI as the optional
+// trailing `auditSink:` (callers without it compile unchanged, as above). A
+// call the core rejects before sending reaches no sink: entries are per
+// exchange, and nothing went on the wire.
+final class RecordingAuditSink: NetworkAuditSink, @unchecked Sendable {
+    var entries: [NetworkAuditEntry] = []
+    func record(entry: NetworkAuditEntry) { entries.append(entry) }
+    func captureBodies() -> Bool { true }
+}
+let auditSink = RecordingAuditSink()
+do {
+    let audited = try connect(
+        kind: .googlePlay, accountId: "play-bot", store: playStore, debugLogger: nil,
+        auditSink: auditSink)
+    guard let auditedDetails = audited.appDetails() else {
+        fail("the audited provider has no appDetails handle")
+    }
+    _ = try? await auditedDetails.fetchAppDetails(appId: "not a package")
+    _ = try AppleIdSignIn(auditSink: auditSink)
+} catch {
+    fail("audited connect failed: \(error)")
+}
+guard auditSink.entries.isEmpty else {
+    fail("a request-less call produced audit entries: \(auditSink.entries)")
+}
+print("ok: connect(auditSink:) and AppleIdSignIn(auditSink:) accept a Swift NetworkAuditSink")
+
 print("SMOKE PASSED")

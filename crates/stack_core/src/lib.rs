@@ -11,6 +11,7 @@
 uniffi::setup_scaffolding!();
 
 mod apple_id;
+mod audit;
 mod auth;
 mod domain;
 mod error;
@@ -60,6 +61,10 @@ pub mod apple_signin {
 }
 
 pub use apple_id::AppleIdSignIn;
+pub use audit::{
+    NetworkAuditBodyState, NetworkAuditCredentialKind, NetworkAuditEntry, NetworkAuditHeader,
+    NetworkAuditProvider,
+};
 pub use auth::apple_session::flow::{
     AppleCodeDelivery, AppleCodeMethod, AppleSignInStep, AppleTrustedPhone,
 };
@@ -81,7 +86,9 @@ pub use facade::{
     credential_schema, make_sync_service, set_core_logger,
 };
 pub use logging::LogLevel;
-pub use ports::{AccessTokenProvider, BlobStore, CoreLogger, CredentialStore, SessionStore};
+pub use ports::{
+    AccessTokenProvider, BlobStore, CoreLogger, CredentialStore, NetworkAuditSink, SessionStore,
+};
 pub use service::capabilities::analytics::Analytics;
 pub use service::capabilities::app_details::AppDetails;
 pub use service::capabilities::app_icons::AppIcons;

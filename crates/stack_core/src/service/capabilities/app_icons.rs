@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 
+use crate::audit::{AuditBinding, AuditTarget};
 use crate::error::StackError;
 
 /// Internal, non-exported contract for the App Icons capability (where to load
@@ -28,12 +29,23 @@ pub(crate) trait AppIconsImpl: Send + Sync {
 #[derive(uniffi::Object)]
 pub struct AppIcons {
     inner: Box<dyn AppIconsImpl>,
+    /// The audit target the provider bound this handle to (see
+    /// [`crate::audit`]).
+    audit: AuditBinding,
 }
 
 impl AppIcons {
     /// Wraps a concrete capability impl into the exported handle.
     pub(crate) fn new(inner: Box<dyn AppIconsImpl>) -> Arc<Self> {
-        Arc::new(Self { inner })
+        Arc::new(Self {
+            inner,
+            audit: AuditBinding::default(),
+        })
+    }
+
+    /// Audits this handle's calls into `target` (no-op for `None`).
+    pub(crate) fn bind_audit(&self, target: Option<&AuditTarget>) {
+        self.audit.bind(target);
     }
 }
 
@@ -62,6 +74,11 @@ impl AppIcons {
     /// Store Connect can also return [`StackError::PendingAgreements`] and
     /// [`StackError::Decode`] (malformed JSON).
     pub async fn fetch_icon_url(&self, app_id: String) -> Result<Option<String>, StackError> {
-        self.inner.fetch_icon_url(app_id).await
+        self.audit
+            .run(
+                "app_icons.fetch_icon_url",
+                self.inner.fetch_icon_url(app_id),
+            )
+            .await
     }
 }
