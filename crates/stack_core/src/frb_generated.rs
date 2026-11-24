@@ -39,7 +39,7 @@ flutter_rust_bridge::frb_generated_boilerplate!(
     default_rust_auto_opaque = RustAutoOpaqueMoi,
 );
 pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_VERSION: &str = "2.12.0";
-pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = 1461308508;
+pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = -686647155;
 
 // Section: executor
 
@@ -2646,6 +2646,304 @@ fn wire__crate__frb_api__FrbAppStoreVersions_upload_screenshot_impl(
                             api_file_data,
                         )
                         .await?;
+                        Ok(output_ok)
+                    })()
+                    .await,
+                )
+            }
+        },
+    )
+}
+fn wire__crate__frb_api__FrbAppleSignIn_finish_impl(
+    port_: flutter_rust_bridge::for_generated::MessagePort,
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_async::<flutter_rust_bridge::for_generated::SseCodec, _, _, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "FrbAppleSignIn_finish",
+            port: Some(port_),
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            let api_that = <RustOpaqueMoi<
+                flutter_rust_bridge::for_generated::RustAutoOpaqueInner<FrbAppleSignIn>,
+            >>::sse_decode(&mut deserializer);
+            deserializer.end();
+            move |context| async move {
+                transform_result_sse::<_, crate::error::StackError>(
+                    (move || async move {
+                        let mut api_that_guard = None;
+                        let decode_indices_ =
+                            flutter_rust_bridge::for_generated::lockable_compute_decode_order(
+                                vec![flutter_rust_bridge::for_generated::LockableOrderInfo::new(
+                                    &api_that, 0, false,
+                                )],
+                            );
+                        for i in decode_indices_ {
+                            match i {
+                                0 => {
+                                    api_that_guard =
+                                        Some(api_that.lockable_decode_async_ref().await)
+                                }
+                                _ => unreachable!(),
+                            }
+                        }
+                        let api_that_guard = api_that_guard.unwrap();
+                        let output_ok =
+                            crate::frb_api::FrbAppleSignIn::finish(&*api_that_guard).await?;
+                        Ok(output_ok)
+                    })()
+                    .await,
+                )
+            }
+        },
+    )
+}
+fn wire__crate__frb_api__FrbAppleSignIn_request_sms_impl(
+    port_: flutter_rust_bridge::for_generated::MessagePort,
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_async::<flutter_rust_bridge::for_generated::SseCodec, _, _, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "FrbAppleSignIn_request_sms",
+            port: Some(port_),
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            let api_that = <RustOpaqueMoi<
+                flutter_rust_bridge::for_generated::RustAutoOpaqueInner<FrbAppleSignIn>,
+            >>::sse_decode(&mut deserializer);
+            let api_phone_id = <u64>::sse_decode(&mut deserializer);
+            deserializer.end();
+            move |context| async move {
+                transform_result_sse::<_, crate::error::StackError>(
+                    (move || async move {
+                        let mut api_that_guard = None;
+                        let decode_indices_ =
+                            flutter_rust_bridge::for_generated::lockable_compute_decode_order(
+                                vec![flutter_rust_bridge::for_generated::LockableOrderInfo::new(
+                                    &api_that, 0, false,
+                                )],
+                            );
+                        for i in decode_indices_ {
+                            match i {
+                                0 => {
+                                    api_that_guard =
+                                        Some(api_that.lockable_decode_async_ref().await)
+                                }
+                                _ => unreachable!(),
+                            }
+                        }
+                        let api_that_guard = api_that_guard.unwrap();
+                        let output_ok = crate::frb_api::FrbAppleSignIn::request_sms(
+                            &*api_that_guard,
+                            api_phone_id,
+                        )
+                        .await?;
+                        Ok(output_ok)
+                    })()
+                    .await,
+                )
+            }
+        },
+    )
+}
+fn wire__crate__frb_api__FrbAppleSignIn_start_impl(
+    port_: flutter_rust_bridge::for_generated::MessagePort,
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_async::<flutter_rust_bridge::for_generated::SseCodec, _, _, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "FrbAppleSignIn_start",
+            port: Some(port_),
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            let api_that = <RustOpaqueMoi<
+                flutter_rust_bridge::for_generated::RustAutoOpaqueInner<FrbAppleSignIn>,
+            >>::sse_decode(&mut deserializer);
+            let api_email = <String>::sse_decode(&mut deserializer);
+            let api_password = <String>::sse_decode(&mut deserializer);
+            deserializer.end();
+            move |context| async move {
+                transform_result_sse::<_, crate::error::StackError>(
+                    (move || async move {
+                        let mut api_that_guard = None;
+                        let decode_indices_ =
+                            flutter_rust_bridge::for_generated::lockable_compute_decode_order(
+                                vec![flutter_rust_bridge::for_generated::LockableOrderInfo::new(
+                                    &api_that, 0, false,
+                                )],
+                            );
+                        for i in decode_indices_ {
+                            match i {
+                                0 => {
+                                    api_that_guard =
+                                        Some(api_that.lockable_decode_async_ref().await)
+                                }
+                                _ => unreachable!(),
+                            }
+                        }
+                        let api_that_guard = api_that_guard.unwrap();
+                        let output_ok = crate::frb_api::FrbAppleSignIn::start(
+                            &*api_that_guard,
+                            api_email,
+                            api_password,
+                        )
+                        .await?;
+                        Ok(output_ok)
+                    })()
+                    .await,
+                )
+            }
+        },
+    )
+}
+fn wire__crate__frb_api__FrbAppleSignIn_submit_code_impl(
+    port_: flutter_rust_bridge::for_generated::MessagePort,
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_async::<flutter_rust_bridge::for_generated::SseCodec, _, _, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "FrbAppleSignIn_submit_code",
+            port: Some(port_),
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            let api_that = <RustOpaqueMoi<
+                flutter_rust_bridge::for_generated::RustAutoOpaqueInner<FrbAppleSignIn>,
+            >>::sse_decode(&mut deserializer);
+            let api_code = <String>::sse_decode(&mut deserializer);
+            let api_method =
+                <crate::auth::apple_session::flow::AppleCodeMethod>::sse_decode(&mut deserializer);
+            deserializer.end();
+            move |context| async move {
+                transform_result_sse::<_, crate::error::StackError>(
+                    (move || async move {
+                        let mut api_that_guard = None;
+                        let decode_indices_ =
+                            flutter_rust_bridge::for_generated::lockable_compute_decode_order(
+                                vec![flutter_rust_bridge::for_generated::LockableOrderInfo::new(
+                                    &api_that, 0, false,
+                                )],
+                            );
+                        for i in decode_indices_ {
+                            match i {
+                                0 => {
+                                    api_that_guard =
+                                        Some(api_that.lockable_decode_async_ref().await)
+                                }
+                                _ => unreachable!(),
+                            }
+                        }
+                        let api_that_guard = api_that_guard.unwrap();
+                        let output_ok = crate::frb_api::FrbAppleSignIn::submit_code(
+                            &*api_that_guard,
+                            api_code,
+                            api_method,
+                        )
+                        .await?;
+                        Ok(output_ok)
+                    })()
+                    .await,
+                )
+            }
+        },
+    )
+}
+fn wire__crate__frb_api__FrbAppleSignIn_teams_impl(
+    port_: flutter_rust_bridge::for_generated::MessagePort,
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_async::<flutter_rust_bridge::for_generated::SseCodec, _, _, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "FrbAppleSignIn_teams",
+            port: Some(port_),
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            let api_that = <RustOpaqueMoi<
+                flutter_rust_bridge::for_generated::RustAutoOpaqueInner<FrbAppleSignIn>,
+            >>::sse_decode(&mut deserializer);
+            deserializer.end();
+            move |context| async move {
+                transform_result_sse::<_, ()>(
+                    (move || async move {
+                        let mut api_that_guard = None;
+                        let decode_indices_ =
+                            flutter_rust_bridge::for_generated::lockable_compute_decode_order(
+                                vec![flutter_rust_bridge::for_generated::LockableOrderInfo::new(
+                                    &api_that, 0, false,
+                                )],
+                            );
+                        for i in decode_indices_ {
+                            match i {
+                                0 => {
+                                    api_that_guard =
+                                        Some(api_that.lockable_decode_async_ref().await)
+                                }
+                                _ => unreachable!(),
+                            }
+                        }
+                        let api_that_guard = api_that_guard.unwrap();
+                        let output_ok = Result::<_, ()>::Ok(
+                            crate::frb_api::FrbAppleSignIn::teams(&*api_that_guard).await,
+                        )?;
                         Ok(output_ok)
                     })()
                     .await,
@@ -6163,6 +6461,54 @@ fn wire__crate__frb_api__FrbProvider_reviews_impl(
         },
     )
 }
+fn wire__crate__frb_api__FrbProvider_take_refreshed_session_impl(
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) -> flutter_rust_bridge::for_generated::WireSyncRust2DartSse {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_sync::<flutter_rust_bridge::for_generated::SseCodec, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "FrbProvider_take_refreshed_session",
+            port: None,
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Sync,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            let api_that = <RustOpaqueMoi<
+                flutter_rust_bridge::for_generated::RustAutoOpaqueInner<FrbProvider>,
+            >>::sse_decode(&mut deserializer);
+            deserializer.end();
+            transform_result_sse::<_, ()>((move || {
+                let mut api_that_guard = None;
+                let decode_indices_ =
+                    flutter_rust_bridge::for_generated::lockable_compute_decode_order(vec![
+                        flutter_rust_bridge::for_generated::LockableOrderInfo::new(
+                            &api_that, 0, false,
+                        ),
+                    ]);
+                for i in decode_indices_ {
+                    match i {
+                        0 => api_that_guard = Some(api_that.lockable_decode_sync_ref()),
+                        _ => unreachable!(),
+                    }
+                }
+                let api_that_guard = api_that_guard.unwrap();
+                let output_ok = Result::<_, ()>::Ok(
+                    crate::frb_api::FrbProvider::take_refreshed_session(&*api_that_guard),
+                )?;
+                Ok(output_ok)
+            })())
+        },
+    )
+}
 fn wire__crate__frb_api__FrbProvider_users_impl(
     ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
     rust_vec_len_: i32,
@@ -6762,6 +7108,65 @@ fn wire__crate__frb_api__FrbUsers_invite_user_impl(
         },
     )
 }
+fn wire__crate__frb_api__apple_sign_in_impl(
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) -> flutter_rust_bridge::for_generated::WireSyncRust2DartSse {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_sync::<flutter_rust_bridge::for_generated::SseCodec, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "apple_sign_in",
+            port: None,
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Sync,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            deserializer.end();
+            transform_result_sse::<_, crate::error::StackError>((move || {
+                let output_ok = crate::frb_api::apple_sign_in()?;
+                Ok(output_ok)
+            })())
+        },
+    )
+}
+fn wire__crate__frb_api__apple_sign_in_with_saved_session_impl(
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) -> flutter_rust_bridge::for_generated::WireSyncRust2DartSse {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_sync::<flutter_rust_bridge::for_generated::SseCodec, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "apple_sign_in_with_saved_session",
+            port: None,
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Sync,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            let api_blob = <Vec<u8>>::sse_decode(&mut deserializer);
+            deserializer.end();
+            transform_result_sse::<_, crate::error::StackError>((move || {
+                let output_ok = crate::frb_api::apple_sign_in_with_saved_session(api_blob)?;
+                Ok(output_ok)
+            })())
+        },
+    )
+}
 fn wire__crate__frb_api__available_services_impl(
     ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
     rust_vec_len_: i32,
@@ -6828,6 +7233,51 @@ fn wire__crate__frb_api__connect_impl(
                         api_kind,
                         api_account_id,
                         api_credentials,
+                        api_debug_logging,
+                        api_debug_logger,
+                    )?;
+                    Ok(output_ok)
+                })())
+            }
+        },
+    )
+}
+fn wire__crate__frb_api__connect_with_apple_session_impl(
+    port_: flutter_rust_bridge::for_generated::MessagePort,
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_normal::<flutter_rust_bridge::for_generated::SseCodec, _, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "connect_with_apple_session",
+            port: Some(port_),
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            let api_account_id = <String>::sse_decode(&mut deserializer);
+            let api_team_id = <u64>::sse_decode(&mut deserializer);
+            let api_session_blob = <Vec<u8>>::sse_decode(&mut deserializer);
+            let api_debug_logging = <bool>::sse_decode(&mut deserializer);
+            let api_debug_logger = decode_DartFn_Inputs_String_Output_unit_AnyhowException(
+                <flutter_rust_bridge::DartOpaque>::sse_decode(&mut deserializer),
+            );
+            deserializer.end();
+            move |context| {
+                transform_result_sse::<_, crate::error::StackError>((move || {
+                    let output_ok = crate::frb_api::connect_with_apple_session(
+                        api_account_id,
+                        api_team_id,
+                        api_session_blob,
                         api_debug_logging,
                         api_debug_logger,
                     )?;
@@ -7072,6 +7522,9 @@ flutter_rust_bridge::frb_generated_moi_arc_impl_value!(
     flutter_rust_bridge::for_generated::RustAutoOpaqueInner<FrbAppStoreVersions>
 );
 flutter_rust_bridge::frb_generated_moi_arc_impl_value!(
+    flutter_rust_bridge::for_generated::RustAutoOpaqueInner<FrbAppleSignIn>
+);
+flutter_rust_bridge::frb_generated_moi_arc_impl_value!(
     flutter_rust_bridge::for_generated::RustAutoOpaqueInner<FrbBetaAppLocalizations>
 );
 flutter_rust_bridge::frb_generated_moi_arc_impl_value!(
@@ -7156,6 +7609,16 @@ impl SseDecode for FrbAppStoreVersions {
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
         let mut inner = <RustOpaqueMoi<
             flutter_rust_bridge::for_generated::RustAutoOpaqueInner<FrbAppStoreVersions>,
+        >>::sse_decode(deserializer);
+        return flutter_rust_bridge::for_generated::rust_auto_opaque_decode_owned(inner);
+    }
+}
+
+impl SseDecode for FrbAppleSignIn {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut inner = <RustOpaqueMoi<
+            flutter_rust_bridge::for_generated::RustAutoOpaqueInner<FrbAppleSignIn>,
         >>::sse_decode(deserializer);
         return flutter_rust_bridge::for_generated::rust_auto_opaque_decode_owned(inner);
     }
@@ -7341,6 +7804,16 @@ impl SseDecode
 
 impl SseDecode
     for RustOpaqueMoi<flutter_rust_bridge::for_generated::RustAutoOpaqueInner<FrbAppStoreVersions>>
+{
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut inner = <usize>::sse_decode(deserializer);
+        return decode_rust_opaque_moi(inner);
+    }
+}
+
+impl SseDecode
+    for RustOpaqueMoi<flutter_rust_bridge::for_generated::RustAutoOpaqueInner<FrbAppleSignIn>>
 {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
@@ -7876,6 +8349,122 @@ impl SseDecode for crate::domain::AppStoreVersionInfo {
     }
 }
 
+impl SseDecode for crate::auth::apple_session::flow::AppleCodeDelivery {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut tag_ = <i32>::sse_decode(deserializer);
+        match tag_ {
+            0 => {
+                return crate::auth::apple_session::flow::AppleCodeDelivery::TrustedDevices;
+            }
+            1 => {
+                let mut var_phoneId = <u64>::sse_decode(deserializer);
+                return crate::auth::apple_session::flow::AppleCodeDelivery::Phone {
+                    phone_id: var_phoneId,
+                };
+            }
+            2 => {
+                return crate::auth::apple_session::flow::AppleCodeDelivery::NotSent;
+            }
+            _ => {
+                unimplemented!("");
+            }
+        }
+    }
+}
+
+impl SseDecode for crate::auth::apple_session::flow::AppleCodeMethod {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut tag_ = <i32>::sse_decode(deserializer);
+        match tag_ {
+            0 => {
+                return crate::auth::apple_session::flow::AppleCodeMethod::TrustedDevice;
+            }
+            1 => {
+                let mut var_phoneId = <u64>::sse_decode(deserializer);
+                return crate::auth::apple_session::flow::AppleCodeMethod::Phone {
+                    phone_id: var_phoneId,
+                };
+            }
+            _ => {
+                unimplemented!("");
+            }
+        }
+    }
+}
+
+impl SseDecode for crate::auth::apple_session::flow::AppleSignInStep {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut tag_ = <i32>::sse_decode(deserializer);
+        match tag_ {
+            0 => {
+                let mut var_methods =
+                    <Vec<crate::auth::apple_session::flow::AppleCodeMethod>>::sse_decode(
+                        deserializer,
+                    );
+                let mut var_phones =
+                    <Vec<crate::auth::apple_session::flow::AppleTrustedPhone>>::sse_decode(
+                        deserializer,
+                    );
+                let mut var_codeLength = <u8>::sse_decode(deserializer);
+                let mut var_delivery =
+                    <crate::auth::apple_session::flow::AppleCodeDelivery>::sse_decode(deserializer);
+                return crate::auth::apple_session::flow::AppleSignInStep::NeedsCode {
+                    methods: var_methods,
+                    phones: var_phones,
+                    code_length: var_codeLength,
+                    delivery: var_delivery,
+                };
+            }
+            1 => {
+                return crate::auth::apple_session::flow::AppleSignInStep::NeedsAcknowledgement;
+            }
+            2 => {
+                let mut var_teams =
+                    <Vec<crate::auth::apple_session::session::AppleTeam>>::sse_decode(deserializer);
+                return crate::auth::apple_session::flow::AppleSignInStep::Done {
+                    teams: var_teams,
+                };
+            }
+            _ => {
+                unimplemented!("");
+            }
+        }
+    }
+}
+
+impl SseDecode for crate::auth::apple_session::session::AppleTeam {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut var_providerId = <u64>::sse_decode(deserializer);
+        let mut var_name = <String>::sse_decode(deserializer);
+        let mut var_publicProviderId = <Option<String>>::sse_decode(deserializer);
+        let mut var_contentTypes = <Vec<String>>::sse_decode(deserializer);
+        return crate::auth::apple_session::session::AppleTeam {
+            provider_id: var_providerId,
+            name: var_name,
+            public_provider_id: var_publicProviderId,
+            content_types: var_contentTypes,
+        };
+    }
+}
+
+impl SseDecode for crate::auth::apple_session::flow::AppleTrustedPhone {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut var_id = <u64>::sse_decode(deserializer);
+        let mut var_maskedNumber = <String>::sse_decode(deserializer);
+        let mut var_mode = <String>::sse_decode(deserializer);
+        return crate::auth::apple_session::flow::AppleTrustedPhone {
+            id: var_id,
+            masked_number: var_maskedNumber,
+            mode: var_mode,
+        };
+    }
+}
+
 impl SseDecode for crate::domain::BetaAppLocalizationInfo {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
@@ -8398,6 +8987,46 @@ impl SseDecode for Vec<crate::domain::AppStoreVersionInfo> {
             ans_.push(<crate::domain::AppStoreVersionInfo>::sse_decode(
                 deserializer,
             ));
+        }
+        return ans_;
+    }
+}
+
+impl SseDecode for Vec<crate::auth::apple_session::flow::AppleCodeMethod> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut len_ = <i32>::sse_decode(deserializer);
+        let mut ans_ = Vec::with_capacity(len_ as usize);
+        for idx_ in 0..len_ {
+            ans_.push(
+                <crate::auth::apple_session::flow::AppleCodeMethod>::sse_decode(deserializer),
+            );
+        }
+        return ans_;
+    }
+}
+
+impl SseDecode for Vec<crate::auth::apple_session::session::AppleTeam> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut len_ = <i32>::sse_decode(deserializer);
+        let mut ans_ = Vec::with_capacity(len_ as usize);
+        for idx_ in 0..len_ {
+            ans_.push(<crate::auth::apple_session::session::AppleTeam>::sse_decode(deserializer));
+        }
+        return ans_;
+    }
+}
+
+impl SseDecode for Vec<crate::auth::apple_session::flow::AppleTrustedPhone> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut len_ = <i32>::sse_decode(deserializer);
+        let mut ans_ = Vec::with_capacity(len_ as usize);
+        for idx_ in 0..len_ {
+            ans_.push(
+                <crate::auth::apple_session::flow::AppleTrustedPhone>::sse_decode(deserializer),
+            );
         }
         return ans_;
     }
@@ -8960,6 +9589,17 @@ impl SseDecode for Option<Vec<String>> {
     }
 }
 
+impl SseDecode for Option<Vec<u8>> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        if (<bool>::sse_decode(deserializer)) {
+            return Some(<Vec<u8>>::sse_decode(deserializer));
+        } else {
+            return None;
+        }
+    }
+}
+
 impl SseDecode for crate::domain::PhasedReleaseInfo {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
@@ -9135,6 +9775,12 @@ impl SseDecode for crate::error::StackError {
             8 => {
                 let mut var_message = <String>::sse_decode(deserializer);
                 return crate::error::StackError::ReleaseNotFound {
+                    message: var_message,
+                };
+            }
+            9 => {
+                let mut var_message = <String>::sse_decode(deserializer);
+                return crate::error::StackError::SessionExpired {
                     message: var_message,
                 };
             }
@@ -9501,273 +10147,285 @@ fn pde_ffi_dispatcher_primary_impl(
             rust_vec_len,
             data_len,
         ),
-        44 => wire__crate__frb_api__FrbBetaAppLocalizations_create_beta_app_localization_impl(
+        44 => wire__crate__frb_api__FrbAppleSignIn_finish_impl(port, ptr, rust_vec_len, data_len),
+        45 => {
+            wire__crate__frb_api__FrbAppleSignIn_request_sms_impl(port, ptr, rust_vec_len, data_len)
+        }
+        46 => wire__crate__frb_api__FrbAppleSignIn_start_impl(port, ptr, rust_vec_len, data_len),
+        47 => {
+            wire__crate__frb_api__FrbAppleSignIn_submit_code_impl(port, ptr, rust_vec_len, data_len)
+        }
+        48 => wire__crate__frb_api__FrbAppleSignIn_teams_impl(port, ptr, rust_vec_len, data_len),
+        49 => wire__crate__frb_api__FrbBetaAppLocalizations_create_beta_app_localization_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        45 => wire__crate__frb_api__FrbBetaAppLocalizations_fetch_beta_app_localizations_impl(
+        50 => wire__crate__frb_api__FrbBetaAppLocalizations_fetch_beta_app_localizations_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        46 => wire__crate__frb_api__FrbBetaAppLocalizations_update_beta_app_localization_impl(
+        51 => wire__crate__frb_api__FrbBetaAppLocalizations_update_beta_app_localization_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        47 => wire__crate__frb_api__FrbBetaAppReviewDetail_fetch_beta_app_review_detail_impl(
+        52 => wire__crate__frb_api__FrbBetaAppReviewDetail_fetch_beta_app_review_detail_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        48 => wire__crate__frb_api__FrbBetaAppReviewDetail_update_beta_app_review_detail_impl(
+        53 => wire__crate__frb_api__FrbBetaAppReviewDetail_update_beta_app_review_detail_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        49 => wire__crate__frb_api__FrbBetaBuildLocalizations_create_beta_build_localization_impl(
+        54 => wire__crate__frb_api__FrbBetaBuildLocalizations_create_beta_build_localization_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        50 => wire__crate__frb_api__FrbBetaBuildLocalizations_fetch_beta_build_localizations_impl(
+        55 => wire__crate__frb_api__FrbBetaBuildLocalizations_fetch_beta_build_localizations_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        51 => wire__crate__frb_api__FrbBetaBuildLocalizations_update_beta_build_localization_impl(
+        56 => wire__crate__frb_api__FrbBetaBuildLocalizations_update_beta_build_localization_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        52 => wire__crate__frb_api__FrbBetaGroups_add_beta_tester_impl(
+        57 => wire__crate__frb_api__FrbBetaGroups_add_beta_tester_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        53 => wire__crate__frb_api__FrbBetaGroups_create_beta_group_impl(
+        58 => wire__crate__frb_api__FrbBetaGroups_create_beta_group_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        54 => wire__crate__frb_api__FrbBetaGroups_delete_beta_group_impl(
+        59 => wire__crate__frb_api__FrbBetaGroups_delete_beta_group_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        55 => wire__crate__frb_api__FrbBetaGroups_fetch_beta_groups_impl(
+        60 => wire__crate__frb_api__FrbBetaGroups_fetch_beta_groups_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        56 => wire__crate__frb_api__FrbBetaGroups_fetch_beta_testers_impl(
+        61 => wire__crate__frb_api__FrbBetaGroups_fetch_beta_testers_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        57 => wire__crate__frb_api__FrbBetaGroups_fetch_tester_count_impl(
+        62 => wire__crate__frb_api__FrbBetaGroups_fetch_tester_count_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        58 => wire__crate__frb_api__FrbBetaGroups_remove_beta_tester_impl(
+        63 => wire__crate__frb_api__FrbBetaGroups_remove_beta_tester_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        59 => wire__crate__frb_api__FrbBetaGroups_resend_invite_impl(
+        64 => wire__crate__frb_api__FrbBetaGroups_resend_invite_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        60 => wire__crate__frb_api__FrbBetaGroups_update_beta_group_impl(
+        65 => wire__crate__frb_api__FrbBetaGroups_update_beta_group_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        61 => wire__crate__frb_api__FrbBuilds_add_build_to_groups_impl(
+        66 => wire__crate__frb_api__FrbBuilds_add_build_to_groups_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        62 => wire__crate__frb_api__FrbBuilds_attach_build_impl(port, ptr, rust_vec_len, data_len),
-        63 => wire__crate__frb_api__FrbBuilds_expire_build_impl(port, ptr, rust_vec_len, data_len),
-        64 => wire__crate__frb_api__FrbBuilds_fetch_build_detail_impl(
+        67 => wire__crate__frb_api__FrbBuilds_attach_build_impl(port, ptr, rust_vec_len, data_len),
+        68 => wire__crate__frb_api__FrbBuilds_expire_build_impl(port, ptr, rust_vec_len, data_len),
+        69 => wire__crate__frb_api__FrbBuilds_fetch_build_detail_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        65 => wire__crate__frb_api__FrbBuilds_fetch_builds_impl(port, ptr, rust_vec_len, data_len),
-        66 => wire__crate__frb_api__FrbBuilds_fetch_builds_for_group_impl(
+        70 => wire__crate__frb_api__FrbBuilds_fetch_builds_impl(port, ptr, rust_vec_len, data_len),
+        71 => wire__crate__frb_api__FrbBuilds_fetch_builds_for_group_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        67 => wire__crate__frb_api__FrbBuilds_fetch_builds_page_impl(
+        72 => wire__crate__frb_api__FrbBuilds_fetch_builds_page_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        68 => wire__crate__frb_api__FrbBuilds_fetch_current_build_impl(
+        73 => wire__crate__frb_api__FrbBuilds_fetch_current_build_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        69 => wire__crate__frb_api__FrbBuilds_remove_build_from_group_impl(
+        74 => wire__crate__frb_api__FrbBuilds_remove_build_from_group_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        70 => wire__crate__frb_api__FrbBuilds_submit_build_for_beta_review_impl(
+        75 => wire__crate__frb_api__FrbBuilds_submit_build_for_beta_review_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        71 => wire__crate__frb_api__FrbBundleIds_create_bundle_id_impl(
+        76 => wire__crate__frb_api__FrbBundleIds_create_bundle_id_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        72 => wire__crate__frb_api__FrbBundleIds_delete_bundle_id_impl(
+        77 => wire__crate__frb_api__FrbBundleIds_delete_bundle_id_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        73 => wire__crate__frb_api__FrbBundleIds_disable_capability_impl(
+        78 => wire__crate__frb_api__FrbBundleIds_disable_capability_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        74 => wire__crate__frb_api__FrbBundleIds_enable_capability_impl(
+        79 => wire__crate__frb_api__FrbBundleIds_enable_capability_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        75 => wire__crate__frb_api__FrbBundleIds_fetch_bundle_id_capabilities_impl(
+        80 => wire__crate__frb_api__FrbBundleIds_fetch_bundle_id_capabilities_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        76 => wire__crate__frb_api__FrbBundleIds_fetch_bundle_ids_impl(
+        81 => wire__crate__frb_api__FrbBundleIds_fetch_bundle_ids_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        77 => wire__crate__frb_api__FrbBundleIds_update_bundle_id_impl(
+        82 => wire__crate__frb_api__FrbBundleIds_update_bundle_id_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        78 => wire__crate__frb_api__FrbCertificates_create_certificate_impl(
+        83 => wire__crate__frb_api__FrbCertificates_create_certificate_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        79 => wire__crate__frb_api__FrbCertificates_fetch_certificate_content_impl(
+        84 => wire__crate__frb_api__FrbCertificates_fetch_certificate_content_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        80 => wire__crate__frb_api__FrbCertificates_fetch_certificates_impl(
+        85 => wire__crate__frb_api__FrbCertificates_fetch_certificates_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        81 => wire__crate__frb_api__FrbCertificates_revoke_certificate_impl(
+        86 => wire__crate__frb_api__FrbCertificates_revoke_certificate_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        82 => {
+        87 => {
             wire__crate__frb_api__FrbDevices_create_device_impl(port, ptr, rust_vec_len, data_len)
         }
-        83 => {
+        88 => {
             wire__crate__frb_api__FrbDevices_fetch_devices_impl(port, ptr, rust_vec_len, data_len)
         }
-        84 => {
+        89 => {
             wire__crate__frb_api__FrbDevices_update_device_impl(port, ptr, rust_vec_len, data_len)
         }
-        85 => {
+        90 => {
             wire__crate__frb_api__FrbProfiles_create_profile_impl(port, ptr, rust_vec_len, data_len)
         }
-        86 => {
+        91 => {
             wire__crate__frb_api__FrbProfiles_delete_profile_impl(port, ptr, rust_vec_len, data_len)
         }
-        87 => wire__crate__frb_api__FrbProfiles_fetch_profile_content_impl(
+        92 => wire__crate__frb_api__FrbProfiles_fetch_profile_content_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        88 => {
+        93 => {
             wire__crate__frb_api__FrbProfiles_fetch_profiles_impl(port, ptr, rust_vec_len, data_len)
         }
-        102 => wire__crate__frb_api__FrbProvider_fetch_apps_impl(port, ptr, rust_vec_len, data_len),
-        107 => wire__crate__frb_api__FrbProvider_validate_impl(port, ptr, rust_vec_len, data_len),
-        108 => wire__crate__frb_api__FrbReviews_fetch_customer_reviews_impl(
+        107 => wire__crate__frb_api__FrbProvider_fetch_apps_impl(port, ptr, rust_vec_len, data_len),
+        113 => wire__crate__frb_api__FrbProvider_validate_impl(port, ptr, rust_vec_len, data_len),
+        114 => wire__crate__frb_api__FrbReviews_fetch_customer_reviews_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        109 => wire__crate__frb_api__FrbReviews_fetch_customer_reviews_page_impl(
+        115 => wire__crate__frb_api__FrbReviews_fetch_customer_reviews_page_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        110 => {
+        116 => {
             wire__crate__frb_api__FrbReviews_reply_to_review_impl(port, ptr, rust_vec_len, data_len)
         }
-        111 => {
+        117 => {
             wire__crate__frb_api__FrbSyncService_sync_apps_impl(port, ptr, rust_vec_len, data_len)
         }
-        112 => wire__crate__frb_api__FrbUsers_delete_user_impl(port, ptr, rust_vec_len, data_len),
-        113 => wire__crate__frb_api__FrbUsers_fetch_team_members_impl(
+        118 => wire__crate__frb_api__FrbUsers_delete_user_impl(port, ptr, rust_vec_len, data_len),
+        119 => wire__crate__frb_api__FrbUsers_fetch_team_members_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        114 => wire__crate__frb_api__FrbUsers_fetch_users_impl(port, ptr, rust_vec_len, data_len),
-        115 => wire__crate__frb_api__FrbUsers_invite_user_impl(port, ptr, rust_vec_len, data_len),
-        117 => wire__crate__frb_api__connect_impl(port, ptr, rust_vec_len, data_len),
+        120 => wire__crate__frb_api__FrbUsers_fetch_users_impl(port, ptr, rust_vec_len, data_len),
+        121 => wire__crate__frb_api__FrbUsers_invite_user_impl(port, ptr, rust_vec_len, data_len),
+        125 => wire__crate__frb_api__connect_impl(port, ptr, rust_vec_len, data_len),
+        126 => {
+            wire__crate__frb_api__connect_with_apple_session_impl(port, ptr, rust_vec_len, data_len)
+        }
         _ => unreachable!(),
     }
 }
@@ -9780,46 +10438,55 @@ fn pde_ffi_dispatcher_sync_impl(
 ) -> flutter_rust_bridge::for_generated::WireSyncRust2DartSse {
     // Codec=Pde (Serialization + dispatch), see doc to use other codecs
     match func_id {
-        89 => wire__crate__frb_api__FrbProvider_accessibility_declarations_impl(
+        94 => wire__crate__frb_api__FrbProvider_accessibility_declarations_impl(
             ptr,
             rust_vec_len,
             data_len,
         ),
-        90 => wire__crate__frb_api__FrbProvider_analytics_impl(ptr, rust_vec_len, data_len),
-        91 => wire__crate__frb_api__FrbProvider_app_metadata_impl(ptr, rust_vec_len, data_len),
-        92 => {
+        95 => wire__crate__frb_api__FrbProvider_analytics_impl(ptr, rust_vec_len, data_len),
+        96 => wire__crate__frb_api__FrbProvider_app_metadata_impl(ptr, rust_vec_len, data_len),
+        97 => {
             wire__crate__frb_api__FrbProvider_app_store_versions_impl(ptr, rust_vec_len, data_len)
         }
-        93 => wire__crate__frb_api__FrbProvider_beta_app_localizations_impl(
+        98 => wire__crate__frb_api__FrbProvider_beta_app_localizations_impl(
             ptr,
             rust_vec_len,
             data_len,
         ),
-        94 => wire__crate__frb_api__FrbProvider_beta_app_review_detail_impl(
+        99 => wire__crate__frb_api__FrbProvider_beta_app_review_detail_impl(
             ptr,
             rust_vec_len,
             data_len,
         ),
-        95 => wire__crate__frb_api__FrbProvider_beta_build_localizations_impl(
+        100 => wire__crate__frb_api__FrbProvider_beta_build_localizations_impl(
             ptr,
             rust_vec_len,
             data_len,
         ),
-        96 => wire__crate__frb_api__FrbProvider_beta_groups_impl(ptr, rust_vec_len, data_len),
-        97 => wire__crate__frb_api__FrbProvider_builds_impl(ptr, rust_vec_len, data_len),
-        98 => wire__crate__frb_api__FrbProvider_bundle_ids_impl(ptr, rust_vec_len, data_len),
-        99 => wire__crate__frb_api__FrbProvider_capabilities_impl(ptr, rust_vec_len, data_len),
-        100 => wire__crate__frb_api__FrbProvider_certificates_impl(ptr, rust_vec_len, data_len),
-        101 => wire__crate__frb_api__FrbProvider_devices_impl(ptr, rust_vec_len, data_len),
-        103 => wire__crate__frb_api__FrbProvider_kind_impl(ptr, rust_vec_len, data_len),
-        104 => wire__crate__frb_api__FrbProvider_profiles_impl(ptr, rust_vec_len, data_len),
-        105 => wire__crate__frb_api__FrbProvider_reviews_impl(ptr, rust_vec_len, data_len),
-        106 => wire__crate__frb_api__FrbProvider_users_impl(ptr, rust_vec_len, data_len),
-        116 => wire__crate__frb_api__available_services_impl(ptr, rust_vec_len, data_len),
-        118 => wire__crate__frb_api__credential_schema_impl(ptr, rust_vec_len, data_len),
-        119 => wire__crate__frb_api__decrypt_scexport_impl(ptr, rust_vec_len, data_len),
-        120 => wire__crate__frb_api__encrypt_scexport_impl(ptr, rust_vec_len, data_len),
-        121 => wire__crate__frb_api__make_sync_service_impl(ptr, rust_vec_len, data_len),
+        101 => wire__crate__frb_api__FrbProvider_beta_groups_impl(ptr, rust_vec_len, data_len),
+        102 => wire__crate__frb_api__FrbProvider_builds_impl(ptr, rust_vec_len, data_len),
+        103 => wire__crate__frb_api__FrbProvider_bundle_ids_impl(ptr, rust_vec_len, data_len),
+        104 => wire__crate__frb_api__FrbProvider_capabilities_impl(ptr, rust_vec_len, data_len),
+        105 => wire__crate__frb_api__FrbProvider_certificates_impl(ptr, rust_vec_len, data_len),
+        106 => wire__crate__frb_api__FrbProvider_devices_impl(ptr, rust_vec_len, data_len),
+        108 => wire__crate__frb_api__FrbProvider_kind_impl(ptr, rust_vec_len, data_len),
+        109 => wire__crate__frb_api__FrbProvider_profiles_impl(ptr, rust_vec_len, data_len),
+        110 => wire__crate__frb_api__FrbProvider_reviews_impl(ptr, rust_vec_len, data_len),
+        111 => wire__crate__frb_api__FrbProvider_take_refreshed_session_impl(
+            ptr,
+            rust_vec_len,
+            data_len,
+        ),
+        112 => wire__crate__frb_api__FrbProvider_users_impl(ptr, rust_vec_len, data_len),
+        122 => wire__crate__frb_api__apple_sign_in_impl(ptr, rust_vec_len, data_len),
+        123 => {
+            wire__crate__frb_api__apple_sign_in_with_saved_session_impl(ptr, rust_vec_len, data_len)
+        }
+        124 => wire__crate__frb_api__available_services_impl(ptr, rust_vec_len, data_len),
+        127 => wire__crate__frb_api__credential_schema_impl(ptr, rust_vec_len, data_len),
+        128 => wire__crate__frb_api__decrypt_scexport_impl(ptr, rust_vec_len, data_len),
+        129 => wire__crate__frb_api__encrypt_scexport_impl(ptr, rust_vec_len, data_len),
+        130 => wire__crate__frb_api__make_sync_service_impl(ptr, rust_vec_len, data_len),
         _ => unreachable!(),
     }
 }
@@ -9890,6 +10557,21 @@ impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
 
 impl flutter_rust_bridge::IntoIntoDart<FrbWrapper<FrbAppStoreVersions>> for FrbAppStoreVersions {
     fn into_into_dart(self) -> FrbWrapper<FrbAppStoreVersions> {
+        self.into()
+    }
+}
+
+// Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for FrbWrapper<FrbAppleSignIn> {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        flutter_rust_bridge::for_generated::rust_auto_opaque_encode::<_, MoiArc<_>>(self.0)
+            .into_dart()
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive for FrbWrapper<FrbAppleSignIn> {}
+
+impl flutter_rust_bridge::IntoIntoDart<FrbWrapper<FrbAppleSignIn>> for FrbAppleSignIn {
+    fn into_into_dart(self) -> FrbWrapper<FrbAppleSignIn> {
         self.into()
     }
 }
@@ -10586,6 +11268,148 @@ impl flutter_rust_bridge::IntoIntoDart<crate::domain::AppStoreVersionInfo>
     }
 }
 // Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for crate::auth::apple_session::flow::AppleCodeDelivery {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        match self {
+            crate::auth::apple_session::flow::AppleCodeDelivery::TrustedDevices => {
+                [0.into_dart()].into_dart()
+            }
+            crate::auth::apple_session::flow::AppleCodeDelivery::Phone { phone_id } => {
+                [1.into_dart(), phone_id.into_into_dart().into_dart()].into_dart()
+            }
+            crate::auth::apple_session::flow::AppleCodeDelivery::NotSent => {
+                [2.into_dart()].into_dart()
+            }
+            _ => {
+                unimplemented!("");
+            }
+        }
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
+    for crate::auth::apple_session::flow::AppleCodeDelivery
+{
+}
+impl flutter_rust_bridge::IntoIntoDart<crate::auth::apple_session::flow::AppleCodeDelivery>
+    for crate::auth::apple_session::flow::AppleCodeDelivery
+{
+    fn into_into_dart(self) -> crate::auth::apple_session::flow::AppleCodeDelivery {
+        self
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for crate::auth::apple_session::flow::AppleCodeMethod {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        match self {
+            crate::auth::apple_session::flow::AppleCodeMethod::TrustedDevice => {
+                [0.into_dart()].into_dart()
+            }
+            crate::auth::apple_session::flow::AppleCodeMethod::Phone { phone_id } => {
+                [1.into_dart(), phone_id.into_into_dart().into_dart()].into_dart()
+            }
+            _ => {
+                unimplemented!("");
+            }
+        }
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
+    for crate::auth::apple_session::flow::AppleCodeMethod
+{
+}
+impl flutter_rust_bridge::IntoIntoDart<crate::auth::apple_session::flow::AppleCodeMethod>
+    for crate::auth::apple_session::flow::AppleCodeMethod
+{
+    fn into_into_dart(self) -> crate::auth::apple_session::flow::AppleCodeMethod {
+        self
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for crate::auth::apple_session::flow::AppleSignInStep {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        match self {
+            crate::auth::apple_session::flow::AppleSignInStep::NeedsCode {
+                methods,
+                phones,
+                code_length,
+                delivery,
+            } => [
+                0.into_dart(),
+                methods.into_into_dart().into_dart(),
+                phones.into_into_dart().into_dart(),
+                code_length.into_into_dart().into_dart(),
+                delivery.into_into_dart().into_dart(),
+            ]
+            .into_dart(),
+            crate::auth::apple_session::flow::AppleSignInStep::NeedsAcknowledgement => {
+                [1.into_dart()].into_dart()
+            }
+            crate::auth::apple_session::flow::AppleSignInStep::Done { teams } => {
+                [2.into_dart(), teams.into_into_dart().into_dart()].into_dart()
+            }
+            _ => {
+                unimplemented!("");
+            }
+        }
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
+    for crate::auth::apple_session::flow::AppleSignInStep
+{
+}
+impl flutter_rust_bridge::IntoIntoDart<crate::auth::apple_session::flow::AppleSignInStep>
+    for crate::auth::apple_session::flow::AppleSignInStep
+{
+    fn into_into_dart(self) -> crate::auth::apple_session::flow::AppleSignInStep {
+        self
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for crate::auth::apple_session::session::AppleTeam {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        [
+            self.provider_id.into_into_dart().into_dart(),
+            self.name.into_into_dart().into_dart(),
+            self.public_provider_id.into_into_dart().into_dart(),
+            self.content_types.into_into_dart().into_dart(),
+        ]
+        .into_dart()
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
+    for crate::auth::apple_session::session::AppleTeam
+{
+}
+impl flutter_rust_bridge::IntoIntoDart<crate::auth::apple_session::session::AppleTeam>
+    for crate::auth::apple_session::session::AppleTeam
+{
+    fn into_into_dart(self) -> crate::auth::apple_session::session::AppleTeam {
+        self
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for crate::auth::apple_session::flow::AppleTrustedPhone {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        [
+            self.id.into_into_dart().into_dart(),
+            self.masked_number.into_into_dart().into_dart(),
+            self.mode.into_into_dart().into_dart(),
+        ]
+        .into_dart()
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
+    for crate::auth::apple_session::flow::AppleTrustedPhone
+{
+}
+impl flutter_rust_bridge::IntoIntoDart<crate::auth::apple_session::flow::AppleTrustedPhone>
+    for crate::auth::apple_session::flow::AppleTrustedPhone
+{
+    fn into_into_dart(self) -> crate::auth::apple_session::flow::AppleTrustedPhone {
+        self
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
 impl flutter_rust_bridge::IntoDart for crate::domain::BetaAppLocalizationInfo {
     fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
         [
@@ -11172,6 +11996,9 @@ impl flutter_rust_bridge::IntoDart for crate::error::StackError {
             crate::error::StackError::ReleaseNotFound { message } => {
                 [8.into_dart(), message.into_into_dart().into_dart()].into_dart()
             }
+            crate::error::StackError::SessionExpired { message } => {
+                [9.into_dart(), message.into_into_dart().into_dart()].into_dart()
+            }
             _ => {
                 unimplemented!("");
             }
@@ -11266,6 +12093,13 @@ impl SseEncode for FrbAppStoreVersions {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
         <RustOpaqueMoi<flutter_rust_bridge::for_generated::RustAutoOpaqueInner<FrbAppStoreVersions>>>::sse_encode(flutter_rust_bridge::for_generated::rust_auto_opaque_encode::<_, MoiArc<_>>(self), serializer);
+    }
+}
+
+impl SseEncode for FrbAppleSignIn {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <RustOpaqueMoi<flutter_rust_bridge::for_generated::RustAutoOpaqueInner<FrbAppleSignIn>>>::sse_encode(flutter_rust_bridge::for_generated::rust_auto_opaque_encode::<_, MoiArc<_>>(self), serializer);
     }
 }
 
@@ -11426,6 +12260,17 @@ impl SseEncode
 
 impl SseEncode
     for RustOpaqueMoi<flutter_rust_bridge::for_generated::RustAutoOpaqueInner<FrbAppStoreVersions>>
+{
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        let (ptr, size) = self.sse_encode_raw();
+        <usize>::sse_encode(ptr, serializer);
+        <i32>::sse_encode(size, serializer);
+    }
+}
+
+impl SseEncode
+    for RustOpaqueMoi<flutter_rust_bridge::for_generated::RustAutoOpaqueInner<FrbAppleSignIn>>
 {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
@@ -11819,6 +12664,102 @@ impl SseEncode for crate::domain::AppStoreVersionInfo {
     }
 }
 
+impl SseEncode for crate::auth::apple_session::flow::AppleCodeDelivery {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        match self {
+            crate::auth::apple_session::flow::AppleCodeDelivery::TrustedDevices => {
+                <i32>::sse_encode(0, serializer);
+            }
+            crate::auth::apple_session::flow::AppleCodeDelivery::Phone { phone_id } => {
+                <i32>::sse_encode(1, serializer);
+                <u64>::sse_encode(phone_id, serializer);
+            }
+            crate::auth::apple_session::flow::AppleCodeDelivery::NotSent => {
+                <i32>::sse_encode(2, serializer);
+            }
+            _ => {
+                unimplemented!("");
+            }
+        }
+    }
+}
+
+impl SseEncode for crate::auth::apple_session::flow::AppleCodeMethod {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        match self {
+            crate::auth::apple_session::flow::AppleCodeMethod::TrustedDevice => {
+                <i32>::sse_encode(0, serializer);
+            }
+            crate::auth::apple_session::flow::AppleCodeMethod::Phone { phone_id } => {
+                <i32>::sse_encode(1, serializer);
+                <u64>::sse_encode(phone_id, serializer);
+            }
+            _ => {
+                unimplemented!("");
+            }
+        }
+    }
+}
+
+impl SseEncode for crate::auth::apple_session::flow::AppleSignInStep {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        match self {
+            crate::auth::apple_session::flow::AppleSignInStep::NeedsCode {
+                methods,
+                phones,
+                code_length,
+                delivery,
+            } => {
+                <i32>::sse_encode(0, serializer);
+                <Vec<crate::auth::apple_session::flow::AppleCodeMethod>>::sse_encode(
+                    methods, serializer,
+                );
+                <Vec<crate::auth::apple_session::flow::AppleTrustedPhone>>::sse_encode(
+                    phones, serializer,
+                );
+                <u8>::sse_encode(code_length, serializer);
+                <crate::auth::apple_session::flow::AppleCodeDelivery>::sse_encode(
+                    delivery, serializer,
+                );
+            }
+            crate::auth::apple_session::flow::AppleSignInStep::NeedsAcknowledgement => {
+                <i32>::sse_encode(1, serializer);
+            }
+            crate::auth::apple_session::flow::AppleSignInStep::Done { teams } => {
+                <i32>::sse_encode(2, serializer);
+                <Vec<crate::auth::apple_session::session::AppleTeam>>::sse_encode(
+                    teams, serializer,
+                );
+            }
+            _ => {
+                unimplemented!("");
+            }
+        }
+    }
+}
+
+impl SseEncode for crate::auth::apple_session::session::AppleTeam {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <u64>::sse_encode(self.provider_id, serializer);
+        <String>::sse_encode(self.name, serializer);
+        <Option<String>>::sse_encode(self.public_provider_id, serializer);
+        <Vec<String>>::sse_encode(self.content_types, serializer);
+    }
+}
+
+impl SseEncode for crate::auth::apple_session::flow::AppleTrustedPhone {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <u64>::sse_encode(self.id, serializer);
+        <String>::sse_encode(self.masked_number, serializer);
+        <String>::sse_encode(self.mode, serializer);
+    }
+}
+
 impl SseEncode for crate::domain::BetaAppLocalizationInfo {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
@@ -12184,6 +13125,36 @@ impl SseEncode for Vec<crate::domain::AppStoreVersionInfo> {
         <i32>::sse_encode(self.len() as _, serializer);
         for item in self {
             <crate::domain::AppStoreVersionInfo>::sse_encode(item, serializer);
+        }
+    }
+}
+
+impl SseEncode for Vec<crate::auth::apple_session::flow::AppleCodeMethod> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <i32>::sse_encode(self.len() as _, serializer);
+        for item in self {
+            <crate::auth::apple_session::flow::AppleCodeMethod>::sse_encode(item, serializer);
+        }
+    }
+}
+
+impl SseEncode for Vec<crate::auth::apple_session::session::AppleTeam> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <i32>::sse_encode(self.len() as _, serializer);
+        for item in self {
+            <crate::auth::apple_session::session::AppleTeam>::sse_encode(item, serializer);
+        }
+    }
+}
+
+impl SseEncode for Vec<crate::auth::apple_session::flow::AppleTrustedPhone> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <i32>::sse_encode(self.len() as _, serializer);
+        for item in self {
+            <crate::auth::apple_session::flow::AppleTrustedPhone>::sse_encode(item, serializer);
         }
     }
 }
@@ -12658,6 +13629,16 @@ impl SseEncode for Option<Vec<String>> {
     }
 }
 
+impl SseEncode for Option<Vec<u8>> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <bool>::sse_encode(self.is_some(), serializer);
+        if let Some(value) = self {
+            <Vec<u8>>::sse_encode(value, serializer);
+        }
+    }
+}
+
 impl SseEncode for crate::domain::PhasedReleaseInfo {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
@@ -12779,6 +13760,10 @@ impl SseEncode for crate::error::StackError {
             }
             crate::error::StackError::ReleaseNotFound { message } => {
                 <i32>::sse_encode(8, serializer);
+                <String>::sse_encode(message, serializer);
+            }
+            crate::error::StackError::SessionExpired { message } => {
+                <i32>::sse_encode(9, serializer);
                 <String>::sse_encode(message, serializer);
             }
             _ => {
@@ -12934,6 +13919,20 @@ mod io {
         ptr: *const std::ffi::c_void,
     ) {
         MoiArc::<flutter_rust_bridge::for_generated::RustAutoOpaqueInner<FrbAppStoreVersions>>::decrement_strong_count(ptr as _);
+    }
+
+    #[unsafe(no_mangle)]
+    pub extern "C" fn frbgen_stack_core_rust_rust_arc_increment_strong_count_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerFrbAppleSignIn(
+        ptr: *const std::ffi::c_void,
+    ) {
+        MoiArc::<flutter_rust_bridge::for_generated::RustAutoOpaqueInner<FrbAppleSignIn>>::increment_strong_count(ptr as _);
+    }
+
+    #[unsafe(no_mangle)]
+    pub extern "C" fn frbgen_stack_core_rust_rust_arc_decrement_strong_count_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerFrbAppleSignIn(
+        ptr: *const std::ffi::c_void,
+    ) {
+        MoiArc::<flutter_rust_bridge::for_generated::RustAutoOpaqueInner<FrbAppleSignIn>>::decrement_strong_count(ptr as _);
     }
 
     #[unsafe(no_mangle)]
@@ -13201,6 +14200,20 @@ mod web {
         ptr: *const std::ffi::c_void,
     ) {
         MoiArc::<flutter_rust_bridge::for_generated::RustAutoOpaqueInner<FrbAppStoreVersions>>::decrement_strong_count(ptr as _);
+    }
+
+    #[wasm_bindgen]
+    pub fn rust_arc_increment_strong_count_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerFrbAppleSignIn(
+        ptr: *const std::ffi::c_void,
+    ) {
+        MoiArc::<flutter_rust_bridge::for_generated::RustAutoOpaqueInner<FrbAppleSignIn>>::increment_strong_count(ptr as _);
+    }
+
+    #[wasm_bindgen]
+    pub fn rust_arc_decrement_strong_count_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerFrbAppleSignIn(
+        ptr: *const std::ffi::c_void,
+    ) {
+        MoiArc::<flutter_rust_bridge::for_generated::RustAutoOpaqueInner<FrbAppleSignIn>>::decrement_strong_count(ptr as _);
     }
 
     #[wasm_bindgen]

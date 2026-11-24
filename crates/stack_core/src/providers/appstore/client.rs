@@ -7,6 +7,11 @@ use md5::{Digest, Md5};
 use serde::Deserialize;
 use serde_json::json;
 
+use super::auth::{
+    ApiKeyOnly, AppStoreAuth, Authorize, PortalCall, RequestAuth, SessionAuth, SessionHost,
+    API_KEY_BASE_URL,
+};
+use crate::auth::apple_session::transport::decode_session_body;
 use crate::auth::es256::AppStoreAuthenticator;
 use crate::domain::{
     AccessibilityDeclarationInfo, AgeRatingDeclarationInfo, AnalyticsReport, AnalyticsReportData,
@@ -20,11 +25,9 @@ use crate::domain::{
     ReviewResponse, ReviewSubmission, ScreenshotInfo, ScreenshotSetInfo, TeamMemberInfo, UserInfo,
 };
 use crate::error::StackError;
-use crate::http_debug::{render_response, send_unbuffered};
+use crate::http_debug::{render_response, send_unbuffered, SessionRedactingLogger};
 use crate::logging::{self, target};
 use crate::ports::DebugLogger;
-
-const DEFAULT_BASE_URL: &str = "https://api.appstoreconnect.apple.com";
 
 /// Actionable message for [`StackError::SubmissionNotRemovable`], surfaced when a
 /// `READY_FOR_REVIEW` review submission survives an item-removal discard because
@@ -2450,10 +2453,20 @@ impl AnalyticsReportSegmentResource {
 
 /// Minimal App Store Connect client: validate credentials and list apps.
 /// `base_url` is injectable so tests can point it at a mock server.
+///
+/// Authorizes with an API key or an Apple ID web session ([`AppStoreAuth`];
+/// the base URL and which resource families are reachable follow the mode,
+/// see [`super::auth`]).
 pub(crate) struct AppStoreClient {
     base_url: String,
+    /// Authorized App Store Connect requests. A web session's client carries
+    /// its cookie jar.
     http: reqwest::Client,
-    auth: AppStoreAuthenticator,
+    /// Pre-signed URLs (screenshot upload operations, analytics segments):
+    /// never a cookie jar, so a session's cookies cannot reach an asset host.
+    /// The same client as `http` in API-key mode.
+    presigned_http: reqwest::Client,
+    auth: AppStoreAuth,
     /// Optional HTTP tracing sink. `None` by default; set via
     /// [`Self::with_debug_logger`] when the host injects a logger through
     /// `connect`. When present, [`Self::send_and_read`] logs every request as a
@@ -2463,23 +2476,63 @@ pub(crate) struct AppStoreClient {
 
 impl AppStoreClient {
     pub(crate) fn new(auth: AppStoreAuthenticator) -> Self {
-        Self::with_base_url(auth, DEFAULT_BASE_URL.to_string())
+        Self::with_base_url(auth, API_KEY_BASE_URL.to_string())
     }
 
     pub(crate) fn with_base_url(auth: AppStoreAuthenticator, base_url: String) -> Self {
+        let http = reqwest::Client::new();
         Self {
             base_url: base_url.trim_end_matches('/').to_string(),
-            http: reqwest::Client::new(),
-            auth,
+            presigned_http: http.clone(),
+            http,
+            auth: AppStoreAuth::ApiKey(auth),
+            debug_logger: None,
+        }
+    }
+
+    /// A client that authorizes with an Apple ID web session, on iris
+    /// (`{app_store_connect}/iris/v1/...`) and, for provisioning, on
+    /// `{developer}/services-account/v1/...`.
+    pub(crate) fn with_session(session: SessionAuth) -> Self {
+        let base_url = session.iris_base_url().to_string();
+        Self::session_client(session, base_url)
+    }
+
+    /// [`Self::with_session`] with iris *and* `services-account` at
+    /// `base_url` (tests: a mock server, so every path is the API key's).
+    #[cfg(test)]
+    pub(crate) fn with_session_base_url(session: SessionAuth, base_url: String) -> Self {
+        let session = session.with_services_base_url(&base_url);
+        Self::session_client(session, base_url)
+    }
+
+    fn session_client(session: SessionAuth, base_url: String) -> Self {
+        Self {
+            base_url: base_url.trim_end_matches('/').to_string(),
+            http: session.http().clone(),
+            presigned_http: reqwest::Client::new(),
+            auth: AppStoreAuth::WebSession(Box::new(session)),
             debug_logger: None,
         }
     }
 
     /// Attaches an optional HTTP tracing sink. Builder-style so existing callers
     /// that only need `new(auth)` stay unchanged; `None` is a no-op (no logging).
+    /// A web session's sink gets every line through a
+    /// [`SessionRedactingLogger`].
     pub(crate) fn with_debug_logger(mut self, logger: Option<Arc<dyn DebugLogger>>) -> Self {
-        self.debug_logger = logger;
+        self.debug_logger = match logger {
+            Some(logger) if self.auth.is_web_session() => {
+                Some(Arc::new(SessionRedactingLogger::new(logger)))
+            }
+            other => other,
+        };
         self
+    }
+
+    /// Whether the client authorizes with an Apple ID web session.
+    pub(crate) fn is_web_session(&self) -> bool {
+        self.auth.is_web_session()
     }
 
     /// Sends `builder`, returning the response status and body text. When a
@@ -2494,11 +2547,149 @@ impl AppStoreClient {
     /// # Errors
     /// [`StackError::Network`] on transport failure (sending or reading the body)
     /// — the same mapping the call sites used before this method existed.
+    ///
+    /// A web session also reads the response's CSRF tokens and refreshed
+    /// cookies, and turns an HTTP 401 into [`StackError::SessionExpired`]
+    /// (see [`SessionAuth::observe`]).
     async fn send_and_read(
         &self,
         builder: reqwest::RequestBuilder,
     ) -> Result<(reqwest::StatusCode, String), StackError> {
-        crate::http_debug::send_and_read(builder, self.debug_logger.as_deref()).await
+        match &self.auth {
+            AppStoreAuth::ApiKey(_) => {
+                crate::http_debug::send_and_read(builder, self.debug_logger.as_deref()).await
+            }
+            AppStoreAuth::WebSession(session) => {
+                self.send_with_session(session, SessionHost::AppStoreConnect, builder)
+                    .await
+            }
+        }
+    }
+
+    /// Sends a web session request to `host`: the body is inflated when the
+    /// server compressed it (the Developer Portal gzips some answers unasked),
+    /// then the response is shown to the session ([`SessionAuth::observe`]).
+    async fn send_with_session(
+        &self,
+        session: &SessionAuth,
+        host: SessionHost,
+        builder: reqwest::RequestBuilder,
+    ) -> Result<(reqwest::StatusCode, String), StackError> {
+        let reply = crate::http_debug::send_decoding(
+            builder,
+            self.debug_logger.as_deref(),
+            decode_session_body,
+        )
+        .await?;
+        session.observe(host, reply.status, &reply.headers).await?;
+        Ok((reply.status, reply.body))
+    }
+
+    /// `path` (`/v1/...`) on the provisioning host: the API's base URL with an
+    /// API key (the URL every provisioning call always used), the Developer
+    /// Portal's `services-account` with a web session.
+    fn provisioning_url(&self, path: &str) -> String {
+        match &self.auth {
+            AppStoreAuth::ApiKey(_) => format!("{}{path}", self.base_url),
+            AppStoreAuth::WebSession(session) => {
+                format!("{}{path}", session.services_base_url())
+            }
+        }
+    }
+
+    /// A provisioning read of `url` (a first page or a `links.next`): a `GET`
+    /// with an API key ([`Self::get_page`]), spaceship's proxied `GET` with a
+    /// web session. Returns the body of a 2xx.
+    ///
+    /// # Errors
+    /// [`StackError::PendingAgreements`] on a pending-agreements 403,
+    /// [`StackError::Http`] on any other non-2xx, [`StackError::Network`] on
+    /// transport failure; with a session also the errors of
+    /// [`SessionAuth::portal_request`] and [`SessionAuth::observe`].
+    async fn provisioning_get(&self, url: &str) -> Result<String, StackError> {
+        match &self.auth {
+            AppStoreAuth::ApiKey(_) => self.get_page(url).await,
+            AppStoreAuth::WebSession(session) => {
+                let request = session.portal_request(PortalCall::Get, url).await?;
+                let (status, body) = self
+                    .send_with_session(session, SessionHost::DeveloperPortal, request)
+                    .await?;
+                success_body(status, body)
+            }
+        }
+    }
+
+    /// A provisioning create: `POST url` with `request_body` (API key,
+    /// [`Self::post_json_2xx`]) or spaceship's `proxy_post` (the body plus
+    /// `data.attributes.teamId`). Returns the body of a 2xx.
+    ///
+    /// # Errors
+    /// As [`Self::provisioning_get`].
+    async fn provisioning_create(
+        &self,
+        url: &str,
+        request_body: &serde_json::Value,
+    ) -> Result<String, StackError> {
+        match &self.auth {
+            AppStoreAuth::ApiKey(_) => self.post_json_2xx(url, request_body).await,
+            AppStoreAuth::WebSession(session) => {
+                let request = session
+                    .portal_request(PortalCall::Create(request_body), url)
+                    .await?;
+                let (status, body) = self
+                    .send_with_session(session, SessionHost::DeveloperPortal, request)
+                    .await?;
+                success_body(status, body)
+            }
+        }
+    }
+
+    /// A provisioning update: `PATCH url` with `request_body`, in both modes
+    /// (spaceship does not proxy `PATCH`). Any 2xx → `Ok(())`.
+    ///
+    /// # Errors
+    /// As [`Self::provisioning_get`].
+    async fn provisioning_update(
+        &self,
+        url: &str,
+        request_body: &serde_json::Value,
+    ) -> Result<(), StackError> {
+        match &self.auth {
+            AppStoreAuth::ApiKey(_) => {
+                let token = self.auth.credential().await?;
+                self.patch_no_content(url, &token, request_body).await
+            }
+            AppStoreAuth::WebSession(session) => {
+                let request = session
+                    .portal_request(PortalCall::Update(request_body), url)
+                    .await?;
+                let (status, body) = self
+                    .send_with_session(session, SessionHost::DeveloperPortal, request)
+                    .await?;
+                success_body(status, body).map(drop)
+            }
+        }
+    }
+
+    /// A provisioning delete: `DELETE url` (API key) or spaceship's
+    /// `proxy_delete`. Any 2xx → `Ok(())`.
+    ///
+    /// # Errors
+    /// As [`Self::provisioning_get`].
+    async fn provisioning_delete(&self, url: &str) -> Result<(), StackError> {
+        let (status, body) = match &self.auth {
+            AppStoreAuth::ApiKey(_) => {
+                let token = self.auth.credential().await?;
+                self.send_and_read(self.http.delete(url).authorize(&token))
+                    .await?
+            }
+            AppStoreAuth::WebSession(session) => {
+                let request = session.portal_request(PortalCall::Delete, url).await?;
+                self.send_with_session(session, SessionHost::DeveloperPortal, request)
+                    .await?
+            }
+        };
+        success_body(status, body).map(drop)
     }
 
     /// Cheap credential check: `GET /v1/apps?limit=1`.
@@ -2508,9 +2699,9 @@ impl AppStoreClient {
     /// surfaced with an explanatory message; otherwise the raw status/body.
     pub(crate) async fn validate(&self) -> Result<(), StackError> {
         let url = format!("{}/v1/apps?limit=1", self.base_url);
-        let token = self.auth.bearer_token().await?;
+        let token = self.auth.credential().await?;
         let (status, body) = self
-            .send_and_read(self.http.get(&url).bearer_auth(token))
+            .send_and_read(self.http.get(&url).authorize(&token))
             .await?;
         if status.is_success() {
             return Ok(());
@@ -2732,7 +2923,7 @@ impl AppStoreClient {
         body: &str,
     ) -> Result<ReviewResponse, StackError> {
         let url = format!("{}/v1/customerReviewResponses", self.base_url);
-        let token = self.auth.bearer_token().await?;
+        let token = self.auth.credential().await?;
         let request_body = json!({
             "data": {
                 "type": "customerReviewResponses",
@@ -2746,7 +2937,7 @@ impl AppStoreClient {
         });
 
         let (status, response_body) = self
-            .send_and_read(self.http.post(&url).bearer_auth(token).json(&request_body))
+            .send_and_read(self.http.post(&url).authorize(&token).json(&request_body))
             .await?;
         if !status.is_success() {
             if let Some(err) = pending_agreements_error(status.as_u16(), &response_body) {
@@ -2773,9 +2964,9 @@ impl AppStoreClient {
     /// transport failure.
     pub(crate) async fn delete_review_response(&self, response_id: &str) -> Result<(), StackError> {
         let url = format!("{}/v1/customerReviewResponses/{response_id}", self.base_url);
-        let token = self.auth.bearer_token().await?;
+        let token = self.auth.credential().await?;
         let (status, body) = self
-            .send_and_read(self.http.delete(&url).bearer_auth(token))
+            .send_and_read(self.http.delete(&url).authorize(&token))
             .await?;
         if status.is_success() {
             return Ok(());
@@ -2836,7 +3027,7 @@ impl AppStoreClient {
         version_string: &str,
     ) -> Result<AppStoreVersionInfo, StackError> {
         let url = format!("{}/v1/appStoreVersions", self.base_url);
-        let token = self.auth.bearer_token().await?;
+        let token = self.auth.credential().await?;
         let request_body = json!({
             "data": {
                 "type": "appStoreVersions",
@@ -2854,7 +3045,7 @@ impl AppStoreClient {
         });
 
         let (status, response_body) = self
-            .send_and_read(self.http.post(&url).bearer_auth(token).json(&request_body))
+            .send_and_read(self.http.post(&url).authorize(&token).json(&request_body))
             .await?;
         if !status.is_success() {
             if let Some(err) = pending_agreements_error(status.as_u16(), &response_body) {
@@ -2890,7 +3081,7 @@ impl AppStoreClient {
         earliest_release_date: Option<&str>,
     ) -> Result<(), StackError> {
         let url = format!("{}/v1/appStoreVersions/{id}", self.base_url);
-        let token = self.auth.bearer_token().await?;
+        let token = self.auth.credential().await?;
 
         let mut attributes = serde_json::Map::new();
         if let Some(value) = version_string {
@@ -2915,7 +3106,7 @@ impl AppStoreClient {
         });
 
         let (status, body) = self
-            .send_and_read(self.http.patch(&url).bearer_auth(token).json(&request_body))
+            .send_and_read(self.http.patch(&url).authorize(&token).json(&request_body))
             .await?;
         if status.is_success() {
             return Ok(());
@@ -2939,9 +3130,9 @@ impl AppStoreClient {
     /// transport failure.
     pub(crate) async fn delete_version(&self, id: &str) -> Result<(), StackError> {
         let url = format!("{}/v1/appStoreVersions/{id}", self.base_url);
-        let token = self.auth.bearer_token().await?;
+        let token = self.auth.credential().await?;
         let (status, body) = self
-            .send_and_read(self.http.delete(&url).bearer_auth(token))
+            .send_and_read(self.http.delete(&url).authorize(&token))
             .await?;
         if status.is_success() {
             return Ok(());
@@ -3164,7 +3355,7 @@ impl AppStoreClient {
                 "attributes": { "submitted": true }
             }
         });
-        let token = self.auth.bearer_token().await?;
+        let token = self.auth.credential().await?;
         self.patch_no_content(&patch_url, &token, &patch_body).await
     }
 
@@ -3290,7 +3481,7 @@ impl AppStoreClient {
                             "attributes": { "canceled": true }
                         }
                     });
-                    let token = self.auth.bearer_token().await?;
+                    let token = self.auth.credential().await?;
                     self.patch_no_content(&patch_url, &token, &patch_body)
                         .await?;
                 }
@@ -3347,7 +3538,7 @@ impl AppStoreClient {
                 "attributes": { "submitted": true }
             }
         });
-        let token = self.auth.bearer_token().await?;
+        let token = self.auth.credential().await?;
         self.patch_no_content(&patch_url, &token, &patch_body).await
     }
 
@@ -3387,9 +3578,9 @@ impl AppStoreClient {
         submission_id: &str,
     ) -> Result<(), StackError> {
         let get_url = format!("{}/v1/reviewSubmissions/{submission_id}", self.base_url);
-        let token = self.auth.bearer_token().await?;
+        let token = self.auth.credential().await?;
         let (status, body) = self
-            .send_and_read(self.http.get(&get_url).bearer_auth(token))
+            .send_and_read(self.http.get(&get_url).authorize(&token))
             .await?;
         // Submission already gone → ASC returns 404; treat as a no-op.
         if status.as_u16() == 404 {
@@ -3418,7 +3609,7 @@ impl AppStoreClient {
                         "attributes": { "canceled": true }
                     }
                 });
-                let token = self.auth.bearer_token().await?;
+                let token = self.auth.credential().await?;
                 self.patch_no_content(&patch_url, &token, &patch_body)
                     .await?;
             }
@@ -3466,9 +3657,9 @@ impl AppStoreClient {
             "{}/v1/appStoreVersions/{version_id}/appStoreVersionSubmission",
             self.base_url
         );
-        let token = self.auth.bearer_token().await?;
+        let token = self.auth.credential().await?;
         let (status, body) = self
-            .send_and_read(self.http.get(&get_url).bearer_auth(token))
+            .send_and_read(self.http.get(&get_url).authorize(&token))
             .await?;
         // No version submission on the version → ASC returns 404; treat as absent.
         if status.as_u16() == 404 {
@@ -3495,9 +3686,9 @@ impl AppStoreClient {
             "{}/v1/appStoreVersionSubmissions/{}",
             self.base_url, submission.id
         );
-        let token = self.auth.bearer_token().await?;
+        let token = self.auth.credential().await?;
         let (status, body) = self
-            .send_and_read(self.http.delete(&delete_url).bearer_auth(token))
+            .send_and_read(self.http.delete(&delete_url).authorize(&token))
             .await?;
         if status.is_success() {
             return Ok(());
@@ -3526,9 +3717,9 @@ impl AppStoreClient {
         submission_id: &str,
     ) -> Result<Option<Option<String>>, StackError> {
         let get_url = format!("{}/v1/reviewSubmissions/{submission_id}", self.base_url);
-        let token = self.auth.bearer_token().await?;
+        let token = self.auth.credential().await?;
         let (status, body) = self
-            .send_and_read(self.http.get(&get_url).bearer_auth(token))
+            .send_and_read(self.http.get(&get_url).authorize(&token))
             .await?;
         // Submission already gone → ASC returns 404; report as absent.
         if status.as_u16() == 404 {
@@ -3662,9 +3853,9 @@ impl AppStoreClient {
     /// [`StackError::Network`] on transport failure.
     async fn delete_review_submission_item(&self, item_id: &str) -> Result<(), StackError> {
         let url = format!("{}/v1/reviewSubmissionItems/{item_id}", self.base_url);
-        let token = self.auth.bearer_token().await?;
+        let token = self.auth.credential().await?;
         let (status, body) = self
-            .send_and_read(self.http.delete(&url).bearer_auth(token))
+            .send_and_read(self.http.delete(&url).authorize(&token))
             .await?;
         if status.is_success() {
             return Ok(());
@@ -3698,9 +3889,9 @@ impl AppStoreClient {
             "{}/v1/appStoreVersions/{version_id}/appStoreVersionPhasedRelease",
             self.base_url
         );
-        let token = self.auth.bearer_token().await?;
+        let token = self.auth.credential().await?;
         let (status, body) = self
-            .send_and_read(self.http.get(&url).bearer_auth(token))
+            .send_and_read(self.http.get(&url).authorize(&token))
             .await?;
         // No phased release on the version → ASC returns 404; treat as absent.
         if status.as_u16() == 404 {
@@ -3774,9 +3965,9 @@ impl AppStoreClient {
     /// [`StackError::Network`] on transport failure.
     pub(crate) async fn delete_phased_release(&self, id: &str) -> Result<(), StackError> {
         let url = format!("{}/v1/appStoreVersionPhasedReleases/{id}", self.base_url);
-        let token = self.auth.bearer_token().await?;
+        let token = self.auth.credential().await?;
         let (status, body) = self
-            .send_and_read(self.http.delete(&url).bearer_auth(token))
+            .send_and_read(self.http.delete(&url).authorize(&token))
             .await?;
         if status.is_success() {
             return Ok(());
@@ -3808,7 +3999,7 @@ impl AppStoreClient {
         state: &str,
     ) -> Result<PhasedReleaseInfo, StackError> {
         let url = format!("{}/v1/appStoreVersionPhasedReleases/{id}", self.base_url);
-        let token = self.auth.bearer_token().await?;
+        let token = self.auth.credential().await?;
         let request_body = json!({
             "data": {
                 "type": "appStoreVersionPhasedReleases",
@@ -3818,7 +4009,7 @@ impl AppStoreClient {
         });
 
         let (status, body) = self
-            .send_and_read(self.http.patch(&url).bearer_auth(token).json(&request_body))
+            .send_and_read(self.http.patch(&url).authorize(&token).json(&request_body))
             .await?;
         if !status.is_success() {
             if let Some(err) = pending_agreements_error(status.as_u16(), &body) {
@@ -3860,7 +4051,7 @@ impl AppStoreClient {
                 "attributes": { "canceled": true }
             }
         });
-        let token = self.auth.bearer_token().await?;
+        let token = self.auth.credential().await?;
         self.patch_no_content(&patch_url, &token, &patch_body).await
     }
 
@@ -3872,9 +4063,9 @@ impl AppStoreClient {
         url: &str,
         request_body: &serde_json::Value,
     ) -> Result<String, StackError> {
-        let token = self.auth.bearer_token().await?;
+        let token = self.auth.credential().await?;
         let (status, body) = self
-            .send_and_read(self.http.post(url).bearer_auth(token).json(request_body))
+            .send_and_read(self.http.post(url).authorize(&token).json(request_body))
             .await?;
         if status.is_success() {
             return Ok(body);
@@ -4098,9 +4289,9 @@ impl AppStoreClient {
         version_id: &str,
     ) -> Result<Option<BuildInfo>, StackError> {
         let url = format!("{}/v1/appStoreVersions/{version_id}/build", self.base_url);
-        let token = self.auth.bearer_token().await?;
+        let token = self.auth.credential().await?;
         let (status, body) = self
-            .send_and_read(self.http.get(&url).bearer_auth(token))
+            .send_and_read(self.http.get(&url).authorize(&token))
             .await?;
         // No build attached to the version → ASC returns 404; treat as absent.
         if status.as_u16() == 404 {
@@ -4136,7 +4327,7 @@ impl AppStoreClient {
     /// [`StackError::Network`] on transport failure.
     pub(crate) async fn expire_build(&self, build_id: &str) -> Result<(), StackError> {
         let url = format!("{}/v1/builds/{build_id}", self.base_url);
-        let token = self.auth.bearer_token().await?;
+        let token = self.auth.credential().await?;
         let request_body = json!({
             "data": {
                 "type": "builds",
@@ -4146,7 +4337,7 @@ impl AppStoreClient {
         });
 
         let (status, body) = self
-            .send_and_read(self.http.patch(&url).bearer_auth(token).json(&request_body))
+            .send_and_read(self.http.patch(&url).authorize(&token).json(&request_body))
             .await?;
         if status.is_success() {
             return Ok(());
@@ -4179,13 +4370,13 @@ impl AppStoreClient {
             "{}/v1/appStoreVersions/{version_id}/relationships/build",
             self.base_url
         );
-        let token = self.auth.bearer_token().await?;
+        let token = self.auth.credential().await?;
         let request_body = json!({
             "data": { "type": "builds", "id": build_id }
         });
 
         let (status, body) = self
-            .send_and_read(self.http.patch(&url).bearer_auth(token).json(&request_body))
+            .send_and_read(self.http.patch(&url).authorize(&token).json(&request_body))
             .await?;
         if status.is_success() {
             return Ok(());
@@ -4213,7 +4404,7 @@ impl AppStoreClient {
         build_id: &str,
     ) -> Result<(), StackError> {
         let url = format!("{}/v1/betaAppReviewSubmissions", self.base_url);
-        let token = self.auth.bearer_token().await?;
+        let token = self.auth.credential().await?;
         let request_body = json!({
             "data": {
                 "type": "betaAppReviewSubmissions",
@@ -4226,7 +4417,7 @@ impl AppStoreClient {
         });
 
         let (status, body) = self
-            .send_and_read(self.http.post(&url).bearer_auth(token).json(&request_body))
+            .send_and_read(self.http.post(&url).authorize(&token).json(&request_body))
             .await?;
         if status.is_success() {
             return Ok(());
@@ -4260,7 +4451,7 @@ impl AppStoreClient {
             "{}/v1/builds/{build_id}/relationships/betaGroups",
             self.base_url
         );
-        let token = self.auth.bearer_token().await?;
+        let token = self.auth.credential().await?;
         let data: Vec<_> = group_ids
             .iter()
             .map(|id| json!({ "type": "betaGroups", "id": id }))
@@ -4268,7 +4459,7 @@ impl AppStoreClient {
         let request_body = json!({ "data": data });
 
         let (status, body) = self
-            .send_and_read(self.http.post(&url).bearer_auth(token).json(&request_body))
+            .send_and_read(self.http.post(&url).authorize(&token).json(&request_body))
             .await?;
         if status.is_success() {
             return Ok(());
@@ -4301,18 +4492,13 @@ impl AppStoreClient {
             "{}/v1/betaGroups/{group_id}/relationships/builds",
             self.base_url
         );
-        let token = self.auth.bearer_token().await?;
+        let token = self.auth.credential().await?;
         let request_body = json!({
             "data": [{ "type": "builds", "id": build_id }]
         });
 
         let (status, body) = self
-            .send_and_read(
-                self.http
-                    .delete(&url)
-                    .bearer_auth(token)
-                    .json(&request_body),
-            )
+            .send_and_read(self.http.delete(&url).authorize(&token).json(&request_body))
             .await?;
         if status.is_success() {
             return Ok(());
@@ -4423,7 +4609,7 @@ impl AppStoreClient {
         has_access_to_all_builds: bool,
     ) -> Result<BetaGroupInfo, StackError> {
         let url = format!("{}/v1/betaGroups", self.base_url);
-        let token = self.auth.bearer_token().await?;
+        let token = self.auth.credential().await?;
         let request_body = json!({
             "data": {
                 "type": "betaGroups",
@@ -4443,7 +4629,7 @@ impl AppStoreClient {
         });
 
         let (status, response_body) = self
-            .send_and_read(self.http.post(&url).bearer_auth(token).json(&request_body))
+            .send_and_read(self.http.post(&url).authorize(&token).json(&request_body))
             .await?;
         if !status.is_success() {
             if let Some(err) = pending_agreements_error(status.as_u16(), &response_body) {
@@ -4485,7 +4671,7 @@ impl AppStoreClient {
         feedback_enabled: Option<bool>,
     ) -> Result<BetaGroupInfo, StackError> {
         let url = format!("{}/v1/betaGroups/{group_id}", self.base_url);
-        let token = self.auth.bearer_token().await?;
+        let token = self.auth.credential().await?;
 
         let mut attributes = serde_json::Map::new();
         if let Some(value) = name {
@@ -4510,7 +4696,7 @@ impl AppStoreClient {
         });
 
         let (status, response_body) = self
-            .send_and_read(self.http.patch(&url).bearer_auth(token).json(&request_body))
+            .send_and_read(self.http.patch(&url).authorize(&token).json(&request_body))
             .await?;
         if !status.is_success() {
             if let Some(err) = pending_agreements_error(status.as_u16(), &response_body) {
@@ -4538,9 +4724,9 @@ impl AppStoreClient {
     /// [`StackError::Network`] on transport failure.
     pub(crate) async fn delete_beta_group(&self, group_id: &str) -> Result<(), StackError> {
         let url = format!("{}/v1/betaGroups/{group_id}", self.base_url);
-        let token = self.auth.bearer_token().await?;
+        let token = self.auth.credential().await?;
         let (status, body) = self
-            .send_and_read(self.http.delete(&url).bearer_auth(token))
+            .send_and_read(self.http.delete(&url).authorize(&token))
             .await?;
         if status.is_success() {
             return Ok(());
@@ -4574,7 +4760,7 @@ impl AppStoreClient {
         last_name: Option<&str>,
     ) -> Result<BetaTesterInfo, StackError> {
         let url = format!("{}/v1/betaTesters", self.base_url);
-        let token = self.auth.bearer_token().await?;
+        let token = self.auth.credential().await?;
 
         // Build attributes dynamically so absent name parts are omitted entirely,
         // mirroring how the read DTO treats optional names.
@@ -4600,7 +4786,7 @@ impl AppStoreClient {
         });
 
         let (status, response_body) = self
-            .send_and_read(self.http.post(&url).bearer_auth(token).json(&request_body))
+            .send_and_read(self.http.post(&url).authorize(&token).json(&request_body))
             .await?;
         if !status.is_success() {
             if let Some(err) = pending_agreements_error(status.as_u16(), &response_body) {
@@ -4637,18 +4823,13 @@ impl AppStoreClient {
             "{}/v1/betaGroups/{group_id}/relationships/betaTesters",
             self.base_url
         );
-        let token = self.auth.bearer_token().await?;
+        let token = self.auth.credential().await?;
         let request_body = json!({
             "data": [{ "type": "betaTesters", "id": tester_id }]
         });
 
         let (status, body) = self
-            .send_and_read(
-                self.http
-                    .delete(&url)
-                    .bearer_auth(token)
-                    .json(&request_body),
-            )
+            .send_and_read(self.http.delete(&url).authorize(&token).json(&request_body))
             .await?;
         if status.is_success() {
             return Ok(());
@@ -4702,7 +4883,7 @@ impl AppStoreClient {
         app_id: &str,
     ) -> Result<(), StackError> {
         let url = format!("{}/v1/betaTesterInvitations", self.base_url);
-        let token = self.auth.bearer_token().await?;
+        let token = self.auth.credential().await?;
         let request_body = json!({
             "data": {
                 "type": "betaTesterInvitations",
@@ -4718,7 +4899,7 @@ impl AppStoreClient {
         });
 
         let (status, body) = self
-            .send_and_read(self.http.post(&url).bearer_auth(token).json(&request_body))
+            .send_and_read(self.http.post(&url).authorize(&token).json(&request_body))
             .await?;
         if status.is_success() {
             return Ok(());
@@ -4790,7 +4971,7 @@ impl AppStoreClient {
         whats_new: &str,
     ) -> Result<BetaBuildLocalizationInfo, StackError> {
         let url = format!("{}/v1/betaBuildLocalizations", self.base_url);
-        let token = self.auth.bearer_token().await?;
+        let token = self.auth.credential().await?;
         let request_body = json!({
             "data": {
                 "type": "betaBuildLocalizations",
@@ -4807,7 +4988,7 @@ impl AppStoreClient {
         });
 
         let (status, response_body) = self
-            .send_and_read(self.http.post(&url).bearer_auth(token).json(&request_body))
+            .send_and_read(self.http.post(&url).authorize(&token).json(&request_body))
             .await?;
         if !status.is_success() {
             if let Some(err) = pending_agreements_error(status.as_u16(), &response_body) {
@@ -4841,7 +5022,7 @@ impl AppStoreClient {
         whats_new: &str,
     ) -> Result<BetaBuildLocalizationInfo, StackError> {
         let url = format!("{}/v1/betaBuildLocalizations/{id}", self.base_url);
-        let token = self.auth.bearer_token().await?;
+        let token = self.auth.credential().await?;
         let request_body = json!({
             "data": {
                 "type": "betaBuildLocalizations",
@@ -4853,7 +5034,7 @@ impl AppStoreClient {
         });
 
         let (status, response_body) = self
-            .send_and_read(self.http.patch(&url).bearer_auth(token).json(&request_body))
+            .send_and_read(self.http.patch(&url).authorize(&token).json(&request_body))
             .await?;
         if !status.is_success() {
             if let Some(err) = pending_agreements_error(status.as_u16(), &response_body) {
@@ -4929,7 +5110,7 @@ impl AppStoreClient {
         description: Option<&str>,
     ) -> Result<BetaAppLocalizationInfo, StackError> {
         let url = format!("{}/v1/betaAppLocalizations", self.base_url);
-        let token = self.auth.bearer_token().await?;
+        let token = self.auth.credential().await?;
 
         let mut attributes = serde_json::Map::new();
         attributes.insert("locale".into(), json!(locale));
@@ -4953,7 +5134,7 @@ impl AppStoreClient {
         });
 
         let (status, response_body) = self
-            .send_and_read(self.http.post(&url).bearer_auth(token).json(&request_body))
+            .send_and_read(self.http.post(&url).authorize(&token).json(&request_body))
             .await?;
         if !status.is_success() {
             if let Some(err) = pending_agreements_error(status.as_u16(), &response_body) {
@@ -4989,7 +5170,7 @@ impl AppStoreClient {
         description: Option<&str>,
     ) -> Result<BetaAppLocalizationInfo, StackError> {
         let url = format!("{}/v1/betaAppLocalizations/{id}", self.base_url);
-        let token = self.auth.bearer_token().await?;
+        let token = self.auth.credential().await?;
 
         let mut attributes = serde_json::Map::new();
         if let Some(value) = feedback_email {
@@ -5008,7 +5189,7 @@ impl AppStoreClient {
         });
 
         let (status, response_body) = self
-            .send_and_read(self.http.patch(&url).bearer_auth(token).json(&request_body))
+            .send_and_read(self.http.patch(&url).authorize(&token).json(&request_body))
             .await?;
         if !status.is_success() {
             if let Some(err) = pending_agreements_error(status.as_u16(), &response_body) {
@@ -5085,7 +5266,7 @@ impl AppStoreClient {
         device_family: &str,
     ) -> Result<AccessibilityDeclarationInfo, StackError> {
         let url = format!("{}/v1/accessibilityDeclarations", self.base_url);
-        let token = self.auth.bearer_token().await?;
+        let token = self.auth.credential().await?;
 
         let request_body = json!({
             "data": {
@@ -5100,7 +5281,7 @@ impl AppStoreClient {
         });
 
         let (status, response_body) = self
-            .send_and_read(self.http.post(&url).bearer_auth(token).json(&request_body))
+            .send_and_read(self.http.post(&url).authorize(&token).json(&request_body))
             .await?;
         if !status.is_success() {
             if let Some(err) = pending_agreements_error(status.as_u16(), &response_body) {
@@ -5147,7 +5328,7 @@ impl AppStoreClient {
         supports_voiceover: bool,
     ) -> Result<AccessibilityDeclarationInfo, StackError> {
         let url = format!("{}/v1/accessibilityDeclarations/{id}", self.base_url);
-        let token = self.auth.bearer_token().await?;
+        let token = self.auth.credential().await?;
 
         let mut attributes = serde_json::Map::new();
         // `publish` is only sent when requesting publication; omitting it leaves
@@ -5189,7 +5370,7 @@ impl AppStoreClient {
         });
 
         let (status, response_body) = self
-            .send_and_read(self.http.patch(&url).bearer_auth(token).json(&request_body))
+            .send_and_read(self.http.patch(&url).authorize(&token).json(&request_body))
             .await?;
         if !status.is_success() {
             if let Some(err) = pending_agreements_error(status.as_u16(), &response_body) {
@@ -5219,10 +5400,10 @@ impl AppStoreClient {
         id: &str,
     ) -> Result<(), StackError> {
         let url = format!("{}/v1/accessibilityDeclarations/{id}", self.base_url);
-        let token = self.auth.bearer_token().await?;
+        let token = self.auth.credential().await?;
 
         let (status, response_body) = self
-            .send_and_read(self.http.delete(&url).bearer_auth(token))
+            .send_and_read(self.http.delete(&url).authorize(&token))
             .await?;
         if !status.is_success() {
             if let Some(err) = pending_agreements_error(status.as_u16(), &response_body) {
@@ -5295,7 +5476,7 @@ impl AppStoreClient {
         subtitle: Option<&str>,
     ) -> Result<AppInfoLocalizationInfo, StackError> {
         let url = format!("{}/v1/appInfoLocalizations/{id}", self.base_url);
-        let token = self.auth.bearer_token().await?;
+        let token = self.auth.credential().await?;
 
         let mut attributes = serde_json::Map::new();
         attributes.insert("name".into(), json!(name));
@@ -5312,7 +5493,7 @@ impl AppStoreClient {
         });
 
         let (status, response_body) = self
-            .send_and_read(self.http.patch(&url).bearer_auth(token).json(&request_body))
+            .send_and_read(self.http.patch(&url).authorize(&token).json(&request_body))
             .await?;
         if !status.is_success() {
             if let Some(err) = pending_agreements_error(status.as_u16(), &response_body) {
@@ -5350,7 +5531,7 @@ impl AppStoreClient {
         privacy_policy_text: Option<&str>,
     ) -> Result<AppInfoLocalizationInfo, StackError> {
         let url = format!("{}/v1/appInfoLocalizations/{id}", self.base_url);
-        let token = self.auth.bearer_token().await?;
+        let token = self.auth.credential().await?;
 
         let mut attributes = serde_json::Map::new();
         if let Some(value) = privacy_policy_url {
@@ -5372,7 +5553,7 @@ impl AppStoreClient {
         });
 
         let (status, response_body) = self
-            .send_and_read(self.http.patch(&url).bearer_auth(token).json(&request_body))
+            .send_and_read(self.http.patch(&url).authorize(&token).json(&request_body))
             .await?;
         if !status.is_success() {
             if let Some(err) = pending_agreements_error(status.as_u16(), &response_body) {
@@ -5409,7 +5590,7 @@ impl AppStoreClient {
         subtitle: Option<&str>,
     ) -> Result<AppInfoLocalizationInfo, StackError> {
         let url = format!("{}/v1/appInfoLocalizations", self.base_url);
-        let token = self.auth.bearer_token().await?;
+        let token = self.auth.credential().await?;
 
         let mut attributes = serde_json::Map::new();
         attributes.insert("locale".into(), json!(locale));
@@ -5431,7 +5612,7 @@ impl AppStoreClient {
         });
 
         let (status, response_body) = self
-            .send_and_read(self.http.post(&url).bearer_auth(token).json(&request_body))
+            .send_and_read(self.http.post(&url).authorize(&token).json(&request_body))
             .await?;
         if !status.is_success() {
             if let Some(err) = pending_agreements_error(status.as_u16(), &response_body) {
@@ -5458,10 +5639,10 @@ impl AppStoreClient {
     /// [`StackError::Network`] on transport failure.
     pub(crate) async fn delete_app_info_localization(&self, id: &str) -> Result<(), StackError> {
         let url = format!("{}/v1/appInfoLocalizations/{id}", self.base_url);
-        let token = self.auth.bearer_token().await?;
+        let token = self.auth.credential().await?;
 
         let (status, response_body) = self
-            .send_and_read(self.http.delete(&url).bearer_auth(token))
+            .send_and_read(self.http.delete(&url).authorize(&token))
             .await?;
         if !status.is_success() {
             if let Some(err) = pending_agreements_error(status.as_u16(), &response_body) {
@@ -5539,7 +5720,7 @@ impl AppStoreClient {
         whats_new: Option<&str>,
     ) -> Result<(), StackError> {
         let url = format!("{}/v1/appStoreVersionLocalizations/{id}", self.base_url);
-        let token = self.auth.bearer_token().await?;
+        let token = self.auth.credential().await?;
 
         let mut attributes = serde_json::Map::new();
         if let Some(value) = description {
@@ -5658,7 +5839,7 @@ impl AppStoreClient {
         display_type: &str,
     ) -> Result<ScreenshotSetInfo, StackError> {
         let url = format!("{}/v1/appScreenshotSets", self.base_url);
-        let token = self.auth.bearer_token().await?;
+        let token = self.auth.credential().await?;
         let request_body = json!({
             "data": {
                 "type": "appScreenshotSets",
@@ -5677,7 +5858,7 @@ impl AppStoreClient {
         });
 
         let (status, response_body) = self
-            .send_and_read(self.http.post(&url).bearer_auth(token).json(&request_body))
+            .send_and_read(self.http.post(&url).authorize(&token).json(&request_body))
             .await?;
         if !status.is_success() {
             if let Some(err) = pending_agreements_error(status.as_u16(), &response_body) {
@@ -5728,7 +5909,7 @@ impl AppStoreClient {
     ) -> Result<ScreenshotInfo, StackError> {
         // 1. Reserve the screenshot, learning its id and upload operations.
         let reserve_url = format!("{}/v1/appScreenshots", self.base_url);
-        let token = self.auth.bearer_token().await?;
+        let token = self.auth.credential().await?;
         let reserve_body = json!({
             "data": {
                 "type": "appScreenshots",
@@ -5751,7 +5932,7 @@ impl AppStoreClient {
             .send_and_read(
                 self.http
                     .post(&reserve_url)
-                    .bearer_auth(token)
+                    .authorize(&token)
                     .json(&reserve_body),
             )
             .await?;
@@ -5780,7 +5961,7 @@ impl AppStoreClient {
         // 3. Commit: mark uploaded with the whole-file MD5 as the checksum.
         let checksum = md5_hex(data);
         let commit_url = format!("{}/v1/appScreenshots/{screenshot_id}", self.base_url);
-        let token = self.auth.bearer_token().await?;
+        let token = self.auth.credential().await?;
         let commit_body = json!({
             "data": {
                 "type": "appScreenshots",
@@ -5796,7 +5977,7 @@ impl AppStoreClient {
             .send_and_read(
                 self.http
                     .patch(&commit_url)
-                    .bearer_auth(token)
+                    .authorize(&token)
                     .json(&commit_body),
             )
             .await?;
@@ -5826,9 +6007,9 @@ impl AppStoreClient {
     /// [`StackError::Network`] on transport failure.
     pub(crate) async fn delete_screenshot(&self, id: &str) -> Result<(), StackError> {
         let url = format!("{}/v1/appScreenshots/{id}", self.base_url);
-        let token = self.auth.bearer_token().await?;
+        let token = self.auth.credential().await?;
         let (status, body) = self
-            .send_and_read(self.http.delete(&url).bearer_auth(token))
+            .send_and_read(self.http.delete(&url).authorize(&token))
             .await?;
         if status.is_success() {
             return Ok(());
@@ -5853,9 +6034,9 @@ impl AppStoreClient {
     /// [`StackError::Network`] on transport failure.
     pub(crate) async fn delete_screenshot_set(&self, id: &str) -> Result<(), StackError> {
         let url = format!("{}/v1/appScreenshotSets/{id}", self.base_url);
-        let token = self.auth.bearer_token().await?;
+        let token = self.auth.credential().await?;
         let (status, body) = self
-            .send_and_read(self.http.delete(&url).bearer_auth(token))
+            .send_and_read(self.http.delete(&url).authorize(&token))
             .await?;
         if status.is_success() {
             return Ok(());
@@ -5898,7 +6079,10 @@ impl AppStoreClient {
             ));
         }
 
-        let mut builder = self.http.request(method, &op.url).body(chunk.to_vec());
+        let mut builder = self
+            .presigned_http
+            .request(method, &op.url)
+            .body(chunk.to_vec());
         for header in &op.request_headers {
             builder = builder.header(&header.name, &header.value);
         }
@@ -6086,7 +6270,7 @@ impl AppStoreClient {
         secondary_subcategory_one_id: Option<&str>,
     ) -> Result<(), StackError> {
         let url = format!("{}/v1/appInfos/{app_info_id}", self.base_url);
-        let token = self.auth.bearer_token().await?;
+        let token = self.auth.credential().await?;
 
         let mut relationships = serde_json::Map::new();
         let mut insert_category = |key: &str, id: Option<&str>| {
@@ -6129,7 +6313,7 @@ impl AppStoreClient {
         primary_locale: Option<&str>,
     ) -> Result<(), StackError> {
         let url = format!("{}/v1/apps/{id}", self.base_url);
-        let token = self.auth.bearer_token().await?;
+        let token = self.auth.credential().await?;
 
         let mut attributes = serde_json::Map::new();
         if let Some(value) = content_rights_declaration {
@@ -6183,7 +6367,7 @@ impl AppStoreClient {
         age_rating_override: &str,
     ) -> Result<(), StackError> {
         let url = format!("{}/v1/ageRatingDeclarations/{id}", self.base_url);
-        let token = self.auth.bearer_token().await?;
+        let token = self.auth.credential().await?;
 
         let request_body = json!({
             "data": {
@@ -6258,10 +6442,10 @@ impl AppStoreClient {
         app_id: &str,
     ) -> Result<BetaAppReviewDetailInfo, StackError> {
         let url = format!("{}/v1/apps/{app_id}/betaAppReviewDetail", self.base_url);
-        let token = self.auth.bearer_token().await?;
+        let token = self.auth.credential().await?;
 
         let (status, response_body) = self
-            .send_and_read(self.http.get(&url).bearer_auth(token))
+            .send_and_read(self.http.get(&url).authorize(&token))
             .await?;
         if !status.is_success() {
             if let Some(err) = pending_agreements_error(status.as_u16(), &response_body) {
@@ -6304,7 +6488,7 @@ impl AppStoreClient {
         notes: Option<&str>,
     ) -> Result<BetaAppReviewDetailInfo, StackError> {
         let url = format!("{}/v1/betaAppReviewDetails/{detail_id}", self.base_url);
-        let token = self.auth.bearer_token().await?;
+        let token = self.auth.credential().await?;
 
         let mut attributes = serde_json::Map::new();
         if let Some(value) = contact_first_name {
@@ -6341,7 +6525,7 @@ impl AppStoreClient {
         });
 
         let (status, response_body) = self
-            .send_and_read(self.http.patch(&url).bearer_auth(token).json(&request_body))
+            .send_and_read(self.http.patch(&url).authorize(&token).json(&request_body))
             .await?;
         if !status.is_success() {
             if let Some(err) = pending_agreements_error(status.as_u16(), &response_body) {
@@ -6379,10 +6563,10 @@ impl AppStoreClient {
             "{}/v1/appStoreVersions/{version_id}/appStoreReviewDetail",
             self.base_url
         );
-        let token = self.auth.bearer_token().await?;
+        let token = self.auth.credential().await?;
 
         let (status, response_body) = self
-            .send_and_read(self.http.get(&url).bearer_auth(token))
+            .send_and_read(self.http.get(&url).authorize(&token))
             .await?;
         // No app review detail on the version → ASC returns 404; treat as absent.
         if status.as_u16() == 404 {
@@ -6432,7 +6616,7 @@ impl AppStoreClient {
         is_demo_account_required: Option<bool>,
     ) -> Result<AppReviewDetailInfo, StackError> {
         let url = format!("{}/v1/appStoreReviewDetails/{detail_id}", self.base_url);
-        let token = self.auth.bearer_token().await?;
+        let token = self.auth.credential().await?;
 
         let mut attributes = serde_json::Map::new();
         if let Some(value) = contact_first_name {
@@ -6469,7 +6653,7 @@ impl AppStoreClient {
         });
 
         let (status, response_body) = self
-            .send_and_read(self.http.patch(&url).bearer_auth(token).json(&request_body))
+            .send_and_read(self.http.patch(&url).authorize(&token).json(&request_body))
             .await?;
         if !status.is_success() {
             if let Some(err) = pending_agreements_error(status.as_u16(), &response_body) {
@@ -6636,9 +6820,9 @@ impl AppStoreClient {
         } else {
             format!("{}/v1/users/{id}", self.base_url)
         };
-        let token = self.auth.bearer_token().await?;
+        let token = self.auth.credential().await?;
         let (status, body) = self
-            .send_and_read(self.http.delete(&url).bearer_auth(token))
+            .send_and_read(self.http.delete(&url).authorize(&token))
             .await?;
         if status.is_success() {
             return Ok(());
@@ -6683,7 +6867,7 @@ impl AppStoreClient {
                 }
             }
         });
-        let token = self.auth.bearer_token().await?;
+        let token = self.auth.credential().await?;
         self.patch_no_content(&url, &token, &request_body).await
     }
 
@@ -6743,7 +6927,7 @@ impl AppStoreClient {
             .map(|app_id| json!({ "type": "apps", "id": app_id }))
             .collect();
         let request_body = json!({ "data": data });
-        let token = self.auth.bearer_token().await?;
+        let token = self.auth.credential().await?;
         self.patch_no_content(&url, &token, &request_body).await
     }
 
@@ -6758,10 +6942,10 @@ impl AppStoreClient {
     /// malformed JSON, or [`StackError::Network`] on transport failure.
     pub(crate) async fn fetch_devices(&self) -> Result<Vec<DeviceInfo>, StackError> {
         let mut devices = Vec::new();
-        let mut next_url = Some(format!("{}/v1/devices?sort=name&limit=200", self.base_url));
+        let mut next_url = Some(self.provisioning_url("/v1/devices?sort=name&limit=200"));
 
         while let Some(url) = next_url {
-            let body = self.get_page(&url).await?;
+            let body = self.provisioning_get(&url).await?;
             let page: DevicesResponse = serde_json::from_str(&body)
                 .map_err(|e| StackError::decode(format!("devices response: {e}")))?;
             devices.extend(page.data.into_iter().map(DeviceResource::into_device_info));
@@ -6789,7 +6973,7 @@ impl AppStoreClient {
         platform: &str,
         udid: &str,
     ) -> Result<DeviceInfo, StackError> {
-        let url = format!("{}/v1/devices", self.base_url);
+        let url = self.provisioning_url("/v1/devices");
         let request_body = json!({
             "data": {
                 "type": "devices",
@@ -6801,7 +6985,7 @@ impl AppStoreClient {
             }
         });
 
-        let response_body = self.post_json_2xx(&url, &request_body).await?;
+        let response_body = self.provisioning_create(&url, &request_body).await?;
         let document: DeviceDocument = serde_json::from_str(&response_body)
             .map_err(|e| StackError::decode(format!("device response: {e}")))?;
         Ok(document.data.into_device_info())
@@ -6824,8 +7008,7 @@ impl AppStoreClient {
         name: Option<&str>,
         status: Option<&str>,
     ) -> Result<(), StackError> {
-        let url = format!("{}/v1/devices/{id}", self.base_url);
-        let token = self.auth.bearer_token().await?;
+        let url = self.provisioning_url(&format!("/v1/devices/{id}"));
 
         let mut attributes = serde_json::Map::new();
         if let Some(value) = name {
@@ -6843,7 +7026,7 @@ impl AppStoreClient {
             }
         });
 
-        self.patch_no_content(&url, &token, &request_body).await
+        self.provisioning_update(&url, &request_body).await
     }
 
     /// Lists every bundle ID of the connected account, sorted by name.
@@ -6857,13 +7040,10 @@ impl AppStoreClient {
     /// malformed JSON, or [`StackError::Network`] on transport failure.
     pub(crate) async fn fetch_bundle_ids(&self) -> Result<Vec<BundleIdInfo>, StackError> {
         let mut bundle_ids = Vec::new();
-        let mut next_url = Some(format!(
-            "{}/v1/bundleIds?sort=name&limit=200",
-            self.base_url
-        ));
+        let mut next_url = Some(self.provisioning_url("/v1/bundleIds?sort=name&limit=200"));
 
         while let Some(url) = next_url {
-            let body = self.get_page(&url).await?;
+            let body = self.provisioning_get(&url).await?;
             let page: BundleIdsResponse = serde_json::from_str(&body)
                 .map_err(|e| StackError::decode(format!("bundleIds response: {e}")))?;
             bundle_ids.extend(
@@ -6896,7 +7076,7 @@ impl AppStoreClient {
         name: &str,
         platform: &str,
     ) -> Result<BundleIdInfo, StackError> {
-        let url = format!("{}/v1/bundleIds", self.base_url);
+        let url = self.provisioning_url("/v1/bundleIds");
         let request_body = json!({
             "data": {
                 "type": "bundleIds",
@@ -6908,7 +7088,7 @@ impl AppStoreClient {
             }
         });
 
-        let response_body = self.post_json_2xx(&url, &request_body).await?;
+        let response_body = self.provisioning_create(&url, &request_body).await?;
         let document: BundleIdDocument = serde_json::from_str(&response_body)
             .map_err(|e| StackError::decode(format!("bundleId response: {e}")))?;
         Ok(document.data.into_bundle_id_info())
@@ -6924,8 +7104,10 @@ impl AppStoreClient {
     /// [`StackError::Http`] on any other non-2xx response, or
     /// [`StackError::Network`] on transport failure.
     pub(crate) async fn update_bundle_id(&self, id: &str, name: &str) -> Result<(), StackError> {
+        self.auth
+            .require_api_key(ApiKeyOnly::BundleIdRenameOrDelete)?;
         let url = format!("{}/v1/bundleIds/{id}", self.base_url);
-        let token = self.auth.bearer_token().await?;
+        let token = self.auth.credential().await?;
         let request_body = json!({
             "data": {
                 "type": "bundleIds",
@@ -6946,10 +7128,12 @@ impl AppStoreClient {
     /// [`StackError::Http`] on any other non-2xx response, or
     /// [`StackError::Network`] on transport failure.
     pub(crate) async fn delete_bundle_id(&self, id: &str) -> Result<(), StackError> {
+        self.auth
+            .require_api_key(ApiKeyOnly::BundleIdRenameOrDelete)?;
         let url = format!("{}/v1/bundleIds/{id}", self.base_url);
-        let token = self.auth.bearer_token().await?;
+        let token = self.auth.credential().await?;
         let (status, body) = self
-            .send_and_read(self.http.delete(&url).bearer_auth(token))
+            .send_and_read(self.http.delete(&url).authorize(&token))
             .await?;
         if status.is_success() {
             return Ok(());
@@ -6980,13 +7164,11 @@ impl AppStoreClient {
     ) -> Result<Vec<BundleIdCapabilityInfo>, StackError> {
         let mut capabilities = Vec::new();
         // NB: no `limit` param — the relationship endpoint rejects it.
-        let mut next_url = Some(format!(
-            "{}/v1/bundleIds/{bundle_id}/bundleIdCapabilities",
-            self.base_url
-        ));
+        let mut next_url =
+            Some(self.provisioning_url(&format!("/v1/bundleIds/{bundle_id}/bundleIdCapabilities")));
 
         while let Some(url) = next_url {
-            let body = self.get_page(&url).await?;
+            let body = self.provisioning_get(&url).await?;
             let page: BundleIdCapabilitiesResponse = serde_json::from_str(&body)
                 .map_err(|e| StackError::decode(format!("bundleIdCapabilities response: {e}")))?;
             capabilities.extend(
@@ -7017,7 +7199,7 @@ impl AppStoreClient {
         bundle_id: &str,
         capability_type: &str,
     ) -> Result<BundleIdCapabilityInfo, StackError> {
-        let url = format!("{}/v1/bundleIdCapabilities", self.base_url);
+        let url = self.provisioning_url("/v1/bundleIdCapabilities");
         let request_body = json!({
             "data": {
                 "type": "bundleIdCapabilities",
@@ -7030,7 +7212,7 @@ impl AppStoreClient {
             }
         });
 
-        let response_body = self.post_json_2xx(&url, &request_body).await?;
+        let response_body = self.provisioning_create(&url, &request_body).await?;
         let document: BundleIdCapabilityDocument = serde_json::from_str(&response_body)
             .map_err(|e| StackError::decode(format!("bundleIdCapability response: {e}")))?;
         document.data.into_capability_info().ok_or_else(|| {
@@ -7047,21 +7229,8 @@ impl AppStoreClient {
     /// [`StackError::Http`] on any other non-2xx response, or
     /// [`StackError::Network`] on transport failure.
     pub(crate) async fn disable_capability(&self, capability_id: &str) -> Result<(), StackError> {
-        let url = format!("{}/v1/bundleIdCapabilities/{capability_id}", self.base_url);
-        let token = self.auth.bearer_token().await?;
-        let (status, body) = self
-            .send_and_read(self.http.delete(&url).bearer_auth(token))
-            .await?;
-        if status.is_success() {
-            return Ok(());
-        }
-        if let Some(err) = pending_agreements_error(status.as_u16(), &body) {
-            return Err(err);
-        }
-        Err(StackError::Http {
-            status: status.as_u16(),
-            message: body,
-        })
+        let url = self.provisioning_url(&format!("/v1/bundleIdCapabilities/{capability_id}"));
+        self.provisioning_delete(&url).await
     }
 
     /// Lists every certificate of the connected account, sorted by display name.
@@ -7077,13 +7246,11 @@ impl AppStoreClient {
     /// malformed JSON, or [`StackError::Network`] on transport failure.
     pub(crate) async fn fetch_certificates(&self) -> Result<Vec<CertificateInfo>, StackError> {
         let mut certificates = Vec::new();
-        let mut next_url = Some(format!(
-            "{}/v1/certificates?sort=displayName&limit=200",
-            self.base_url
-        ));
+        let mut next_url =
+            Some(self.provisioning_url("/v1/certificates?sort=displayName&limit=200"));
 
         while let Some(url) = next_url {
-            let body = self.get_page(&url).await?;
+            let body = self.provisioning_get(&url).await?;
             let page: CertificatesResponse = serde_json::from_str(&body)
                 .map_err(|e| StackError::decode(format!("certificates response: {e}")))?;
             certificates.extend(
@@ -7113,11 +7280,10 @@ impl AppStoreClient {
         &self,
         id: &str,
     ) -> Result<Option<String>, StackError> {
-        let url = format!(
-            "{}/v1/certificates/{id}?fields[certificates]=certificateContent,displayName,name,certificateType,platform,serialNumber,expirationDate,activated",
-            self.base_url
-        );
-        let body = self.get_page(&url).await?;
+        let url = self.provisioning_url(&format!(
+            "/v1/certificates/{id}?fields[certificates]=certificateContent,displayName,name,certificateType,platform,serialNumber,expirationDate,activated"
+        ));
+        let body = self.provisioning_get(&url).await?;
         let document: CertificateDocument = serde_json::from_str(&body)
             .map_err(|e| StackError::decode(format!("certificate response: {e}")))?;
         Ok(document.data.attributes.certificate_content)
@@ -7144,7 +7310,7 @@ impl AppStoreClient {
         pass_type_id: Option<&str>,
         merchant_id: Option<&str>,
     ) -> Result<CertificateInfo, StackError> {
-        let url = format!("{}/v1/certificates", self.base_url);
+        let url = self.provisioning_url("/v1/certificates");
 
         let mut data = json!({
             "type": "certificates",
@@ -7167,7 +7333,7 @@ impl AppStoreClient {
 
         let request_body = json!({ "data": data });
 
-        let response_body = self.post_json_2xx(&url, &request_body).await?;
+        let response_body = self.provisioning_create(&url, &request_body).await?;
         let document: CertificateDocument = serde_json::from_str(&response_body)
             .map_err(|e| StackError::decode(format!("certificate response: {e}")))?;
         Ok(document.data.into_certificate_info())
@@ -7182,21 +7348,8 @@ impl AppStoreClient {
     /// [`StackError::Http`] on any other non-2xx response, or
     /// [`StackError::Network`] on transport failure.
     pub(crate) async fn revoke_certificate(&self, id: &str) -> Result<(), StackError> {
-        let url = format!("{}/v1/certificates/{id}", self.base_url);
-        let token = self.auth.bearer_token().await?;
-        let (status, body) = self
-            .send_and_read(self.http.delete(&url).bearer_auth(token))
-            .await?;
-        if status.is_success() {
-            return Ok(());
-        }
-        if let Some(err) = pending_agreements_error(status.as_u16(), &body) {
-            return Err(err);
-        }
-        Err(StackError::Http {
-            status: status.as_u16(),
-            message: body,
-        })
+        let url = self.provisioning_url(&format!("/v1/certificates/{id}"));
+        self.provisioning_delete(&url).await
     }
 
     /// Lists every provisioning profile of the connected account, sorted by
@@ -7216,13 +7369,11 @@ impl AppStoreClient {
     /// malformed JSON, or [`StackError::Network`] on transport failure.
     pub(crate) async fn fetch_profiles(&self) -> Result<Vec<ProvisioningProfileInfo>, StackError> {
         let mut profiles = Vec::new();
-        let mut next_url = Some(format!(
-            "{}/v1/profiles?sort=name&limit=200&include=bundleId",
-            self.base_url
-        ));
+        let mut next_url =
+            Some(self.provisioning_url("/v1/profiles?sort=name&limit=200&include=bundleId"));
 
         while let Some(url) = next_url {
-            let body = self.get_page(&url).await?;
+            let body = self.provisioning_get(&url).await?;
             let page: ProfilesResponse = serde_json::from_str(&body)
                 .map_err(|e| StackError::decode(format!("profiles response: {e}")))?;
 
@@ -7277,7 +7428,7 @@ impl AppStoreClient {
         certificate_ids: &[String],
         device_ids: &[String],
     ) -> Result<ProvisioningProfileInfo, StackError> {
-        let url = format!("{}/v1/profiles", self.base_url);
+        let url = self.provisioning_url("/v1/profiles");
 
         let certificates: Vec<serde_json::Value> = certificate_ids
             .iter()
@@ -7312,7 +7463,7 @@ impl AppStoreClient {
             }
         });
 
-        let response_body = self.post_json_2xx(&url, &request_body).await?;
+        let response_body = self.provisioning_create(&url, &request_body).await?;
         let document: ProfileDocument = serde_json::from_str(&response_body)
             .map_err(|e| StackError::decode(format!("profile response: {e}")))?;
         // The create path does not resolve the bundle identifier; pass an empty
@@ -7329,21 +7480,8 @@ impl AppStoreClient {
     /// [`StackError::Http`] on any other non-2xx response, or
     /// [`StackError::Network`] on transport failure.
     pub(crate) async fn delete_profile(&self, id: &str) -> Result<(), StackError> {
-        let url = format!("{}/v1/profiles/{id}", self.base_url);
-        let token = self.auth.bearer_token().await?;
-        let (status, body) = self
-            .send_and_read(self.http.delete(&url).bearer_auth(token))
-            .await?;
-        if status.is_success() {
-            return Ok(());
-        }
-        if let Some(err) = pending_agreements_error(status.as_u16(), &body) {
-            return Err(err);
-        }
-        Err(StackError::Http {
-            status: status.as_u16(),
-            message: body,
-        })
+        let url = self.provisioning_url(&format!("/v1/profiles/{id}"));
+        self.provisioning_delete(&url).await
     }
 
     /// Fetches the base64 `profileContent` of the profile `id`.
@@ -7360,11 +7498,10 @@ impl AppStoreClient {
         &self,
         id: &str,
     ) -> Result<Option<String>, StackError> {
-        let url = format!(
-            "{}/v1/profiles/{id}?fields[profiles]=profileContent,name,profileType,platform,profileState,uuid,createdDate,expirationDate",
-            self.base_url
-        );
-        let body = self.get_page(&url).await?;
+        let url = self.provisioning_url(&format!(
+            "/v1/profiles/{id}?fields[profiles]=profileContent,name,profileType,platform,profileState,uuid,createdDate,expirationDate"
+        ));
+        let body = self.provisioning_get(&url).await?;
         let document: ProfileDocument = serde_json::from_str(&body)
             .map_err(|e| StackError::decode(format!("profile response: {e}")))?;
         Ok(document.data.attributes.profile_content)
@@ -7373,11 +7510,11 @@ impl AppStoreClient {
     async fn patch_no_content(
         &self,
         url: &str,
-        token: &str,
+        token: &RequestAuth,
         request_body: &serde_json::Value,
     ) -> Result<(), StackError> {
         let (status, body) = self
-            .send_and_read(self.http.patch(url).bearer_auth(token).json(request_body))
+            .send_and_read(self.http.patch(url).authorize(token).json(request_body))
             .await?;
         if status.is_success() {
             return Ok(());
@@ -7413,6 +7550,7 @@ impl AppStoreClient {
         app_id: &str,
         access_type: &str,
     ) -> Result<AnalyticsReportRequest, StackError> {
+        self.auth.require_api_key(ApiKeyOnly::AnalyticsReports)?;
         let url = format!("{}/v1/analyticsReportRequests", self.base_url);
         let request_body = json!({
             "data": {
@@ -7456,6 +7594,7 @@ impl AppStoreClient {
         limit: u32,
         page_token: Option<&str>,
     ) -> Result<AnalyticsReportRequestsPage, StackError> {
+        self.auth.require_api_key(ApiKeyOnly::AnalyticsReports)?;
         let url = match page_token {
             Some(token) => token.to_string(),
             None => {
@@ -7509,6 +7648,7 @@ impl AppStoreClient {
         limit: u32,
         page_token: Option<&str>,
     ) -> Result<AnalyticsReportsPage, StackError> {
+        self.auth.require_api_key(ApiKeyOnly::AnalyticsReports)?;
         let url = match page_token {
             Some(token) => token.to_string(),
             None => {
@@ -7562,6 +7702,7 @@ impl AppStoreClient {
         limit: u32,
         page_token: Option<&str>,
     ) -> Result<AnalyticsReportInstancesPage, StackError> {
+        self.auth.require_api_key(ApiKeyOnly::AnalyticsReports)?;
         let url = match page_token {
             Some(token) => token.to_string(),
             None => {
@@ -7613,6 +7754,7 @@ impl AppStoreClient {
         limit: u32,
         page_token: Option<&str>,
     ) -> Result<AnalyticsReportSegmentsPage, StackError> {
+        self.auth.require_api_key(ApiKeyOnly::AnalyticsReports)?;
         let url = match page_token {
             Some(token) => token.to_string(),
             None => format!(
@@ -7663,6 +7805,7 @@ impl AppStoreClient {
         url: &str,
         max_bytes: u64,
     ) -> Result<AnalyticsReportData, StackError> {
+        self.auth.require_api_key(ApiKeyOnly::AnalyticsReports)?;
         if let Some(logger) = &self.debug_logger {
             // Redacted line only — the body is gzip-compressed binary, so routing
             // it through the pretty-JSON logger would dump garbage (see
@@ -7674,7 +7817,7 @@ impl AppStoreClient {
 
         // Pre-signed URL: deliberately NO `bearer_auth`. The host log line
         // carries the path only, never the signed query.
-        let mut response = send_unbuffered(self.http.get(url), |_| {}).await?;
+        let mut response = send_unbuffered(self.presigned_http.get(url), |_| {}).await?;
         let status = response.status();
 
         if let Some(logger) = &self.debug_logger {
@@ -7726,9 +7869,9 @@ impl AppStoreClient {
     }
 
     async fn get_page(&self, url: &str) -> Result<String, StackError> {
-        let token = self.auth.bearer_token().await?;
+        let token = self.auth.credential().await?;
         let (status, body) = self
-            .send_and_read(self.http.get(url).bearer_auth(token))
+            .send_and_read(self.http.get(url).authorize(&token))
             .await?;
         if !status.is_success() {
             if let Some(err) = pending_agreements_error(status.as_u16(), &body) {
@@ -7755,6 +7898,22 @@ fn md5_hex(data: &[u8]) -> String {
         let _ = write!(hex, "{byte:02x}");
     }
     hex
+}
+
+/// The body of a 2xx, else the failure: a pending-agreements 403 →
+/// [`StackError::PendingAgreements`], anything else → [`StackError::Http`]
+/// (the mapping every provisioning call uses).
+fn success_body(status: reqwest::StatusCode, body: String) -> Result<String, StackError> {
+    if status.is_success() {
+        return Ok(body);
+    }
+    if let Some(err) = pending_agreements_error(status.as_u16(), &body) {
+        return Err(err);
+    }
+    Err(StackError::Http {
+        status: status.as_u16(),
+        message: body,
+    })
 }
 
 /// Detects an App Store Connect "pending agreements" 403 from a non-2xx
@@ -7816,9 +7975,103 @@ mod tests {
 
     const PRIVATE_P8: &[u8] = include_bytes!("../../../tests/fixtures/test_ec_private.p8");
 
+    /// The client every test uses: an API-key client, or, when
+    /// `STACK_CORE_TEST_APPSTORE_AUTH=session` is set, an Apple ID web session
+    /// client on the same mock server (team already selected, refreshed
+    /// sessions discarded). Running the suite with the variable set replays
+    /// every client test in session mode (`just test-session-mode`); the tests
+    /// that only hold for one mode are listed in that recipe.
     fn client(base_url: String) -> AppStoreClient {
+        if std::env::var("STACK_CORE_TEST_APPSTORE_AUTH").as_deref() == Ok("session") {
+            return session_mode::client_on(&base_url, Some(session_mode::TEAM), noop_store());
+        }
+        api_key_client(base_url)
+    }
+
+    /// An API-key client whatever the environment says.
+    fn api_key_client(base_url: String) -> AppStoreClient {
         let auth = AppStoreAuthenticator::new("issuer".into(), "kid".into(), PRIVATE_P8.to_vec());
         AppStoreClient::with_base_url(auth, base_url)
+    }
+
+    fn noop_store() -> Arc<session_mode::RecordingStore> {
+        Arc::new(session_mode::RecordingStore::default())
+    }
+
+    /// Matchers for the provisioning tests that hold in both auth modes: with
+    /// an API key a read is a `GET` with its query in the URL; with a session
+    /// (`STACK_CORE_TEST_APPSTORE_AUTH=session`) it is spaceship's proxied
+    /// `POST` with `X-HTTP-Method-Override` and the query in the JSON body's
+    /// `urlEncodedQueryParams` (see `auth::apple_session::portal`).
+    mod prov {
+        use wiremock::{Match, Request};
+
+        fn session_mode() -> bool {
+            std::env::var("STACK_CORE_TEST_APPSTORE_AUTH").as_deref() == Ok("session")
+        }
+
+        fn override_of(request: &Request) -> Option<&str> {
+            request
+                .headers
+                .get("x-http-method-override")
+                .and_then(|v| v.to_str().ok())
+        }
+
+        /// `GET` / `DELETE` (proxied with a session), or any other method as is.
+        pub(super) struct Method(&'static str);
+
+        pub(super) fn method(name: &'static str) -> Method {
+            Method(name)
+        }
+
+        impl Match for Method {
+            fn matches(&self, request: &Request) -> bool {
+                if session_mode() && matches!(self.0, "GET" | "DELETE") {
+                    request.method.as_str() == "POST" && override_of(request) == Some(self.0)
+                } else {
+                    request.method.as_str() == self.0
+                }
+            }
+        }
+
+        /// The query pairs the request carries in its mode.
+        fn pairs(request: &Request) -> Vec<(String, String)> {
+            if session_mode() && override_of(request).is_some() {
+                let body: serde_json::Value =
+                    serde_json::from_slice(&request.body).unwrap_or_default();
+                let query = body["urlEncodedQueryParams"].as_str().unwrap_or_default();
+                return reqwest::Url::parse(&format!("http://q.invalid/?{query}"))
+                    .map(|url| url.query_pairs().into_owned().collect())
+                    .unwrap_or_default();
+            }
+            request.url.query_pairs().into_owned().collect()
+        }
+
+        pub(super) struct QueryParam(&'static str, &'static str);
+
+        pub(super) fn query_param(key: &'static str, value: &'static str) -> QueryParam {
+            QueryParam(key, value)
+        }
+
+        impl Match for QueryParam {
+            fn matches(&self, request: &Request) -> bool {
+                pairs(request)
+                    .iter()
+                    .any(|(k, v)| k == self.0 && v == self.1)
+            }
+        }
+
+        pub(super) struct QueryParamIsMissing(&'static str);
+
+        pub(super) fn query_param_is_missing(key: &'static str) -> QueryParamIsMissing {
+            QueryParamIsMissing(key)
+        }
+
+        impl Match for QueryParamIsMissing {
+            fn matches(&self, request: &Request) -> bool {
+                pairs(request).iter().all(|(k, _)| k != self.0)
+            }
+        }
     }
 
     /// A [`DebugLogger`] that captures every emitted message so a test can assert
@@ -14476,11 +14729,11 @@ mod tests {
         let next = format!("{}/v1/devices?cursor=PAGE2", server.uri());
 
         // Page 1: a fully-populated device; assert the sort/limit query is sent.
-        Mock::given(method("GET"))
+        Mock::given(prov::method("GET"))
             .and(path("/v1/devices"))
-            .and(query_param("sort", "name"))
-            .and(query_param("limit", "200"))
-            .and(wiremock::matchers::query_param_is_missing("cursor"))
+            .and(prov::query_param("sort", "name"))
+            .and(prov::query_param("limit", "200"))
+            .and(prov::query_param_is_missing("cursor"))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                 "data": [{
                     "type": "devices",
@@ -14501,9 +14754,9 @@ mod tests {
             .await;
 
         // Page 2: a device with missing `name`/`status` — the fallbacks apply.
-        Mock::given(method("GET"))
+        Mock::given(prov::method("GET"))
             .and(path("/v1/devices"))
-            .and(query_param("cursor", "PAGE2"))
+            .and(prov::query_param("cursor", "PAGE2"))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                 "data": [{
                     "type": "devices",
@@ -14546,7 +14799,7 @@ mod tests {
     #[tokio::test]
     async fn fetch_devices_surfaces_pending_agreements() {
         let server = MockServer::start().await;
-        Mock::given(method("GET"))
+        Mock::given(prov::method("GET"))
             .and(path("/v1/devices"))
             .respond_with(ResponseTemplate::new(403).set_body_json(serde_json::json!({
                 "errors": [{ "detail": "The agreement is pending acceptance." }]
@@ -14566,7 +14819,7 @@ mod tests {
     #[tokio::test]
     async fn fetch_devices_surfaces_http_error() {
         let server = MockServer::start().await;
-        Mock::given(method("GET"))
+        Mock::given(prov::method("GET"))
             .and(path("/v1/devices"))
             .respond_with(ResponseTemplate::new(500).set_body_string("boom"))
             .mount(&server)
@@ -14720,11 +14973,11 @@ mod tests {
         let next = format!("{}/v1/bundleIds?cursor=PAGE2", server.uri());
 
         // Page 1: a fully-populated bundle id; assert the sort/limit query is sent.
-        Mock::given(method("GET"))
+        Mock::given(prov::method("GET"))
             .and(path("/v1/bundleIds"))
-            .and(query_param("sort", "name"))
-            .and(query_param("limit", "200"))
-            .and(wiremock::matchers::query_param_is_missing("cursor"))
+            .and(prov::query_param("sort", "name"))
+            .and(prov::query_param("limit", "200"))
+            .and(prov::query_param_is_missing("cursor"))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                 "data": [{
                     "type": "bundleIds",
@@ -14743,9 +14996,9 @@ mod tests {
 
         // Page 2: a bundle id with missing identifier/name/platform — the
         // empty-string fallbacks apply, and `seedId` is absent.
-        Mock::given(method("GET"))
+        Mock::given(prov::method("GET"))
             .and(path("/v1/bundleIds"))
-            .and(query_param("cursor", "PAGE2"))
+            .and(prov::query_param("cursor", "PAGE2"))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                 "data": [{
                     "type": "bundleIds",
@@ -14780,7 +15033,7 @@ mod tests {
     #[tokio::test]
     async fn fetch_bundle_ids_surfaces_pending_agreements() {
         let server = MockServer::start().await;
-        Mock::given(method("GET"))
+        Mock::given(prov::method("GET"))
             .and(path("/v1/bundleIds"))
             .respond_with(ResponseTemplate::new(403).set_body_json(serde_json::json!({
                 "errors": [{ "detail": "The agreement is pending acceptance." }]
@@ -14800,7 +15053,7 @@ mod tests {
     #[tokio::test]
     async fn fetch_bundle_ids_surfaces_http_error() {
         let server = MockServer::start().await;
-        Mock::given(method("GET"))
+        Mock::given(prov::method("GET"))
             .and(path("/v1/bundleIds"))
             .respond_with(ResponseTemplate::new(500).set_body_string("boom"))
             .mount(&server)
@@ -14920,7 +15173,7 @@ mod tests {
     #[tokio::test]
     async fn delete_bundle_id_hits_bundle_ids_endpoint() {
         let server = MockServer::start().await;
-        Mock::given(method("DELETE"))
+        Mock::given(prov::method("DELETE"))
             .and(path("/v1/bundleIds/bid-1"))
             .respond_with(ResponseTemplate::new(204))
             .mount(&server)
@@ -14932,7 +15185,7 @@ mod tests {
     #[tokio::test]
     async fn delete_bundle_id_surfaces_http_error() {
         let server = MockServer::start().await;
-        Mock::given(method("DELETE"))
+        Mock::given(prov::method("DELETE"))
             .and(path("/v1/bundleIds/bid-1"))
             .respond_with(ResponseTemplate::new(404).set_body_string("not found"))
             .mount(&server)
@@ -14956,10 +15209,10 @@ mod tests {
         // Page 1: one valid capability + one with empty capabilityType (skipped) +
         // one with the attribute missing entirely (skipped). Assert NO `limit`
         // query param is sent — the relationship endpoint rejects it.
-        Mock::given(method("GET"))
+        Mock::given(prov::method("GET"))
             .and(path("/v1/bundleIds/bid-1/bundleIdCapabilities"))
-            .and(wiremock::matchers::query_param_is_missing("limit"))
-            .and(wiremock::matchers::query_param_is_missing("cursor"))
+            .and(prov::query_param_is_missing("limit"))
+            .and(prov::query_param_is_missing("cursor"))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                 "data": [
                     {
@@ -14984,9 +15237,9 @@ mod tests {
             .await;
 
         // Page 2: a newer, non-enum capability type passed through verbatim.
-        Mock::given(method("GET"))
+        Mock::given(prov::method("GET"))
             .and(path("/v1/bundleIds/bid-1/bundleIdCapabilities"))
-            .and(query_param("cursor", "PAGE2"))
+            .and(prov::query_param("cursor", "PAGE2"))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                 "data": [{
                     "type": "bundleIdCapabilities",
@@ -15082,7 +15335,7 @@ mod tests {
     #[tokio::test]
     async fn disable_capability_hits_bundle_id_capabilities_endpoint() {
         let server = MockServer::start().await;
-        Mock::given(method("DELETE"))
+        Mock::given(prov::method("DELETE"))
             .and(path("/v1/bundleIdCapabilities/cap-1"))
             .respond_with(ResponseTemplate::new(204))
             .mount(&server)
@@ -15097,7 +15350,7 @@ mod tests {
     #[tokio::test]
     async fn disable_capability_surfaces_http_error() {
         let server = MockServer::start().await;
-        Mock::given(method("DELETE"))
+        Mock::given(prov::method("DELETE"))
             .and(path("/v1/bundleIdCapabilities/cap-1"))
             .respond_with(ResponseTemplate::new(404).set_body_string("not found"))
             .mount(&server)
@@ -15121,11 +15374,11 @@ mod tests {
 
         // Page 1: a fully-populated certificate; assert the sort/limit query is
         // sent and that the list omits certificate content (→ None).
-        Mock::given(method("GET"))
+        Mock::given(prov::method("GET"))
             .and(path("/v1/certificates"))
-            .and(query_param("sort", "displayName"))
-            .and(query_param("limit", "200"))
-            .and(wiremock::matchers::query_param_is_missing("cursor"))
+            .and(prov::query_param("sort", "displayName"))
+            .and(prov::query_param("limit", "200"))
+            .and(prov::query_param_is_missing("cursor"))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                 "data": [{
                     "type": "certificates",
@@ -15148,9 +15401,9 @@ mod tests {
 
         // Page 2: a certificate with missing string attributes — the empty-string
         // fallbacks apply, `activated` defaults to false, optionals stay None.
-        Mock::given(method("GET"))
+        Mock::given(prov::method("GET"))
             .and(path("/v1/certificates"))
-            .and(query_param("cursor", "PAGE2"))
+            .and(prov::query_param("cursor", "PAGE2"))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                 "data": [{
                     "type": "certificates",
@@ -15194,7 +15447,7 @@ mod tests {
     #[tokio::test]
     async fn fetch_certificates_surfaces_pending_agreements() {
         let server = MockServer::start().await;
-        Mock::given(method("GET"))
+        Mock::given(prov::method("GET"))
             .and(path("/v1/certificates"))
             .respond_with(ResponseTemplate::new(403).set_body_json(serde_json::json!({
                 "errors": [{ "detail": "The agreement is pending acceptance." }]
@@ -15214,7 +15467,7 @@ mod tests {
     #[tokio::test]
     async fn fetch_certificates_surfaces_http_error() {
         let server = MockServer::start().await;
-        Mock::given(method("GET"))
+        Mock::given(prov::method("GET"))
             .and(path("/v1/certificates"))
             .respond_with(ResponseTemplate::new(500).set_body_string("boom"))
             .mount(&server)
@@ -15227,11 +15480,11 @@ mod tests {
     #[tokio::test]
     async fn fetch_certificate_content_returns_content_and_sends_fields_query() {
         let server = MockServer::start().await;
-        Mock::given(method("GET"))
+        Mock::given(prov::method("GET"))
             .and(path("/v1/certificates/cert-1"))
             // The explicit fields[certificates] selector must be sent so the
             // single-resource doc includes certificateContent.
-            .and(query_param(
+            .and(prov::query_param(
                 "fields[certificates]",
                 "certificateContent,displayName,name,certificateType,platform,serialNumber,expirationDate,activated",
             ))
@@ -15257,7 +15510,7 @@ mod tests {
     #[tokio::test]
     async fn fetch_certificate_content_returns_none_when_absent() {
         let server = MockServer::start().await;
-        Mock::given(method("GET"))
+        Mock::given(prov::method("GET"))
             .and(path("/v1/certificates/cert-1"))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                 "data": {
@@ -15425,7 +15678,7 @@ mod tests {
     #[tokio::test]
     async fn revoke_certificate_hits_certificates_endpoint() {
         let server = MockServer::start().await;
-        Mock::given(method("DELETE"))
+        Mock::given(prov::method("DELETE"))
             .and(path("/v1/certificates/cert-1"))
             .respond_with(ResponseTemplate::new(204))
             .mount(&server)
@@ -15440,7 +15693,7 @@ mod tests {
     #[tokio::test]
     async fn revoke_certificate_surfaces_http_error() {
         let server = MockServer::start().await;
-        Mock::given(method("DELETE"))
+        Mock::given(prov::method("DELETE"))
             .and(path("/v1/certificates/cert-1"))
             .respond_with(ResponseTemplate::new(404).set_body_string("not found"))
             .mount(&server)
@@ -15465,12 +15718,12 @@ mod tests {
         // Page 1: a fully-populated profile whose bundleId relationship resolves
         // to the included bundleIds resource's identifier. Assert the
         // sort/limit/include query is sent and that the list omits content.
-        Mock::given(method("GET"))
+        Mock::given(prov::method("GET"))
             .and(path("/v1/profiles"))
-            .and(query_param("sort", "name"))
-            .and(query_param("limit", "200"))
-            .and(query_param("include", "bundleId"))
-            .and(wiremock::matchers::query_param_is_missing("cursor"))
+            .and(prov::query_param("sort", "name"))
+            .and(prov::query_param("limit", "200"))
+            .and(prov::query_param("include", "bundleId"))
+            .and(prov::query_param_is_missing("cursor"))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                 "data": [{
                     "type": "profiles",
@@ -15503,9 +15756,9 @@ mod tests {
         // Page 2: a profile with missing string attributes — the empty-string
         // fallbacks apply, optionals stay None, content stays None. Its bundleId
         // is present in this page's included.
-        Mock::given(method("GET"))
+        Mock::given(prov::method("GET"))
             .and(path("/v1/profiles"))
-            .and(query_param("cursor", "PAGE2"))
+            .and(prov::query_param("cursor", "PAGE2"))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                 "data": [{
                     "type": "profiles",
@@ -15564,7 +15817,7 @@ mod tests {
     async fn fetch_profiles_leaves_bundle_id_none_when_missing_from_included() {
         let server = MockServer::start().await;
         // The profile references bid-missing, but it is not present in included[].
-        Mock::given(method("GET"))
+        Mock::given(prov::method("GET"))
             .and(path("/v1/profiles"))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                 "data": [{
@@ -15593,7 +15846,7 @@ mod tests {
     #[tokio::test]
     async fn fetch_profiles_surfaces_pending_agreements() {
         let server = MockServer::start().await;
-        Mock::given(method("GET"))
+        Mock::given(prov::method("GET"))
             .and(path("/v1/profiles"))
             .respond_with(ResponseTemplate::new(403).set_body_json(serde_json::json!({
                 "errors": [{ "detail": "The agreement is pending acceptance." }]
@@ -15613,7 +15866,7 @@ mod tests {
     #[tokio::test]
     async fn fetch_profiles_surfaces_http_error() {
         let server = MockServer::start().await;
-        Mock::given(method("GET"))
+        Mock::given(prov::method("GET"))
             .and(path("/v1/profiles"))
             .respond_with(ResponseTemplate::new(500).set_body_string("boom"))
             .mount(&server)
@@ -15762,7 +16015,7 @@ mod tests {
     #[tokio::test]
     async fn delete_profile_hits_profiles_endpoint() {
         let server = MockServer::start().await;
-        Mock::given(method("DELETE"))
+        Mock::given(prov::method("DELETE"))
             .and(path("/v1/profiles/prof-1"))
             .respond_with(ResponseTemplate::new(204))
             .mount(&server)
@@ -15774,7 +16027,7 @@ mod tests {
     #[tokio::test]
     async fn delete_profile_surfaces_http_error() {
         let server = MockServer::start().await;
-        Mock::given(method("DELETE"))
+        Mock::given(prov::method("DELETE"))
             .and(path("/v1/profiles/prof-1"))
             .respond_with(ResponseTemplate::new(404).set_body_string("not found"))
             .mount(&server)
@@ -15790,11 +16043,11 @@ mod tests {
     #[tokio::test]
     async fn fetch_profile_content_returns_content_and_sends_fields_query() {
         let server = MockServer::start().await;
-        Mock::given(method("GET"))
+        Mock::given(prov::method("GET"))
             .and(path("/v1/profiles/prof-1"))
             // The explicit fields[profiles] selector must be sent so the
             // single-resource doc includes profileContent.
-            .and(query_param(
+            .and(prov::query_param(
                 "fields[profiles]",
                 "profileContent,name,profileType,platform,profileState,uuid,createdDate,expirationDate",
             ))
@@ -15818,7 +16071,7 @@ mod tests {
     #[tokio::test]
     async fn fetch_profile_content_returns_none_when_absent() {
         let server = MockServer::start().await;
-        Mock::given(method("GET"))
+        Mock::given(prov::method("GET"))
             .and(path("/v1/profiles/prof-1"))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                 "data": {
@@ -16116,5 +16369,1008 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(err, StackError::Unsupported { .. }));
+    }
+
+    /// The client in Apple ID web session mode (see [`super::super::auth`]),
+    /// against the mock server: iris paths, session headers, CSRF tokens,
+    /// cookie write-back, team selection, expiry and the unsupported
+    /// families.
+    pub(super) mod session_mode {
+        use super::*;
+        use crate::auth::apple_session::session::{AppleSession, SessionBlob, SessionJar};
+        use crate::auth::apple_session::test_support::olympus_session_body;
+        use crate::auth::apple_session::{transport, AppleEndpoints};
+        use crate::logging::testing::capture_logs;
+        use crate::ports::SessionStore;
+        use crate::providers::appstore::auth::SessionAuth;
+        use reqwest::cookie::CookieStore as _;
+        use reqwest::header::HeaderValue;
+        use wiremock::matchers::{body_json, header};
+
+        /// The team the session acts for.
+        pub(crate) const TEAM: u64 = 118_291_181;
+        const SESSION_COOKIE: &str = "myacinfo-secret-session-value";
+        const CSRF: &str = "csrf-secret-token-123";
+        const CSRF_TS: &str = "1763550000123";
+
+        /// A [`SessionStore`] that records every save.
+        #[derive(Default)]
+        pub(crate) struct RecordingStore {
+            saved: Mutex<Vec<(String, Vec<u8>)>>,
+        }
+
+        impl RecordingStore {
+            pub(crate) fn saves(&self) -> Vec<(String, Vec<u8>)> {
+                self.saved.lock().unwrap().clone()
+            }
+        }
+
+        impl SessionStore for RecordingStore {
+            fn load(&self, _account_id: String) -> Option<Vec<u8>> {
+                None
+            }
+
+            fn save(&self, account_id: String, blob: Vec<u8>) {
+                self.saved.lock().unwrap().push((account_id, blob));
+            }
+        }
+
+        /// A session on `base_url` (olympus and iris on the mock server)
+        /// holding the session cookie, acting for `team`.
+        fn session(base_url: &str, team: Option<u64>) -> AppleSession {
+            let endpoints = AppleEndpoints::with_base_urls(base_url, base_url);
+            let jar = Arc::new(SessionJar::default());
+            let url = reqwest::Url::parse(base_url).unwrap();
+            let cookie =
+                HeaderValue::from_str(&format!("myacinfo={SESSION_COOKIE}; Path=/; HttpOnly"))
+                    .unwrap();
+            jar.set_cookies(&mut std::iter::once(&cookie), &url);
+            let http = transport::session_client(Arc::clone(&jar)).unwrap();
+            AppleSession::from_parts(endpoints, jar, http, None, team)
+        }
+
+        /// The Developer Portal team the session-mode client already knows.
+        pub(crate) const PORTAL_TEAM: &str = "PORTAL1234";
+
+        /// A session client whose iris and `services-account` bases are the
+        /// mock server root (so the API-key tests' `/v1/...` mocks match),
+        /// with [`PORTAL_TEAM`] already resolved for [`TEAM`].
+        pub(crate) fn client_on(
+            base_url: &str,
+            team: Option<u64>,
+            store: Arc<RecordingStore>,
+        ) -> AppStoreClient {
+            let mut session = session(base_url, team);
+            session.remember_portal_team(TEAM, PORTAL_TEAM.into());
+            let auth = SessionAuth::new("acct-1".into(), TEAM, session, store);
+            AppStoreClient::with_session_base_url(auth, base_url.to_string())
+        }
+
+        fn apps_page() -> serde_json::Value {
+            serde_json::json!({
+                "data": [{ "type": "apps", "id": "111", "attributes": { "name": "Foo", "bundleId": "com.foo" } }],
+                "links": {}
+            })
+        }
+
+        #[tokio::test]
+        async fn with_session_targets_iris_with_session_headers_and_no_bearer() {
+            let server = MockServer::start().await;
+            Mock::given(method("GET"))
+                .and(path("/iris/v1/apps"))
+                .and(header("x-csrf-itc", "[asc-ui]"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(apps_page()))
+                .expect(1)
+                .mount(&server)
+                .await;
+            let auth = SessionAuth::new(
+                "acct-1".into(),
+                TEAM,
+                session(&server.uri(), Some(TEAM)),
+                noop_store(),
+            );
+            let client = AppStoreClient::with_session(auth);
+            assert!(client.is_web_session());
+
+            let apps = client.fetch_apps().await.unwrap();
+            assert_eq!(apps[0].id, "111");
+            let requests = server.received_requests().await.unwrap();
+            let request = &requests[0];
+            assert!(request.headers.get("authorization").is_none());
+            assert_eq!(
+                request.headers.get("cookie").unwrap().to_str().unwrap(),
+                format!("myacinfo={SESSION_COOKIE}")
+            );
+        }
+
+        #[tokio::test]
+        async fn csrf_tokens_of_a_response_are_sent_on_the_next_requests() {
+            let server = MockServer::start().await;
+            Mock::given(method("GET"))
+                .and(path("/v1/apps"))
+                .and(query_param("limit", "1"))
+                .respond_with(
+                    ResponseTemplate::new(200)
+                        .insert_header("csrf", CSRF)
+                        .insert_header("csrf_ts", CSRF_TS)
+                        .set_body_json(apps_page()),
+                )
+                .expect(1)
+                .mount(&server)
+                .await;
+            Mock::given(method("POST"))
+                .and(path("/v1/betaGroups"))
+                .and(header("csrf", CSRF))
+                .and(header("csrf_ts", CSRF_TS))
+                .and(header("x-csrf-itc", "[asc-ui]"))
+                .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
+                    "data": { "type": "betaGroups", "id": "g1", "attributes": { "name": "QA" } }
+                })))
+                .expect(1)
+                .mount(&server)
+                .await;
+
+            let client = client_on(&server.uri(), Some(TEAM), noop_store());
+            client.validate().await.unwrap();
+            let group = client
+                .create_beta_group("app-1", "QA", false, false, true)
+                .await
+                .unwrap();
+            assert_eq!(group.id, "g1");
+        }
+
+        #[tokio::test]
+        async fn http_401_is_session_expired_but_403_keeps_its_mapping() {
+            let server = MockServer::start().await;
+            Mock::given(method("GET"))
+                .and(path("/v1/apps"))
+                .respond_with(ResponseTemplate::new(401).set_body_string("unauthorized"))
+                .mount(&server)
+                .await;
+            Mock::given(method("GET"))
+                .and(path("/v1/builds/b1"))
+                .respond_with(ResponseTemplate::new(403).set_body_json(serde_json::json!({
+                    "errors": [{ "status": "403", "code": "FORBIDDEN_ERROR", "title": "role" }]
+                })))
+                .mount(&server)
+                .await;
+            Mock::given(method("GET"))
+                .and(path("/v1/apps/app-1/customerReviews"))
+                .respond_with(ResponseTemplate::new(403).set_body_json(serde_json::json!({
+                    "errors": [{ "detail": "The agreement is pending acceptance." }]
+                })))
+                .mount(&server)
+                .await;
+
+            let client = client_on(&server.uri(), Some(TEAM), noop_store());
+            for err in [
+                client.validate().await.unwrap_err(),
+                client.fetch_apps().await.unwrap_err(),
+            ] {
+                assert!(
+                    matches!(&err, StackError::SessionExpired { message } if message.contains("401")),
+                    "{err:?}"
+                );
+            }
+            assert!(matches!(
+                client.fetch_build_detail("b1").await.unwrap_err(),
+                StackError::Http { status: 403, .. }
+            ));
+            assert!(matches!(
+                client.fetch_customer_reviews("app-1").await.unwrap_err(),
+                StackError::PendingAgreements { .. }
+            ));
+
+            // The API-key client keeps its own 401 mapping.
+            assert!(!matches!(
+                api_key_client(server.uri()).validate().await.unwrap_err(),
+                StackError::SessionExpired { .. }
+            ));
+        }
+
+        #[tokio::test]
+        async fn refreshed_cookies_are_saved_back_and_unchanged_ones_are_not() {
+            let server = MockServer::start().await;
+            Mock::given(method("GET"))
+                .and(path("/v1/apps"))
+                .and(query_param("limit", "1"))
+                .respond_with(
+                    ResponseTemplate::new(200)
+                        .insert_header("Set-Cookie", "itctx=refreshed-team-ctx; Path=/; HttpOnly")
+                        .set_body_json(apps_page()),
+                )
+                .mount(&server)
+                .await;
+            Mock::given(method("GET"))
+                .and(path("/v1/apps"))
+                .and(wiremock::matchers::query_param_is_missing("limit"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(apps_page()))
+                .mount(&server)
+                .await;
+
+            let store = noop_store();
+            let client = client_on(&server.uri(), Some(TEAM), Arc::clone(&store));
+            client.validate().await.unwrap();
+            let saves = store.saves();
+            assert_eq!(saves.len(), 1, "one save for the one Set-Cookie");
+            assert_eq!(saves[0].0, "acct-1");
+            let restored = AppleSession::restore(
+                &SessionBlob::from_bytes(saves[0].1.clone()),
+                AppleEndpoints::default(),
+            )
+            .unwrap();
+            let mut names = restored.cookie_names();
+            names.sort();
+            assert_eq!(names, ["itctx", "myacinfo"]);
+            assert_eq!(restored.team_id(), Some(TEAM));
+
+            client.fetch_apps().await.unwrap();
+            assert_eq!(store.saves().len(), 1, "no Set-Cookie, no save");
+        }
+
+        #[tokio::test]
+        async fn the_team_is_selected_once_before_the_first_request() {
+            let server = MockServer::start().await;
+            Mock::given(method("GET"))
+                .and(path("/olympus/v1/session"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(olympus_session_body()))
+                .expect(1)
+                .mount(&server)
+                .await;
+            Mock::given(method("POST"))
+                .and(path("/olympus/v1/session"))
+                .and(body_json(
+                    serde_json::json!({ "provider": { "providerId": TEAM } }),
+                ))
+                .respond_with(
+                    ResponseTemplate::new(200)
+                        .insert_header("Set-Cookie", "itctx=team-118291181; Path=/")
+                        .set_body_json(serde_json::json!({})),
+                )
+                .expect(1)
+                .mount(&server)
+                .await;
+            Mock::given(method("GET"))
+                .and(path("/v1/apps"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(apps_page()))
+                .expect(2)
+                .mount(&server)
+                .await;
+
+            let store = noop_store();
+            // The saved session acts for another team.
+            let client = client_on(&server.uri(), Some(222), Arc::clone(&store));
+            client.fetch_apps().await.unwrap();
+            client.fetch_apps().await.unwrap();
+
+            let routes: Vec<String> = server
+                .received_requests()
+                .await
+                .unwrap()
+                .iter()
+                .map(|r| format!("{} {}", r.method, r.url.path()))
+                .collect();
+            assert_eq!(
+                routes,
+                [
+                    "GET /olympus/v1/session",
+                    "POST /olympus/v1/session",
+                    "GET /v1/apps",
+                    "GET /v1/apps"
+                ]
+            );
+            let saves = store.saves();
+            assert_eq!(saves.len(), 1, "the switch is saved");
+            let restored = AppleSession::restore(
+                &SessionBlob::from_bytes(saves[0].1.clone()),
+                AppleEndpoints::default(),
+            )
+            .unwrap();
+            assert_eq!(restored.team_id(), Some(TEAM));
+        }
+
+        #[tokio::test]
+        async fn a_refused_session_while_selecting_the_team_is_session_expired_and_retried() {
+            let server = MockServer::start().await;
+            Mock::given(method("GET"))
+                .and(path("/olympus/v1/session"))
+                .respond_with(ResponseTemplate::new(401))
+                .expect(2)
+                .mount(&server)
+                .await;
+
+            let client = client_on(&server.uri(), None, noop_store());
+            for _ in 0..2 {
+                assert!(matches!(
+                    client.fetch_apps().await.unwrap_err(),
+                    StackError::SessionExpired { .. }
+                ));
+            }
+            // No iris request went out.
+            assert!(server
+                .received_requests()
+                .await
+                .unwrap()
+                .iter()
+                .all(|r| r.url.path().starts_with("/olympus/")));
+        }
+
+        #[tokio::test]
+        async fn a_team_outside_the_apple_id_is_an_auth_error() {
+            let server = MockServer::start().await;
+            let mut body = olympus_session_body();
+            body["availableProviders"] =
+                serde_json::json!([{ "providerId": 999, "name": "Other" }]);
+            body["provider"] = serde_json::json!({ "providerId": 999 });
+            Mock::given(method("GET"))
+                .and(path("/olympus/v1/session"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(body))
+                .mount(&server)
+                .await;
+
+            let client = client_on(&server.uri(), None, noop_store());
+            assert!(matches!(
+                client.fetch_apps().await.unwrap_err(),
+                StackError::Auth { message } if message.contains("118291181")
+            ));
+        }
+
+        #[tokio::test]
+        async fn bundle_id_rename_delete_and_analytics_are_unsupported_without_a_request() {
+            let server = MockServer::start().await;
+            let c = client_on(&server.uri(), Some(TEAM), noop_store());
+            let results: Vec<(&str, Result<(), StackError>)> = vec![
+                ("update_bundle_id", c.update_bundle_id("b", "n").await),
+                ("delete_bundle_id", c.delete_bundle_id("b").await),
+                (
+                    "create_analytics_report_request",
+                    c.create_analytics_report_request("a", "ONGOING")
+                        .await
+                        .map(drop),
+                ),
+                (
+                    "fetch_analytics_report_requests_page",
+                    c.fetch_analytics_report_requests_page("a", None, 10, None)
+                        .await
+                        .map(drop),
+                ),
+                (
+                    "fetch_analytics_reports_page",
+                    c.fetch_analytics_reports_page("r", None, 10, None)
+                        .await
+                        .map(drop),
+                ),
+                (
+                    "fetch_analytics_report_instances_page",
+                    c.fetch_analytics_report_instances_page("r", None, 10, None)
+                        .await
+                        .map(drop),
+                ),
+                (
+                    "fetch_analytics_report_segments_page",
+                    c.fetch_analytics_report_segments_page("i", 10, None)
+                        .await
+                        .map(drop),
+                ),
+                (
+                    "download_analytics_segment",
+                    c.download_analytics_segment(&format!("{}/seg", server.uri()), 10)
+                        .await
+                        .map(drop),
+                ),
+            ];
+            for (name, result) in results {
+                assert!(
+                    matches!(&result, Err(StackError::Unsupported { message }) if message.contains("API key")),
+                    "{name}: {result:?}"
+                );
+            }
+            assert!(server.received_requests().await.unwrap().is_empty());
+        }
+
+        // --- Provisioning on the Developer Portal --------------------------
+
+        const PORTAL: &str = "ABCDE12345";
+
+        /// A session client on the real layout: iris at `{server}/iris`,
+        /// provisioning at `{server}/services-account`, holding `portal` as
+        /// the saved Developer Portal team of [`TEAM`] when given.
+        fn portal_client(
+            server: &MockServer,
+            portal: Option<&str>,
+            store: Arc<RecordingStore>,
+        ) -> AppStoreClient {
+            let mut session = session(&server.uri(), Some(TEAM));
+            let (endpoints, jar, http, widget) = session.into_parts();
+            session = AppleSession::from_parts(
+                endpoints.with_developer_base_url(&server.uri()),
+                jar,
+                http,
+                widget,
+                Some(TEAM),
+            );
+            if let Some(portal) = portal {
+                session.remember_portal_team(TEAM, portal.into());
+            }
+            AppStoreClient::with_session(SessionAuth::new("acct-1".into(), TEAM, session, store))
+        }
+
+        fn olympus_with(teams: serde_json::Value) -> serde_json::Value {
+            serde_json::json!({ "provider": { "providerId": TEAM }, "availableProviders": teams })
+        }
+
+        async fn mount_olympus(server: &MockServer, body: serde_json::Value, times: u64) {
+            Mock::given(method("GET"))
+                .and(path("/olympus/v1/session"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(body))
+                .expect(times)
+                .mount(server)
+                .await;
+        }
+
+        async fn mount_list_teams(server: &MockServer, teams: serde_json::Value, times: u64) {
+            Mock::given(method("POST"))
+                .and(path("/services-account/QH65B2/account/listTeams.action"))
+                .and(header("content-length", "0"))
+                .respond_with(
+                    ResponseTemplate::new(200)
+                        .set_body_json(serde_json::json!({ "resultCode": 0, "teams": teams })),
+                )
+                .expect(times)
+                .mount(server)
+                .await;
+        }
+
+        fn empty_page() -> serde_json::Value {
+            serde_json::json!({ "data": [], "links": {} })
+        }
+
+        async fn requests_to(server: &MockServer, wanted: &str) -> Vec<wiremock::Request> {
+            server
+                .received_requests()
+                .await
+                .unwrap()
+                .into_iter()
+                .filter(|r| r.url.path() == wanted)
+                .collect()
+        }
+
+        fn header_text<'r>(request: &'r wiremock::Request, name: &str) -> Option<&'r str> {
+            request.headers.get(name).and_then(|v| v.to_str().ok())
+        }
+
+        fn body_of(request: &wiremock::Request) -> serde_json::Value {
+            serde_json::from_slice(&request.body).unwrap()
+        }
+
+        #[tokio::test]
+        async fn a_single_portal_team_is_resolved_once_saved_and_sent_in_spaceships_read_form() {
+            let server = MockServer::start().await;
+            mount_olympus(
+                &server,
+                olympus_with(serde_json::json!([{ "providerId": TEAM, "name": "Main Team" }])),
+                1,
+            )
+            .await;
+            // One team on each side: chosen although the names differ in form.
+            mount_list_teams(
+                &server,
+                serde_json::json!([{ "teamId": PORTAL, "name": "MAIN TEAM LLC", "type": "Company/Organization" }]),
+                1,
+            )
+            .await;
+            Mock::given(method("POST"))
+                .and(path("/services-account/v1/devices"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(empty_page()))
+                .expect(2)
+                .mount(&server)
+                .await;
+            let store = noop_store();
+            let c = portal_client(&server, None, Arc::clone(&store));
+
+            assert!(c.fetch_devices().await.unwrap().is_empty());
+            assert!(c.fetch_devices().await.unwrap().is_empty());
+
+            let reads = requests_to(&server, "/services-account/v1/devices").await;
+            let read = &reads[0];
+            assert_eq!(
+                body_of(read),
+                serde_json::json!({ "urlEncodedQueryParams": "limit=200&sort=name", "teamId": PORTAL })
+            );
+            assert_eq!(
+                header_text(read, "content-type"),
+                Some("application/vnd.api+json")
+            );
+            assert_eq!(header_text(read, "x-http-method-override"), Some("GET"));
+            assert_eq!(
+                header_text(read, "x-requested-with"),
+                Some("XMLHttpRequest")
+            );
+            assert_eq!(header_text(read, "accept"), Some("*/*"));
+            assert_eq!(
+                header_text(read, "accept-encoding"),
+                Some(transport::NET_HTTP_ACCEPT_ENCODING)
+            );
+            assert!(read.headers.get("x-csrf-itc").is_none());
+            assert!(read.headers.get("authorization").is_none());
+            assert_eq!(
+                header_text(read, "cookie"),
+                Some(format!("myacinfo={SESSION_COOKIE}").as_str())
+            );
+
+            // The binding was saved once, in a version 2 blob the next client reads.
+            let saves = store.saves();
+            assert_eq!(saves.len(), 1);
+            let saved = AppleSession::restore(
+                &SessionBlob::from_bytes(saves[0].1.clone()),
+                AppleEndpoints::default(),
+            )
+            .unwrap();
+            assert_eq!(saved.portal_team_id(TEAM), Some(PORTAL));
+        }
+
+        #[tokio::test]
+        async fn several_portal_teams_are_matched_by_the_app_store_connect_team_name() {
+            let server = MockServer::start().await;
+            mount_olympus(&server, olympus_session_body(), 1).await;
+            mount_list_teams(
+                &server,
+                serde_json::json!([
+                    { "teamId": "OTHER11111", "name": "Second Team" },
+                    { "teamId": PORTAL, "name": "Main Team" },
+                    { "teamId": "THIRD22222", "name": "Unrelated" }
+                ]),
+                1,
+            )
+            .await;
+            Mock::given(method("POST"))
+                .and(path("/services-account/v1/certificates"))
+                .and(body_json(serde_json::json!({
+                    "urlEncodedQueryParams": "limit=200&sort=displayName",
+                    "teamId": PORTAL
+                })))
+                .respond_with(ResponseTemplate::new(200).set_body_json(empty_page()))
+                .expect(1)
+                .mount(&server)
+                .await;
+            let c = portal_client(&server, None, noop_store());
+            assert!(c.fetch_certificates().await.unwrap().is_empty());
+        }
+
+        #[tokio::test]
+        async fn an_ambiguous_portal_team_is_refused_without_a_provisioning_request_and_retried() {
+            let server = MockServer::start().await;
+            mount_olympus(&server, olympus_session_body(), 2).await;
+            mount_list_teams(
+                &server,
+                serde_json::json!([
+                    { "teamId": "TWIN111111", "name": "Main Team" },
+                    { "teamId": "TWIN222222", "name": "Main Team" }
+                ]),
+                2,
+            )
+            .await;
+            let store = noop_store();
+            let c = portal_client(&server, None, Arc::clone(&store));
+            for _ in 0..2 {
+                assert!(matches!(
+                    c.fetch_profiles().await,
+                    Err(StackError::Unsupported { message }) if message.contains("cannot be chosen safely")
+                ));
+            }
+            assert!(requests_to(&server, "/services-account/v1/profiles")
+                .await
+                .is_empty());
+            assert!(store.saves().is_empty(), "nothing resolved, nothing saved");
+        }
+
+        #[tokio::test]
+        async fn no_portal_team_or_a_foreign_team_is_refused() {
+            let server = MockServer::start().await;
+            mount_olympus(&server, olympus_session_body(), 1).await;
+            mount_list_teams(&server, serde_json::json!([]), 1).await;
+            let c = portal_client(&server, None, noop_store());
+            assert!(matches!(
+                c.fetch_bundle_ids().await,
+                Err(StackError::Unsupported { message }) if message.contains("Apple Developer Program")
+            ));
+
+            let server = MockServer::start().await;
+            mount_olympus(
+                &server,
+                olympus_with(serde_json::json!([{ "providerId": 999, "name": "Other" }])),
+                1,
+            )
+            .await;
+            let c = portal_client(&server, None, noop_store());
+            assert!(matches!(
+                c.fetch_devices().await,
+                Err(StackError::Auth { message }) if message.contains("not one of")
+            ));
+        }
+
+        #[tokio::test]
+        async fn a_saved_portal_team_skips_list_teams_and_the_team_switch() {
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .and(path("/services-account/v1/bundleIds"))
+                .and(body_json(serde_json::json!({
+                    "urlEncodedQueryParams": "limit=200&sort=name",
+                    "teamId": PORTAL
+                })))
+                .respond_with(ResponseTemplate::new(200).set_body_json(empty_page()))
+                .expect(1)
+                .mount(&server)
+                .await;
+            let c = portal_client(&server, Some(PORTAL), noop_store());
+            assert!(c.fetch_bundle_ids().await.unwrap().is_empty());
+            assert_eq!(server.received_requests().await.unwrap().len(), 1);
+        }
+
+        #[tokio::test]
+        async fn single_resource_reads_encode_their_query_like_faraday() {
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .and(path("/services-account/v1/certificates/cert-1"))
+                .and(body_json(serde_json::json!({
+                    "urlEncodedQueryParams": "fields%5Bcertificates%5D=certificateContent%2CdisplayName%2Cname%2CcertificateType%2Cplatform%2CserialNumber%2CexpirationDate%2Cactivated",
+                    "teamId": PORTAL
+                })))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "data": { "type": "certificates", "id": "cert-1", "attributes": { "certificateContent": "B64" } }
+                })))
+                .expect(1)
+                .mount(&server)
+                .await;
+            Mock::given(method("POST"))
+                .and(path(
+                    "/services-account/v1/bundleIds/bid-1/bundleIdCapabilities",
+                ))
+                .and(body_json(
+                    serde_json::json!({ "urlEncodedQueryParams": "", "teamId": PORTAL }),
+                ))
+                .respond_with(ResponseTemplate::new(200).set_body_json(empty_page()))
+                .expect(1)
+                .mount(&server)
+                .await;
+            let c = portal_client(&server, Some(PORTAL), noop_store());
+            assert_eq!(
+                c.fetch_certificate_content("cert-1")
+                    .await
+                    .unwrap()
+                    .as_deref(),
+                Some("B64")
+            );
+            assert!(c
+                .fetch_bundle_id_capabilities("bid-1")
+                .await
+                .unwrap()
+                .is_empty());
+        }
+
+        #[tokio::test]
+        async fn a_pagination_link_is_followed_on_services_account_whatever_host_it_names() {
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .and(path("/services-account/v1/devices"))
+                .and(body_json(serde_json::json!({
+                    "urlEncodedQueryParams": "limit=200&sort=name",
+                    "teamId": PORTAL
+                })))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "data": [{ "type": "devices", "id": "d1", "attributes": {} }],
+                    "links": { "next": "https://elsewhere.invalid/services-account/v1/devices?cursor=QU%3D%3D&limit=200" }
+                })))
+                .expect(1)
+                .mount(&server)
+                .await;
+            Mock::given(method("POST"))
+                .and(path("/services-account/v1/devices"))
+                .and(body_json(serde_json::json!({
+                    "urlEncodedQueryParams": "cursor=QU%3D%3D&limit=200",
+                    "teamId": PORTAL
+                })))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "data": [{ "type": "devices", "id": "d2", "attributes": {} }],
+                    "links": {}
+                })))
+                .expect(1)
+                .mount(&server)
+                .await;
+            let c = portal_client(&server, Some(PORTAL), noop_store());
+            let ids: Vec<String> = c
+                .fetch_devices()
+                .await
+                .unwrap()
+                .into_iter()
+                .map(|d| d.id)
+                .collect();
+            assert_eq!(ids, ["d1", "d2"]);
+
+            // A link without a `/v1/` path is refused, not followed.
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .and(path("/services-account/v1/profiles"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "data": [], "included": [], "links": { "next": "https://elsewhere.invalid/steal" }
+                })))
+                .expect(1)
+                .mount(&server)
+                .await;
+            let c = portal_client(&server, Some(PORTAL), noop_store());
+            assert!(matches!(
+                c.fetch_profiles().await,
+                Err(StackError::Decode { .. })
+            ));
+        }
+
+        #[tokio::test]
+        async fn writes_follow_spaceships_session_shapes() {
+            let server = MockServer::start().await;
+            let created = |kind: &str| serde_json::json!({ "data": { "type": kind, "id": "new", "attributes": { "capabilityType": "PUSH_NOTIFICATIONS" } } });
+            // Creates: a plain POST (no override) with data.attributes.teamId.
+            for (resource, kind) in [
+                ("devices", "devices"),
+                ("bundleIds", "bundleIds"),
+                ("bundleIdCapabilities", "bundleIdCapabilities"),
+                ("certificates", "certificates"),
+                ("profiles", "profiles"),
+            ] {
+                Mock::given(method("POST"))
+                    .and(path(format!("/services-account/v1/{resource}")))
+                    .and(|r: &wiremock::Request| {
+                        r.headers.get("x-http-method-override").is_none()
+                            && header_text(r, "content-type") == Some("application/vnd.api+json")
+                            && header_text(r, "x-requested-with") == Some("XMLHttpRequest")
+                            && body_of(r)["data"]["attributes"]["teamId"] == PORTAL
+                    })
+                    .respond_with(ResponseTemplate::new(201).set_body_json(created(kind)))
+                    .expect(1)
+                    .mount(&server)
+                    .await;
+            }
+            // Deletes: POST with X-HTTP-Method-Override: DELETE, no params (null).
+            for resource in [
+                "bundleIdCapabilities/cap-1",
+                "certificates/cert-1",
+                "profiles/prof-1",
+            ] {
+                Mock::given(method("POST"))
+                    .and(path(format!("/services-account/v1/{resource}")))
+                    .and(header("x-http-method-override", "DELETE"))
+                    .and(header("content-type", "application/vnd.api+json"))
+                    .and(body_json(
+                        serde_json::json!({ "urlEncodedQueryParams": null, "teamId": PORTAL }),
+                    ))
+                    .respond_with(ResponseTemplate::new(204))
+                    .expect(1)
+                    .mount(&server)
+                    .await;
+            }
+            // Update: a real PATCH, application/json, the body unchanged (no teamId).
+            Mock::given(method("PATCH"))
+                .and(path("/services-account/v1/devices/dev-1"))
+                .and(header("content-type", "application/json"))
+                .and(body_json(serde_json::json!({
+                    "data": { "type": "devices", "id": "dev-1", "attributes": { "status": "DISABLED" } }
+                })))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({})))
+                .expect(1)
+                .mount(&server)
+                .await;
+
+            let c = portal_client(&server, Some(PORTAL), noop_store());
+            c.create_device("Phone", "IOS", "UDID-1").await.unwrap();
+            c.create_bundle_id("com.x", "X", "IOS").await.unwrap();
+            c.enable_capability("bid-1", "PUSH_NOTIFICATIONS")
+                .await
+                .unwrap();
+            c.create_certificate("CSR", "DISTRIBUTION", None, None)
+                .await
+                .unwrap();
+            c.create_profile("P", "IOS_APP_STORE", "bid-1", &["cert-1".into()], &[])
+                .await
+                .unwrap();
+            c.disable_capability("cap-1").await.unwrap();
+            c.revoke_certificate("cert-1").await.unwrap();
+            c.delete_profile("prof-1").await.unwrap();
+            c.update_device("dev-1", None, Some("DISABLED"))
+                .await
+                .unwrap();
+
+            // The device create carries exactly spaceship's body.
+            let creates = requests_to(&server, "/services-account/v1/devices").await;
+            assert_eq!(
+                body_of(&creates[0]),
+                serde_json::json!({ "data": { "type": "devices", "attributes": {
+                    "name": "Phone", "platform": "IOS", "udid": "UDID-1", "teamId": PORTAL
+                } } })
+            );
+        }
+
+        #[tokio::test]
+        async fn a_gzipped_portal_answer_is_inflated() {
+            use flate2::write::GzEncoder;
+            use std::io::Write as _;
+            let mut gz = GzEncoder::new(Vec::new(), flate2::Compression::default());
+            gz.write_all(
+                serde_json::json!({
+                    "data": [{ "type": "devices", "id": "gz-1", "attributes": { "name": "Zipped" } }],
+                    "links": {}
+                })
+                .to_string()
+                .as_bytes(),
+            )
+            .unwrap();
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .and(path("/services-account/v1/devices"))
+                .respond_with(
+                    ResponseTemplate::new(200)
+                        .insert_header("content-encoding", "gzip")
+                        .insert_header("content-type", "application/vnd.api+json")
+                        .set_body_bytes(gz.finish().unwrap()),
+                )
+                .mount(&server)
+                .await;
+            let c = portal_client(&server, Some(PORTAL), noop_store());
+            assert_eq!(c.fetch_devices().await.unwrap()[0].name, "Zipped");
+        }
+
+        #[tokio::test]
+        async fn portal_401_is_session_expired_and_portal_csrf_is_kept_apart() {
+            let server = MockServer::start().await;
+            mount_olympus(&server, olympus_session_body(), 1).await;
+            Mock::given(method("POST"))
+                .and(path("/services-account/QH65B2/account/listTeams.action"))
+                .respond_with(
+                    ResponseTemplate::new(200)
+                        .insert_header("csrf", CSRF)
+                        .insert_header("csrf_ts", CSRF_TS)
+                        .set_body_json(serde_json::json!({
+                            "resultCode": 0,
+                            "teams": [{ "teamId": PORTAL, "name": "Main Team" }]
+                        })),
+                )
+                .expect(1)
+                .mount(&server)
+                .await;
+            Mock::given(method("POST"))
+                .and(path("/services-account/v1/devices"))
+                .and(header("csrf", CSRF))
+                .and(header("csrf_ts", CSRF_TS))
+                .respond_with(ResponseTemplate::new(401))
+                .expect(1)
+                .mount(&server)
+                .await;
+            Mock::given(method("GET"))
+                .and(path("/iris/v1/apps"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(apps_page()))
+                .expect(1)
+                .mount(&server)
+                .await;
+            let c = portal_client(&server, None, noop_store());
+            assert!(matches!(
+                c.fetch_devices().await,
+                Err(StackError::SessionExpired { message }) if message.contains("Developer Portal")
+            ));
+            // The portal's tokens never go to iris.
+            c.fetch_apps().await.unwrap();
+            let iris = requests_to(&server, "/iris/v1/apps").await;
+            assert!(iris[0].headers.get("csrf").is_none());
+
+            // A list-teams 401 is an expired session too.
+            let server = MockServer::start().await;
+            mount_olympus(&server, olympus_session_body(), 1).await;
+            Mock::given(method("POST"))
+                .and(path("/services-account/QH65B2/account/listTeams.action"))
+                .respond_with(ResponseTemplate::new(401))
+                .mount(&server)
+                .await;
+            let c = portal_client(&server, None, noop_store());
+            assert!(matches!(
+                c.fetch_certificates().await,
+                Err(StackError::SessionExpired { .. })
+            ));
+        }
+
+        #[tokio::test]
+        async fn presigned_uploads_never_carry_the_session() {
+            let server = MockServer::start().await;
+            let image = b"img".to_vec();
+            Mock::given(method("POST"))
+                .and(path("/v1/appScreenshots"))
+                .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
+                    "data": { "type": "appScreenshots", "id": "shot-1", "attributes": {
+                        "uploadOperations": [{
+                            "method": "PUT", "url": format!("{}/upload/0", server.uri()),
+                            "length": image.len(), "offset": 0, "requestHeaders": []
+                        }]
+                    } }
+                })))
+                .mount(&server)
+                .await;
+            Mock::given(method("PUT"))
+                .and(path("/upload/0"))
+                .respond_with(ResponseTemplate::new(200))
+                .expect(1)
+                .mount(&server)
+                .await;
+            Mock::given(method("PATCH"))
+                .and(path("/v1/appScreenshots/shot-1"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "data": { "type": "appScreenshots", "id": "shot-1", "attributes": {} }
+                })))
+                .mount(&server)
+                .await;
+
+            let client = client_on(&server.uri(), Some(TEAM), noop_store());
+            client
+                .upload_screenshot("set-1", "a.png", &image)
+                .await
+                .unwrap();
+            let requests = server.received_requests().await.unwrap();
+            let put = requests
+                .iter()
+                .find(|r| r.method.as_str() == "PUT")
+                .unwrap();
+            assert!(put.headers.get("cookie").is_none());
+            assert!(put.headers.get("x-csrf-itc").is_none());
+            assert!(put.headers.get("authorization").is_none());
+            let reserve = requests
+                .iter()
+                .find(|r| r.method.as_str() == "POST")
+                .unwrap();
+            assert!(reserve.headers.get("cookie").is_some());
+        }
+
+        #[tokio::test]
+        async fn no_session_secret_reaches_the_debug_trace_or_the_host_log() {
+            let capture = capture_logs();
+            let server = MockServer::start().await;
+            Mock::given(method("GET"))
+                .and(path("/v1/apps"))
+                .respond_with(
+                    ResponseTemplate::new(200)
+                        .insert_header("csrf", CSRF)
+                        .insert_header("csrf_ts", CSRF_TS)
+                        .insert_header(
+                            "Set-Cookie",
+                            "DES5c148586=\"HSARM-trust-secret==SRVT\"; Path=/; Max-Age=60",
+                        )
+                        .set_body_json(apps_page()),
+                )
+                .mount(&server)
+                .await;
+            Mock::given(method("POST"))
+                .and(path("/v1/betaGroups"))
+                .respond_with(ResponseTemplate::new(401).set_body_string("{}"))
+                .mount(&server)
+                .await;
+
+            let logger = Arc::new(CapturingLogger::default());
+            let client = client_on(&server.uri(), Some(TEAM), noop_store())
+                .with_debug_logger(Some(logger.clone() as Arc<dyn DebugLogger>));
+            client.validate().await.unwrap();
+            let err = client
+                .create_beta_group("app-1", "QA", false, false, true)
+                .await
+                .unwrap_err();
+            assert!(matches!(err, StackError::SessionExpired { .. }));
+
+            // The second request really carried the tokens and the cookies…
+            let requests = server.received_requests().await.unwrap();
+            assert_eq!(requests[1].headers.get("csrf").unwrap(), CSRF);
+            let cookies = requests[1].headers.get("cookie").unwrap().to_str().unwrap();
+            assert!(cookies.contains(SESSION_COOKIE) && cookies.contains("HSARM-trust-secret"));
+
+            // …and none of them reached a logger or an error.
+            let trace = logger.messages().join("\n");
+            assert!(trace.contains("curl -X POST") && trace.contains("csrf: [redacted]"));
+            let everything = format!("{trace}\n{}\n{err:?}", capture.all_text());
+            for secret in [SESSION_COOKIE, CSRF, CSRF_TS, "HSARM-trust-secret"] {
+                assert!(!everything.contains(secret), "{secret} leaked");
+            }
+        }
     }
 }

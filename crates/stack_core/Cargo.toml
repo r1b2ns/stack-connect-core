@@ -17,6 +17,10 @@ cli = ["uniffi/cli"]
 # Enables the flutter_rust_bridge (FRB) Dart binding. OFF by default so the iOS
 # staticlib and the default `cargo test` are completely unaffected.
 frb = ["dep:flutter_rust_bridge"]
+# Dev-only `apple_signin_probe` binary: runs the real Apple ID web sign-in from
+# a terminal. OFF by default so the iOS staticlib never pulls the terminal
+# prompt crate; it also exposes the `apple_signin` module the binary uses.
+apple-signin-probe = ["dep:rpassword"]
 
 [lints.rust]
 # `frb_expand` is set by `flutter_rust_bridge_codegen` only while it runs
@@ -29,9 +33,17 @@ name = "uniffi-bindgen"
 path = "src/bin/uniffi-bindgen.rs"
 required-features = ["cli"]
 
+[[bin]]
+name = "apple_signin_probe"
+path = "src/bin/apple_signin_probe.rs"
+required-features = ["apple-signin-probe"]
+
 [dependencies]
 uniffi = { workspace = true }
-reqwest = { workspace = true }
+# `cookies`: the Apple ID web session (auth/apple_session) keeps its cookies in
+# a jar the client consults below request building, so they never reach a
+# rendered request or the debug cURL trace.
+reqwest = { workspace = true, features = ["cookies"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 jsonwebtoken = { workspace = true }
@@ -47,6 +59,14 @@ md-5 = { workspace = true }
 uuid = { workspace = true }
 flate2 = { workspace = true }
 percent-encoding = { workspace = true }
+base64 = { workspace = true }
+cookie_store = { workspace = true }
+num-bigint = { workspace = true }
+sha1 = { workspace = true }
+zeroize = { workspace = true }
+getrandom = { workspace = true }
+# Optional: only compiled with the `apple-signin-probe` feature (dev CLI).
+rpassword = { workspace = true, optional = true }
 # Optional: only compiled when the `frb` feature is enabled (Dart binding).
 flutter_rust_bridge = { version = "=2.12.0", optional = true }
 

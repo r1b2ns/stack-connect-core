@@ -3,8 +3,9 @@
 Shared Rust core for [stack-connect](../stack-connect), consumed by:
 
 - **iOS** natively via **UniFFI** (`StackCoreRust.xcframework`).
-- **Flutter** (Android + desktop) via **flutter_rust_bridge** (behind the `frb` cargo
-  feature).
+- **Flutter** (Android + desktop, in the sibling
+  [stack-connect-flutter](../stack-connect-flutter) repo) via **flutter_rust_bridge**
+  (behind the `frb` cargo feature).
 
 See [RUST_CORE_PLAN.md](RUST_CORE_PLAN.md) for the full plan and roadmap.
 
@@ -40,6 +41,22 @@ A generic `SyncService` drives persistence over the host's `BlobStore`. The type
 across every capability call. The iOS app runs on this core **only** — the legacy
 `appstoreconnect-swift-sdk` has been removed.
 
+**App Store Connect with "Sign in with Apple ID".** Next to the API key (`connect`),
+an account can run on an Apple ID web session:
+
+| | |
+| --- | --- |
+| Sign-in | `AppleIdSignIn` (`new()`, or `with_saved_session(blob)` to sign in again): `start(email, password)` runs SRP-6a with Apple's s2k derivation and hashcash (`X-Apple-HC`); the password never goes on the wire and is wiped after use. The `AppleSignInStep` it returns asks for a two-factor code (`NeedsCode`, by trusted device or SMS via `request_sms(phone_id)`), then `submit_code(code, method)`; `teams()` lists the Apple ID's teams and `finish()` returns the opaque, versioned session blob (cookies, widget key, Developer Portal teams). |
+| Storage | The host keeps the blob in secure storage behind the `SessionStore` foreign trait (`load` / `save`). The core never stores the password, so it cannot sign in again by itself. |
+| Connect | `connect_with_apple_session(account_id, team_id, session_store, debug_logger)`: App Store Connect calls go to the web API (`appstoreconnect.apple.com/iris/v1`) and provisioning to the Developer Portal (`developer.apple.com/services-account`), with per-host CSRF tokens and team switching. Refreshed cookies are saved back through `SessionStore` after every response that sets them. |
+| Limits | Analytics Reports are left out of `capabilities()`; renaming or deleting a bundle id is `Unsupported` without a request. An HTTP 401 (or a session refused while switching team) is `StackError::SessionExpired`: the host must ask the user to sign in again. |
+| Logging | Session cookies, `scnt`, `X-Apple-*` session headers and CSRF tokens are redacted from both log sinks. |
+| Bindings | UniFFI and FRB (`apple_sign_in` / `FrbAppleSignIn`, and an FRB `connect_with_apple_session` that takes the blob as bytes; read the refreshed session back with `FrbProvider::take_refreshed_session`). |
+
+`just test-session-mode` replays the App Store Connect client tests on a web session.
+The dev-only `apple_signin_probe` binary (feature `apple-signin-probe`) runs a real
+sign-in from a terminal.
+
 **Google Play — apps, reviews, app detail, icons, release and user management in the
 core.** The `googleplay` provider (`ServiceKind::GooglePlay`) exposes `Apps`, `Reviews`,
 `AppDetails`, `StoreListings`, `Tracks`, `AppIcons`, `ReleaseManagement` and `PlayUsers`;
@@ -51,6 +68,7 @@ calls.
 | --- | --- |
 | Credentials | `clientEmail` / `privateKeyId` / `privateKey`, which the host extracts from the service account's JSON key file. The key is parsed eagerly at `connect` (PKCS#8 or PKCS#1, raw or JSON-escaped, RSA ≥ 2048-bit), so a bad key fails there with `InvalidCredentials`. |
 | Auth | `auth::oauth_jwt`: an RS256 JWT-bearer assertion (RFC 7523) exchanged at `https://oauth2.googleapis.com/token` for the `androidpublisher` + `playdeveloperreporting` scopes; the access token is cached with a 60 s refresh margin and dropped on a 401 (the call is then retried once). |
+| Auth with "Sign in with Google" | `connect_with_access_token(.googlePlay, account_id, token_provider, debug_logger)` instead of `connect`: the host implements the `AccessTokenProvider` foreign trait (`async access_token(account_id) -> String`), which the core asks before **every** request (`auth::host_token`). The core never caches, stores or refreshes the token and never sees a refresh token; the token must carry the same two scopes. A provider failure is `Auth` (a host `Auth` keeps its message verbatim, a host `Network` passes through, a stalled host times out after 30 s as `Network`); a Google 401 is `Auth` **without** a retry, and access errors name "the signed-in Google account" instead of a service account. Quota / rate limits keep the `Http 429` shape. The token is never logged: the opt-in `DebugLogger` trace redacts its `Authorization` header. Same capabilities as a service-account provider. App Store Connect answers `Unsupported`. |
 | `Apps` | `GET https://playdeveloperreporting.googleapis.com/v1beta1/apps:search` with `pageToken` pagination (the Android Publisher API has no list-apps endpoint). `AppInfo.id` = `bundleId` = the package name; `platform` = `"ANDROID"`. |
 | `validate()` | Token exchange, then `apps:search?pageSize=1`. `Ok` means the key works and the Reporting API is enabled, not that any app is visible yet, nor that the Android Publisher API is enabled. |
 | `Reviews` | The shared `Reviews` handle, on `androidpublisher/v3/applications/{package}/reviews`. `fetch_customer_reviews` follows `tokenPagination.nextPageToken` (`maxResults=100`, at most 100 pages). `fetch_customer_reviews_page`: Play has no server-side sort or filter, so `sort` must be `""` or `-createdDate` (Google's own order, most recent first; anything else is `Unsupported`), `filter_rating` is applied to each fetched page (a page can come back short or empty while `next_token` is still set), and `limit` is clamped to 1–100. `reply_to_review` posts `reviews/{id}:reply`; the text is sent as is and Google's own error comes back if it is too long. `delete_review_response` and the three review-submission methods are `Unsupported` (Play has no equivalent). |
@@ -160,15 +178,19 @@ Google's message verbatim and ends with the HTTP status and the resource called,
 `(HTTP 404 on GET developers/5374/users)`; every local rejection reads
 `local validation failed: …; request not sent to Google` and describes the rejected
 value's shape (see [docs/LOGGING.md](docs/LOGGING.md)). The iOS app connects Google Play accounts and lists
-apps through the core; the Flutter apps only label the service so far, and the new
-capabilities (`AppDetails`, `StoreListings`, `Tracks`, `AppIcons`) have no FRB wrappers
-yet (Play reviews already work through `FrbReviews`; `Capability` itself crosses FRB).
+apps through the core; the Flutter apps only label the service so far. The Play-only
+capabilities (`AppDetails`, `StoreListings`, `Tracks`, `AppIcons`, `ReleaseManagement`,
+`PlayUsers`) and `connect_with_access_token` have no FRB wrappers yet (Play reviews
+already work through `FrbReviews`; `Capability` itself crosses FRB).
 
 **Design as built.** Each provider owns a concrete authenticator (`auth::es256` for App
 Store Connect, `auth::oauth_jwt` for Google) and shares `http_debug` for sending and
-tracing requests; there is no common `Authenticator` trait. Every provider is always
-compiled in: the only cargo features are `frb` (Dart binding) and `cli` (embedded
-`uniffi-bindgen`).
+tracing requests; there is no common `Authenticator` trait. App Store Connect picks
+between the API key and the Apple ID web session through `AppStoreAuth`
+(`providers/appstore/auth.rs`); Google Play between the service account and the
+host token through `PlayAuth`. Every provider is always compiled in: the cargo
+features are `frb` (Dart binding), `cli` (embedded `uniffi-bindgen`) and
+`apple-signin-probe` (the dev-only sign-in CLI).
 
 **Out of scope (for now):** Firebase stays implemented **natively in the iOS app**. When
 revisited, it is just a `providers/<x>/` module + registration (plan §4), reusing
@@ -201,25 +223,34 @@ crates/stack_core/                    # the core crate
   src/
     auth/es256.rs                     # ES256 (P-256 / .p8) JWT for App Store Connect
     auth/oauth_jwt.rs                 # Google service-account RS256 JWT-bearer -> access token
+    auth/host_token.rs                # host-supplied bearer token (user OAuth sign-in), asked per request
+    auth/apple_session/               # Apple ID web sign-in: SRP, hashcash, 2FA flow, cookie jar,
+                                      #   session blob, Developer Portal teams
     auth/token.rs                     # token cache primitives shared by the authenticators
+    apple_id.rs                       # AppleIdSignIn: the exported sign-in object
+    crypto.rs                         # .scexport account-export crypto (AES-GCM, v1/v2/v3)
     http_debug.rs                     # shared HTTP send + debug tracing (runnable cURL; capped, body-less variant for HTML pages)
     logging/                          # host log sink (CoreLogger): levels, targets, redaction, HTTP line formats
     domain.rs                         # uniffi::Record value types (AppInfo, ...)
     error.rs                          # StackError (uniffi::Error)
-    ports.rs                          # foreign traits: CredentialStore, BlobStore, DebugLogger, CoreLogger
-    facade.rs                         # available_services / credential_schema / connect / make_sync_service / set_core_logger
+    ports.rs                          # foreign traits: CredentialStore, BlobStore, DebugLogger, CoreLogger,
+                                      #   AccessTokenProvider, SessionStore
+    facade.rs                         # available_services / credential_schema / connect / connect_with_access_token /
+                                      #   connect_with_apple_session / make_sync_service / set_core_logger
     service/
       provider.rs                     # Provider + Capability (the uniform contract)
       kind.rs                         # ServiceKind / CredentialField
       registry.rs                     # ServiceKind -> concrete plugin
       sync.rs                         # SyncService over BlobStore
       capabilities/                   # one module per capability (sub-object off Provider)
-    providers/appstore/               # the App Store Connect plugin (client + provider)
-    providers/googleplay/             # the Google Play plugin: client (transport + Reporting API),
-                                      #   reviews, edits (edit-session reads), store_page (icons from the
-                                      #   public store page), error, timestamp, provider
+    providers/appstore/               # the App Store Connect plugin: client, provider, auth (API key | web session)
+    providers/googleplay/             # the Google Play plugin: client (transport + Reporting API), play_auth
+                                      #   (service account | host token), reviews, edits (edit-session reads),
+                                      #   releases, release_change + track_writes (release management), users,
+                                      #   store_page (icons from the public store page), error, timestamp, provider
     frb_api.rs / frb_generated.rs     # flutter_rust_bridge facade (feature = "frb")
     bin/uniffi-bindgen.rs             # embedded bindgen, pinned to the runtime version
+    bin/apple_signin_probe.rs         # dev-only Apple ID sign-in CLI (feature = "apple-signin-probe")
 bindings/
   swift/                              # SwiftPM package consumable by the iOS app (binaryTarget)
     StackCoreRust.xcframework         # generated: iOS device + simulator
@@ -233,6 +264,7 @@ build/
   gen-swift.sh                       # generates the Swift bindings (UniFFI library mode)
   gen-dart.sh                        # generates the Dart FRB bindings into bindings/dart
   build-android.sh                   # builds libstack_core.so (FRB) into the Flutter jniLibs
+  build-desktop.sh                   # builds the FRB desktop library (windows | linux | macos) into target/<triple>/release
   swift-smoke.sh                     # builds + runs the cross-FFI smoke on the host
 ```
 
@@ -245,10 +277,12 @@ Rust toolchain **1.96.0** (pinned in `rust-toolchain.toml`). Recipes via [`just`
 
 ```bash
 just                       # list recipes
-just test                  # cargo test -p stack_core (639 lib + 10 facade tests)
+just test                  # cargo test -p stack_core (818 lib + 16 facade tests)
+just test-session-mode     # App Store Connect client tests on an Apple ID web session
 just build-xcframework     # Swift bindings + xcframework (macOS)
 just gen-dart              # Dart FRB bindings into bindings/dart (regenerates frb_generated.rs)
 just build-android         # libstack_core.so (FRB) into the Flutter jniLibs
+just build-desktop macos   # FRB desktop library (default: windows) into target/<triple>/release
 just clean                 # remove target/ + generated bindings + xcframework
 
 cargo fmt --all

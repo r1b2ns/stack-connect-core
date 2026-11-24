@@ -29,6 +29,16 @@ gen-dart:
 test *ARGS:
     cargo test -p stack_core {{ARGS}}
 
+# Provisioning runs in both modes (spaceship's proxy form on services-account with a session).
+# Skipped: what is API-key only (Analytics Reports, renaming and deleting a bundle id:
+# Unsupported with a session), the 401 mapping (SessionExpired with a session) and the
+# bearer trace.
+# Replay the App Store Connect client tests with an Apple ID web session instead of an API key.
+test-session-mode:
+    STACK_CORE_TEST_APPSTORE_AUTH=session cargo test -p stack_core providers::appstore::client -- \
+      --skip analytics --skip update_bundle_id --skip delete_bundle_id \
+      --skip validate_errors_on_401 --skip debug_logger_traces_get_request_and_response
+
 # Remove build artifacts: cargo target/ plus generated Swift bindings and the xcframework.
 clean:
     cargo clean

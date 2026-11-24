@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 
+use super::auth::SessionAuth;
 use super::client::AppStoreClient;
 use crate::auth::es256::AppStoreAuthenticator;
 use crate::domain::{
@@ -67,7 +68,30 @@ impl AppStoreProvider {
             client: Arc::new(AppStoreClient::new(auth).with_debug_logger(debug_logger)),
         }
     }
+
+    /// Builds the provider for an account signed in with an Apple ID: every
+    /// request is authorized with `session` (see [`super::auth`]). When
+    /// `debug_logger` is `Some`, requests are traced with the session's
+    /// secrets redacted.
+    pub(crate) fn with_session(
+        session: SessionAuth,
+        debug_logger: Option<Arc<dyn DebugLogger>>,
+    ) -> Self {
+        Self {
+            client: Arc::new(AppStoreClient::with_session(session).with_debug_logger(debug_logger)),
+        }
+    }
 }
+
+/// The capabilities a web session cannot use (see [`super::auth`]): the
+/// session's `capabilities()` leaves them out so the host hides them, and
+/// their calls fail with [`StackError::Unsupported`] without a request.
+///
+/// Provisioning (devices, bundle ids, certificates, profiles) is reachable
+/// with a session through the Developer Portal; only renaming and deleting a
+/// bundle id are not (those two calls fail with [`StackError::Unsupported`]
+/// while [`Capability::BundleIds`] stays listed).
+const API_KEY_ONLY_CAPABILITIES: [Capability; 1] = [Capability::Analytics];
 
 #[async_trait]
 impl ProviderImpl for AppStoreProvider {
@@ -76,7 +100,7 @@ impl ProviderImpl for AppStoreProvider {
     }
 
     fn capabilities(&self) -> Vec<Capability> {
-        vec![
+        let mut all = vec![
             Capability::Apps,
             Capability::Reviews,
             Capability::AppStoreVersions,
@@ -94,7 +118,11 @@ impl ProviderImpl for AppStoreProvider {
             Capability::Profiles,
             Capability::Analytics,
             Capability::AppIcons,
-        ]
+        ];
+        if self.client.is_web_session() {
+            all.retain(|c| !API_KEY_ONLY_CAPABILITIES.contains(c));
+        }
+        all
     }
 
     async fn validate(&self) -> Result<(), StackError> {

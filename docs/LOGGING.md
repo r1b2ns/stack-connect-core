@@ -10,10 +10,10 @@ logged.
 
 | | `CoreLogger` (this page) | `DebugLogger` |
 | --- | --- | --- |
-| Installed with | `set_core_logger(logger, min_level)`, once, process-wide | `connect(…, debug_logger)`, per provider |
+| Installed with | `set_core_logger(logger, min_level)`, once, process-wide | `connect(…, debug_logger)`, `connect_with_access_token(…, debug_logger)` or `connect_with_apple_session(…, debug_logger)`, per provider |
 | Meant for | production builds, support, "what happened?" | a developer at a debugger |
 | Content | one redacted line per event, leveled, with a target | runnable cURL + full pretty-printed JSON responses |
-| Secrets | **never**: tokens, keys and JWTs removed, e-mails masked | **verbatim** (`Authorization: Bearer …`, the signed JWT assertion) |
+| Secrets | **never**: tokens, keys and JWTs removed, e-mails masked | **verbatim** (`Authorization: Bearer …`, the signed JWT assertion), except a host-supplied token's `Authorization` header and an Apple ID session's cookies, CSRF tokens and sign-in headers, which are redacted |
 
 They are independent: installing one does not install the other. Keep
 `DebugLogger` behind a debug launch flag; `CoreLogger` is safe to leave on.
@@ -210,6 +210,7 @@ through `logging::redact::scrub` before it reaches the host, as a safety net:
 | `Bearer <token>` | `Bearer [redacted]` |
 | JWTs (`eyJ….….…`) and Google access tokens (`ya29.…`) | `[redacted token]` |
 | values of `access_token`, `refresh_token`, `id_token`, `assertion`, `private_key`, `private_key_id`, `client_secret`, `password`, `secret` (`key: value`, `"key": "value"`, `key=value`) | `[redacted]` |
+| Apple ID web session material: `Cookie` / `Set-Cookie` values and named session cookies (`myacinfo`, `DES…`, `itctx`, `dqsid`, `acn01`, `aasp`); the `scnt`, `X-Apple-Id-Session-Id`, `X-Apple-HC`, `X-Apple-Session-Token`, `csrf` and `csrf_ts` headers | `[redacted]` |
 | the local part of every e-mail address | first character + `***` (`d***@agency.example`) |
 
 Never logged at all: request headers, request bodies (the token exchange's

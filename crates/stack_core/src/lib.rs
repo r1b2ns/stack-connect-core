@@ -10,6 +10,7 @@
 
 uniffi::setup_scaffolding!();
 
+mod apple_id;
 mod auth;
 mod domain;
 mod error;
@@ -36,6 +37,33 @@ pub mod frb_api;
 #[cfg(feature = "frb")]
 mod frb_generated;
 
+/// Apple ID web sign-in internals, exposed only for the dev-only
+/// `apple_signin_probe` binary (`--features apple-signin-probe`). The hosts
+/// use the exported [`AppleIdSignIn`] and [`connect_with_apple_session`]
+/// instead.
+#[cfg(feature = "apple-signin-probe")]
+pub mod apple_signin {
+    pub use crate::auth::apple_session::error::AppleSignInError;
+    pub use crate::auth::apple_session::flow::{
+        AppleCodeDelivery, AppleCodeMethod, AppleSignIn, AppleSignInStep, AppleTrustedPhone,
+    };
+    pub use crate::auth::apple_session::portal::PORTAL_PROTOCOL_VERSION;
+    pub use crate::auth::apple_session::probe::{
+        failure_reason, portal_teams, summarize_errors, ProbeHost, ProbeReply, ProbeRequest,
+        SessionProbe,
+    };
+    pub use crate::auth::apple_session::session::{
+        AppleSession, AppleTeam, OlympusSession, SessionBlob, SessionResponse,
+    };
+    pub use crate::auth::apple_session::srp::Password;
+    pub use crate::auth::apple_session::AppleEndpoints;
+}
+
+pub use apple_id::AppleIdSignIn;
+pub use auth::apple_session::flow::{
+    AppleCodeDelivery, AppleCodeMethod, AppleSignInStep, AppleTrustedPhone,
+};
+pub use auth::apple_session::session::AppleTeam;
 pub use domain::{
     AccountExport, AnalyticsReport, AnalyticsReportData, AnalyticsReportInstance,
     AnalyticsReportInstancesPage, AnalyticsReportRequest, AnalyticsReportRequestsPage,
@@ -49,10 +77,11 @@ pub use domain::{
 };
 pub use error::StackError;
 pub use facade::{
-    available_services, connect, credential_schema, make_sync_service, set_core_logger,
+    available_services, connect, connect_with_access_token, connect_with_apple_session,
+    credential_schema, make_sync_service, set_core_logger,
 };
 pub use logging::LogLevel;
-pub use ports::{BlobStore, CoreLogger, CredentialStore};
+pub use ports::{AccessTokenProvider, BlobStore, CoreLogger, CredentialStore, SessionStore};
 pub use service::capabilities::analytics::Analytics;
 pub use service::capabilities::app_details::AppDetails;
 pub use service::capabilities::app_icons::AppIcons;

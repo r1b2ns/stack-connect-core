@@ -5,12 +5,14 @@
 //! perform HTTP — e.g. an OAuth token exchange — and must trace through the same
 //! function, while `auth` must not depend on `providers`.
 
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::error::StackError;
 use crate::logging::http::{
     millis, request_id, summarize_error_body, transport_failure, RequestInfo,
 };
+use crate::logging::redact::redact_bearer;
 use crate::logging::{self, target, LogLevel};
 use crate::ports::DebugLogger;
 
@@ -20,6 +22,9 @@ pub(crate) struct HttpReply {
     pub(crate) status: reqwest::StatusCode,
     pub(crate) body: String,
     pub(crate) request: RequestInfo,
+    /// The response headers (the App Store Connect web session reads its
+    /// CSRF tokens and `Set-Cookie` from them; nothing logs them).
+    pub(crate) headers: reqwest::header::HeaderMap,
     /// The `Retry-After` header in seconds, when the response carries one in
     /// its delta-seconds form (see [`retry_after_secs`]).
     pub(crate) retry_after_secs: Option<u64>,
@@ -75,6 +80,7 @@ pub(crate) async fn send(
     let status = response.status();
     let request_id = request_id(response.headers());
     let retry_after_secs = retry_after_secs(response.headers());
+    let headers = response.headers().clone();
     let body = match response.text().await {
         Ok(body) => body,
         Err(err) => return Err(transport_error(&info, started.elapsed(), err)),
@@ -95,6 +101,61 @@ pub(crate) async fn send(
         status,
         body,
         request: info,
+        headers,
+        retry_after_secs,
+    })
+}
+
+/// [`send`], with the body bytes passed through `decode` (e.g. undoing a
+/// `Content-Encoding` the server applied unasked) before they become text
+/// (lossy UTF-8, as [`reqwest::Response::text`] reads a UTF-8 body). Logs
+/// exactly what [`send`] logs, the decoded body included.
+///
+/// # Errors
+/// [`StackError::Network`] on transport failure; whatever `decode` returns.
+pub(crate) async fn send_decoding(
+    builder: reqwest::RequestBuilder,
+    logger: Option<&dyn DebugLogger>,
+    decode: impl FnOnce(&reqwest::header::HeaderMap, Vec<u8>) -> Result<Vec<u8>, StackError>,
+) -> Result<HttpReply, StackError> {
+    let (client, request) = builder.build_split();
+    let request = request.map_err(|e| StackError::network(e.to_string()))?;
+    if let Some(logger) = logger {
+        logger.log(render_curl(&request));
+    }
+    let info = RequestInfo::of(&request);
+    let started = Instant::now();
+
+    let response = match client.execute(request).await {
+        Ok(response) => response,
+        Err(err) => return Err(transport_error(&info, started.elapsed(), err)),
+    };
+    let status = response.status();
+    let request_id = request_id(response.headers());
+    let retry_after_secs = retry_after_secs(response.headers());
+    let headers = response.headers().clone();
+    let raw = match response.bytes().await {
+        Ok(raw) => raw.to_vec(),
+        Err(err) => return Err(transport_error(&info, started.elapsed(), err)),
+    };
+    let body = String::from_utf8_lossy(&decode(&headers, raw)?).into_owned();
+
+    if let Some(logger) = logger {
+        logger.log(render_response(status, &body));
+    }
+    log_response(
+        &info,
+        status,
+        started.elapsed(),
+        request_id.as_deref(),
+        Some(&body),
+    );
+
+    Ok(HttpReply {
+        status,
+        body,
+        request: info,
+        headers,
         retry_after_secs,
     })
 }
@@ -177,6 +238,12 @@ impl Unbuffered {
 
     pub(crate) fn content_length(&self) -> Option<u64> {
         self.response.content_length()
+    }
+
+    /// The response headers (never logged here). Only the Apple ID session
+    /// needs them (`scnt`, `X-Apple-Id-Session-Id`, the hashcash headers).
+    pub(crate) fn headers(&self) -> &reqwest::header::HeaderMap {
+        self.response.headers()
     }
 
     /// The next body chunk, `None` at the end.
@@ -329,6 +396,52 @@ pub(crate) fn pretty_json(bytes: &[u8]) -> String {
         .unwrap_or_else(|| String::from_utf8_lossy(bytes).into_owned())
 }
 
+/// A [`DebugLogger`] decorator that replaces every `Bearer <token>` with
+/// `Bearer [redacted]` before forwarding, and changes nothing else (bodies,
+/// URLs and other headers stay verbatim). For auth paths whose token the core
+/// must never print, even to the opt-in debug sink: a host-supplied user
+/// access token.
+pub(crate) struct BearerRedactingLogger {
+    inner: Arc<dyn DebugLogger>,
+}
+
+impl BearerRedactingLogger {
+    pub(crate) fn new(inner: Arc<dyn DebugLogger>) -> Self {
+        Self { inner }
+    }
+}
+
+impl DebugLogger for BearerRedactingLogger {
+    fn log(&self, message: String) {
+        self.inner.log(redact_bearer(&message));
+    }
+}
+
+/// A [`DebugLogger`] decorator for an App Store Connect account that
+/// authorizes with an Apple ID web session: before forwarding, it redacts the
+/// session itself (cookie headers, the `DES…` trust cookie, the `csrf` /
+/// `csrf_ts` tokens and the sign-in headers; see
+/// [`crate::logging::redact::redact_session_secrets`]) and changes nothing
+/// else. The session's cookies never reach a rendered request anyway (the
+/// jar adds them below request building); this is the second line of defense,
+/// and the one that keeps the CSRF tokens out.
+pub(crate) struct SessionRedactingLogger {
+    inner: Arc<dyn DebugLogger>,
+}
+
+impl SessionRedactingLogger {
+    pub(crate) fn new(inner: Arc<dyn DebugLogger>) -> Self {
+        Self { inner }
+    }
+}
+
+impl DebugLogger for SessionRedactingLogger {
+    fn log(&self, message: String) {
+        self.inner
+            .log(crate::logging::redact::redact_session_secrets(&message));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -445,6 +558,35 @@ mod tests {
         assert!(curl.contains(" \\\n  -H 'x-custom: v'"));
         // A GET has no body → no `-d` line.
         assert!(!curl.contains("-d '"));
+    }
+
+    #[test]
+    fn bearer_redacting_logger_redacts_only_the_bearer_token() {
+        #[derive(Default)]
+        struct Sink(std::sync::Mutex<Vec<String>>);
+        impl DebugLogger for Sink {
+            fn log(&self, message: String) {
+                self.0.lock().unwrap().push(message);
+            }
+        }
+
+        let sink = Arc::new(Sink::default());
+        let logger = BearerRedactingLogger::new(sink.clone());
+        let req = reqwest::Client::new()
+            .get("https://api.example.test/v1/apps?limit=1")
+            .bearer_auth("ya29.user-token")
+            .header("x-custom", "v")
+            .build()
+            .unwrap();
+        logger.log(render_curl(&req));
+
+        let lines = sink.0.lock().unwrap().clone();
+        assert_eq!(lines.len(), 1);
+        assert!(!lines[0].contains("ya29.user-token"), "{}", lines[0]);
+        assert!(lines[0].contains("-H 'authorization: Bearer [redacted]'"));
+        // Everything else stays verbatim.
+        assert!(lines[0].contains("curl -X GET 'https://api.example.test/v1/apps?limit=1'"));
+        assert!(lines[0].contains("-H 'x-custom: v'"));
     }
 
     #[test]

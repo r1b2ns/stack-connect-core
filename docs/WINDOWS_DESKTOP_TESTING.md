@@ -12,8 +12,8 @@
   default). The generated Dart binding is a standalone package at
   `bindings/dart/stack_core_rust` (mirrors how the Swift binding lives under
   `bindings/swift`).
-- **`stack-connect`** (sibling repo, Flutter): the apps. `flutter/` is a Dart
-  pub **workspace** containing `apps/stack_mobile` (Android, Material 3),
+- **`stack-connect-flutter`** (sibling repo, Flutter): the apps. The repo root is
+  a Dart pub **workspace** containing `apps/stack_mobile` (Android, Material 3),
   `apps/stack_desktop` (**Windows**, fluent_ui), and the package
   `packages/stack_core_dart` (hand-written Riverpod controllers + host stores).
   `stack_core_dart` consumes the binding from this core repo via a `path`
@@ -52,24 +52,25 @@ generate/build them locally before the desktop app can run.
 ## 2. Repo layout
 
 Clone both repos **as siblings** (the binding path dependency and the build
-scripts assume `stack-connect-core` and `stack-connect` share a parent dir):
+scripts assume `stack-connect-core` and `stack-connect-flutter` share a parent dir):
 
 ```
 <parent>/
-  stack-connect-core/   # branch: master
-  stack-connect/        # branch: experiment/flutter   (the Flutter app lives in flutter/)
+  stack-connect-core/      # branch: master
+  stack-connect-flutter/   # branch: main   (the Flutter workspace is the repo root)
 ```
 
 ```powershell
 cd <parent>
 git clone <core-remote>    stack-connect-core
-git clone <flutter-remote> stack-connect
-git -C stack-connect-core checkout master
-git -C stack-connect       checkout experiment/flutter
+git clone <flutter-remote> stack-connect-flutter
+git -C stack-connect-core    checkout master
+git -C stack-connect-flutter checkout main
 ```
 
-The Flutter package’s path dep is relative:
-`stack_core_rust: { path: ../../../../stack-connect-core/bindings/dart/stack_core_rust }`
+The Flutter package’s path dep is relative
+(`packages/stack_core_dart/pubspec.yaml`):
+`stack_core_rust: { path: ../../../stack-connect-core/bindings/dart/stack_core_rust }`
 — the sibling layout makes it resolve.
 
 ## 3. Build steps (run in order, from `stack-connect-core/`)
@@ -123,7 +124,7 @@ cargo build --release -p stack_core --features frb --target x86_64-pc-windows-ms
 ### 3.3 Resolve Flutter deps
 
 ```powershell
-cd ..\stack-connect\flutter
+cd ..\stack-connect-flutter
 flutter pub get
 ```
 
@@ -134,9 +135,9 @@ next to `runner.exe`. This is the one runtime requirement.
 
 ### Option A — CMake install step (ALREADY WIRED — just verify)
 
-The app-level **`stack-connect/flutter/apps/stack_desktop/windows/CMakeLists.txt`**
+The app-level **`stack-connect-flutter/apps/stack_desktop/windows/CMakeLists.txt`**
 already has an `install(FILES "${STACK_CORE_DLL}" DESTINATION "${INSTALL_BUNDLE_LIB_DIR}" …)`
-block (added in the `experiment/flutter` branch) that copies the Rust DLL next to
+block that copies the Rust DLL next to
 the executable. It defaults `STACK_CORE_DLL` to the **sibling-repo** path
 `…/stack-connect-core/target/x86_64-pc-windows-msvc/release/stack_core.dll` and
 emits a configure-time **WARNING** if the DLL is missing.
@@ -166,7 +167,7 @@ copy ..\..\stack-connect-core\target\x86_64-pc-windows-msvc\release\stack_core.d
 
 Or set `DEST=` when building so the script copies it for you:
 ```bash
-DEST="../stack-connect/flutter/apps/stack_desktop/build/windows/x64/runner/Release" \
+DEST="../stack-connect-flutter/apps/stack_desktop/build/windows/x64/runner/Release" \
   ./build/build-desktop.sh windows
 ```
 (The `build/...` dir only exists after a first Flutter build, so build the app
@@ -175,7 +176,7 @@ once before relying on `DEST`.)
 ## 5. Run & test
 
 ```powershell
-cd stack-connect\flutter\apps\stack_desktop
+cd stack-connect-flutter\apps\stack_desktop
 flutter run -d windows
 ```
 
@@ -191,7 +192,7 @@ library path) — so it relies on the stem-based lookup, i.e. §4 must be done.
   To exercise it on Windows, change `_hostDylibPath` to the built DLL, e.g.
   `r'...\stack-connect-core\target\x86_64-pc-windows-msvc\release\stack_core.dll'`
   (or build the host debug lib and point at it). This file lives in the
-  `stack-connect` repo.
+  `stack-connect-flutter` repo.
 
 ## 6. Verification checklist
 
@@ -225,11 +226,11 @@ library path) — so it relies on the stem-based lookup, i.e. §4 must be done.
 
 | File | Role |
 | --- | --- |
-| `crates/stack_core/src/frb_api.rs` | the FRB facade (all 15 capabilities) |
+| `crates/stack_core/src/frb_api.rs` | the FRB facade (the 15 App Store Connect capability wrappers, Apple ID sign-in; Google Play only through `FrbReviews`) |
 | `bindings/dart/stack_core_rust/flutter_rust_bridge.yaml` | FRB codegen config |
 | `bindings/dart/stack_core_rust/lib/stack_core_rust.dart` | barrel re-exporting the binding |
 | `build/gen-dart.sh` | regenerate the Dart binding (+ ioDirectory workspace fix) |
 | `build/build-desktop.sh` | build the desktop cdylib (`stack_core.dll`) |
 | `justfile` | `just gen-dart`, `just build-desktop`, … |
-| `stack-connect/flutter/apps/stack_desktop/windows/**/CMakeLists.txt` | where §4 bundling goes |
-| `stack-connect/flutter/apps/stack_desktop/lib/bootstrap.dart` | calls `RustLib.init()` |
+| `stack-connect-flutter/apps/stack_desktop/windows/**/CMakeLists.txt` | where §4 bundling goes |
+| `stack-connect-flutter/apps/stack_desktop/lib/bootstrap.dart` | calls `RustLib.init()` |

@@ -42,6 +42,16 @@ pub enum StackError {
     /// Appended last: both bindings encode a variant by its position.
     #[error("release not found: {message}")]
     ReleaseNotFound { message: String },
+
+    /// The Apple ID web session of an account added with "Sign in with Apple
+    /// ID" is no longer accepted (App Store Connect answered HTTP 401, or
+    /// refused the session while selecting its team). Nothing was retried: the
+    /// core never holds the password, so the host must ask the user to sign in
+    /// again. Never raised for an API-key account.
+    ///
+    /// Appended last: both bindings encode a variant by its position.
+    #[error("session expired: {message}")]
+    SessionExpired { message: String },
 }
 
 impl StackError {
@@ -91,5 +101,24 @@ impl StackError {
         Self::ReleaseNotFound {
             message: message.into(),
         }
+    }
+
+    pub(crate) fn session_expired(message: impl Into<String>) -> Self {
+        Self::SessionExpired {
+            message: message.into(),
+        }
+    }
+}
+
+/// Turns an error a host callback threw that is not a [`StackError`] (or that
+/// UniFFI could not lift) into one. The only fallible host callback is
+/// [`crate::ports::AccessTokenProvider::access_token`], whose failures are
+/// authentication failures, hence [`StackError::Auth`].
+impl From<uniffi::UnexpectedUniFFICallbackError> for StackError {
+    fn from(err: uniffi::UnexpectedUniFFICallbackError) -> Self {
+        Self::auth(format!(
+            "the host's access token provider failed: {}",
+            err.reason
+        ))
     }
 }

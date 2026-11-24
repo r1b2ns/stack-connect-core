@@ -23,6 +23,7 @@
 mod client;
 mod edits;
 mod error;
+mod play_auth;
 mod provider;
 mod release_change;
 mod releases;
