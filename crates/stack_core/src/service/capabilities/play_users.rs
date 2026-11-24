@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 
+use crate::audit::{AuditBinding, AuditTarget};
 use crate::domain::{PlayGrantInfo, PlayUserInfo};
 use crate::error::StackError;
 
@@ -64,12 +65,23 @@ pub(crate) trait PlayUsersImpl: Send + Sync {
 #[derive(uniffi::Object)]
 pub struct PlayUsers {
     inner: Box<dyn PlayUsersImpl>,
+    /// The audit target the provider bound this handle to (see
+    /// [`crate::audit`]).
+    audit: AuditBinding,
 }
 
 impl PlayUsers {
     /// Wraps a concrete capability impl into the exported handle.
     pub(crate) fn new(inner: Box<dyn PlayUsersImpl>) -> Arc<Self> {
-        Arc::new(Self { inner })
+        Arc::new(Self {
+            inner,
+            audit: AuditBinding::default(),
+        })
+    }
+
+    /// Audits this handle's calls into `target` (no-op for `None`).
+    pub(crate) fn bind_audit(&self, target: Option<&AuditTarget>) {
+        self.audit.bind(target);
     }
 }
 
@@ -85,7 +97,12 @@ impl PlayUsers {
     /// permission, is kept), [`StackError::Decode`] on malformed JSON or
     /// endless paging, [`StackError::Network`] on transport failure.
     pub async fn fetch_users(&self, developer_id: String) -> Result<Vec<PlayUserInfo>, StackError> {
-        self.inner.fetch_users(developer_id).await
+        self.audit
+            .run(
+                "play_users.fetch_users",
+                self.inner.fetch_users(developer_id),
+            )
+            .await
     }
 
     /// Invites `email` to the developer account with `account_permissions`,
@@ -107,13 +124,16 @@ impl PlayUsers {
         grants: Vec<PlayGrantInfo>,
         expiration_time: Option<String>,
     ) -> Result<PlayUserInfo, StackError> {
-        self.inner
-            .invite_user(
-                developer_id,
-                email,
-                account_permissions,
-                grants,
-                expiration_time,
+        self.audit
+            .run(
+                "play_users.invite_user",
+                self.inner.invite_user(
+                    developer_id,
+                    email,
+                    account_permissions,
+                    grants,
+                    expiration_time,
+                ),
             )
             .await
     }
@@ -131,8 +151,12 @@ impl PlayUsers {
         account_permissions: Vec<String>,
         expiration_time: Option<String>,
     ) -> Result<PlayUserInfo, StackError> {
-        self.inner
-            .update_user(developer_id, email, account_permissions, expiration_time)
+        self.audit
+            .run(
+                "play_users.update_user",
+                self.inner
+                    .update_user(developer_id, email, account_permissions, expiration_time),
+            )
             .await
     }
 
@@ -141,7 +165,12 @@ impl PlayUsers {
     /// # Errors
     /// As [`Self::update_user`].
     pub async fn delete_user(&self, developer_id: String, email: String) -> Result<(), StackError> {
-        self.inner.delete_user(developer_id, email).await
+        self.audit
+            .run(
+                "play_users.delete_user",
+                self.inner.delete_user(developer_id, email),
+            )
+            .await
     }
 
     /// Sets the user's permissions for one app: updates the grant when it
@@ -156,8 +185,12 @@ impl PlayUsers {
         package_name: String,
         app_level_permissions: Vec<String>,
     ) -> Result<PlayGrantInfo, StackError> {
-        self.inner
-            .set_grant(developer_id, email, package_name, app_level_permissions)
+        self.audit
+            .run(
+                "play_users.set_grant",
+                self.inner
+                    .set_grant(developer_id, email, package_name, app_level_permissions),
+            )
             .await
     }
 
@@ -172,8 +205,11 @@ impl PlayUsers {
         email: String,
         package_name: String,
     ) -> Result<(), StackError> {
-        self.inner
-            .delete_grant(developer_id, email, package_name)
+        self.audit
+            .run(
+                "play_users.delete_grant",
+                self.inner.delete_grant(developer_id, email, package_name),
+            )
             .await
     }
 }

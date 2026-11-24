@@ -409,6 +409,18 @@ becomes a problem.
   wording names "the signed-in Google account" (`error::Principal`), and the debug
   trace redacts the `Authorization` header. App Store Connect answers `Unsupported`.
 
+- **Network audit (structured, host-stored). ✅ IN THE CORE.** New foreign trait
+  `NetworkAuditSink` (`record(NetworkAuditEntry)`, `capture_bodies()`), injected as the
+  optional trailing `audit_sink` (UniFFI default `None`, so existing hosts compile
+  unchanged) of `connect`, `connect_with_access_token`, `connect_with_apple_session` and
+  the `AppleIdSignIn` constructors. One raw entry per HTTP exchange from the
+  `http_debug` choke point (retries and transport failures included), with the
+  operation (`<handle>.<method>`, plus `google.oauth.token` and the Apple session's
+  team steps), provider, account and credential hints (JWT `exp`). A task-local
+  `audit::scope` carries the context, so no request path needed a new parameter;
+  `DebugLogger` and `CoreLogger` are unchanged. Not exposed through FRB yet. Reference:
+  [docs/NETWORK_AUDIT.md](docs/NETWORK_AUDIT.md).
+
 > **Out of scope (for now): Firebase.** It is **not** being migrated to the core at this
 > time — it remains implemented **natively in the iOS app** (`APIProviderFirebase`). If it
 > is ported later, it is just a `providers/firebase/` + registration reusing

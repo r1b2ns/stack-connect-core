@@ -688,7 +688,10 @@ async fn the_exported_sign_in_object_runs_the_flow_to_a_restorable_blob() {
     apple.mount_trust().await;
     apple.mount_olympus().await;
 
-    let object = crate::apple_id::AppleIdSignIn::from_flow(apple.sign_in());
+    // Audited, which must change nothing about the flow.
+    let sink = crate::audit::testing::RecordingSink::new(true);
+    let audit_sink: std::sync::Arc<dyn crate::ports::NetworkAuditSink> = sink.clone();
+    let object = crate::apple_id::AppleIdSignIn::from_flow(apple.sign_in(), Some(audit_sink));
     let step = object
         .start(vector::EMAIL.to_string(), vector::PASSWORD.to_string())
         .await
@@ -724,6 +727,25 @@ async fn the_exported_sign_in_object_runs_the_flow_to_a_restorable_blob() {
         !wire_text(&apple.requests().await).contains(vector::PASSWORD),
         "the password never goes on the wire"
     );
+
+    // One entry per request Apple saw, each tagged with the step that sent
+    // it, the web session provider and no account (none exists yet).
+    let entries = sink.entries();
+    assert_eq!(entries.len(), apple.requests().await.len());
+    let mut ops: Vec<&str> = entries.iter().map(|e| e.operation.as_str()).collect();
+    ops.dedup();
+    assert_eq!(ops, ["apple_id.start", "apple_id.submit_code"]);
+    assert!(entries.iter().all(|e| {
+        e.provider == crate::audit::NetworkAuditProvider::AppleWebSession
+            && e.account_id.is_none()
+            && e.attempt == 1
+    }));
+    // The password itself is never in an entry either (SRP sends a proof).
+    assert!(entries.iter().all(|e| !e
+        .request_body
+        .as_deref()
+        .unwrap_or("")
+        .contains(vector::PASSWORD)));
 }
 
 #[tokio::test]

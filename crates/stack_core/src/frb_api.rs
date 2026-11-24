@@ -230,7 +230,7 @@ pub fn connect_with_apple_session(
 #[flutter_rust_bridge::frb(sync)]
 pub fn apple_sign_in() -> Result<FrbAppleSignIn, StackError> {
     Ok(FrbAppleSignIn {
-        inner: AppleIdSignIn::new()?,
+        inner: AppleIdSignIn::new(None)?,
     })
 }
 
@@ -243,7 +243,7 @@ pub fn apple_sign_in() -> Result<FrbAppleSignIn, StackError> {
 #[flutter_rust_bridge::frb(sync)]
 pub fn apple_sign_in_with_saved_session(blob: Vec<u8>) -> Result<FrbAppleSignIn, StackError> {
     Ok(FrbAppleSignIn {
-        inner: AppleIdSignIn::with_saved_session(blob)?,
+        inner: AppleIdSignIn::with_saved_session(blob, None)?,
     })
 }
 

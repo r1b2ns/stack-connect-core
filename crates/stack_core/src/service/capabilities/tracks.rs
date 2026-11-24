@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 
+use crate::audit::{AuditBinding, AuditTarget};
 use crate::domain::{BundleInfo, CommitOptions, ReleaseChange, ReleaseSummaryInfo, TrackInfo};
 use crate::error::StackError;
 
@@ -47,12 +48,23 @@ pub(crate) trait TracksImpl: Send + Sync {
 #[derive(uniffi::Object)]
 pub struct Tracks {
     inner: Box<dyn TracksImpl>,
+    /// The audit target the provider bound this handle to (see
+    /// [`crate::audit`]).
+    audit: AuditBinding,
 }
 
 impl Tracks {
     /// Wraps a concrete capability impl into the exported handle.
     pub(crate) fn new(inner: Box<dyn TracksImpl>) -> Arc<Self> {
-        Arc::new(Self { inner })
+        Arc::new(Self {
+            inner,
+            audit: AuditBinding::default(),
+        })
+    }
+
+    /// Audits this handle's calls into `target` (no-op for `None`).
+    pub(crate) fn bind_audit(&self, target: Option<&AuditTarget>) {
+        self.audit.bind(target);
     }
 }
 
@@ -73,7 +85,9 @@ impl Tracks {
     /// [`StackError::Decode`] on malformed JSON, or [`StackError::Network`] on
     /// transport failure.
     pub async fn fetch_tracks(&self, app_id: String) -> Result<Vec<TrackInfo>, StackError> {
-        self.inner.fetch_tracks(app_id).await
+        self.audit
+            .run("tracks.fetch_tracks", self.inner.fetch_tracks(app_id))
+            .await
     }
 
     /// Lists the summaries of the releases on `track` of `app_id` (for Google
@@ -99,7 +113,12 @@ impl Tracks {
         app_id: String,
         track: String,
     ) -> Result<Vec<ReleaseSummaryInfo>, StackError> {
-        self.inner.fetch_release_summaries(app_id, track).await
+        self.audit
+            .run(
+                "tracks.fetch_release_summaries",
+                self.inner.fetch_release_summaries(app_id, track),
+            )
+            .await
     }
 
     /// Lists the app bundles uploaded to `app_id` (for Google Play,
@@ -113,7 +132,9 @@ impl Tracks {
     /// # Errors
     /// As [`Self::fetch_tracks`].
     pub async fn fetch_bundles(&self, app_id: String) -> Result<Vec<BundleInfo>, StackError> {
-        self.inner.fetch_bundles(app_id).await
+        self.audit
+            .run("tracks.fetch_bundles", self.inner.fetch_bundles(app_id))
+            .await
     }
 
     /// Applies `change` to the release track `track` of `app_id` and
@@ -152,8 +173,12 @@ impl Tracks {
         change: ReleaseChange,
         options: CommitOptions,
     ) -> Result<TrackInfo, StackError> {
-        self.inner
-            .apply_release_change(app_id, track, change, options)
+        self.audit
+            .run(
+                "tracks.apply_release_change",
+                self.inner
+                    .apply_release_change(app_id, track, change, options),
+            )
             .await
     }
 }

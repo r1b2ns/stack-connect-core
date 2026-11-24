@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 
+use crate::audit::{AuditBinding, AuditTarget};
 use crate::domain::AppInfo;
 use crate::error::StackError;
 use crate::service::capabilities::accessibility_declarations::AccessibilityDeclarations;
@@ -228,12 +229,33 @@ pub(crate) trait ProviderImpl: Send + Sync {
 #[derive(uniffi::Object)]
 pub struct Provider {
     inner: Box<dyn ProviderImpl>,
+    /// Where this provider's HTTP exchanges are audited; bound onto every
+    /// capability handle it hands out.
+    audit: AuditBinding,
 }
 
 impl Provider {
-    /// Wraps a concrete plugin built by the registry into the exported handle.
+    /// Wraps a concrete plugin built by the registry into the exported handle,
+    /// unaudited (the FRB facade and tests; the UniFFI facade uses
+    /// [`Self::audited`]).
+    #[cfg(any(test, feature = "frb"))]
     pub(crate) fn new(inner: Box<dyn ProviderImpl>) -> Arc<Self> {
-        Arc::new(Self { inner })
+        Self::audited(inner, None)
+    }
+
+    /// [`Self::new`], auditing every call of the provider and of the
+    /// capability handles it returns into `target` (none for `None`).
+    pub(crate) fn audited(inner: Box<dyn ProviderImpl>, target: Option<AuditTarget>) -> Arc<Self> {
+        Arc::new(Self {
+            inner,
+            audit: AuditBinding::new(target),
+        })
+    }
+
+    /// The audit target, for objects built over this provider (the sync
+    /// service).
+    pub(crate) fn audit_target(&self) -> Option<&AuditTarget> {
+        self.audit.target()
     }
 }
 
@@ -253,7 +275,9 @@ impl Provider {
     /// expose [`Capability::Reviews`]. This is the discovery mechanism: the host
     /// calls `provider.reviews()` and gets `None` when reviews are unsupported.
     pub fn reviews(&self) -> Option<Arc<Reviews>> {
-        self.inner.reviews()
+        self.inner
+            .reviews()
+            .inspect(|handle| handle.bind_audit(self.audit.target()))
     }
 
     /// The App Store Versions capability handle, or `None` when this provider does
@@ -261,14 +285,18 @@ impl Provider {
     /// mechanism: the host calls `provider.app_store_versions()` and gets `None`
     /// when versions are unsupported.
     pub fn app_store_versions(&self) -> Option<Arc<AppStoreVersions>> {
-        self.inner.app_store_versions()
+        self.inner
+            .app_store_versions()
+            .inspect(|handle| handle.bind_audit(self.audit.target()))
     }
 
     /// The Builds capability handle, or `None` when this provider does not expose
     /// [`Capability::Builds`]. This is the discovery mechanism: the host calls
     /// `provider.builds()` and gets `None` when builds are unsupported.
     pub fn builds(&self) -> Option<Arc<Builds>> {
-        self.inner.builds()
+        self.inner
+            .builds()
+            .inspect(|handle| handle.bind_audit(self.audit.target()))
     }
 
     /// The Beta Groups capability handle, or `None` when this provider does not
@@ -276,7 +304,9 @@ impl Provider {
     /// host calls `provider.beta_groups()` and gets `None` when beta groups are
     /// unsupported.
     pub fn beta_groups(&self) -> Option<Arc<BetaGroups>> {
-        self.inner.beta_groups()
+        self.inner
+            .beta_groups()
+            .inspect(|handle| handle.bind_audit(self.audit.target()))
     }
 
     /// The Beta Build Localizations capability handle, or `None` when this
@@ -285,7 +315,9 @@ impl Provider {
     /// `provider.beta_build_localizations()` and gets `None` when beta build
     /// localizations are unsupported.
     pub fn beta_build_localizations(&self) -> Option<Arc<BetaBuildLocalizations>> {
-        self.inner.beta_build_localizations()
+        self.inner
+            .beta_build_localizations()
+            .inspect(|handle| handle.bind_audit(self.audit.target()))
     }
 
     /// The Beta App Localizations capability handle, or `None` when this provider
@@ -293,7 +325,9 @@ impl Provider {
     /// mechanism: the host calls `provider.beta_app_localizations()` and gets
     /// `None` when beta app localizations are unsupported.
     pub fn beta_app_localizations(&self) -> Option<Arc<BetaAppLocalizations>> {
-        self.inner.beta_app_localizations()
+        self.inner
+            .beta_app_localizations()
+            .inspect(|handle| handle.bind_audit(self.audit.target()))
     }
 
     /// The Beta App Review Detail capability handle, or `None` when this provider
@@ -301,7 +335,9 @@ impl Provider {
     /// mechanism: the host calls `provider.beta_app_review_detail()` and gets
     /// `None` when the beta app review detail is unsupported.
     pub fn beta_app_review_detail(&self) -> Option<Arc<BetaAppReviewDetail>> {
-        self.inner.beta_app_review_detail()
+        self.inner
+            .beta_app_review_detail()
+            .inspect(|handle| handle.bind_audit(self.audit.target()))
     }
 
     /// The App Metadata capability handle, or `None` when this provider does not
@@ -309,7 +345,9 @@ impl Provider {
     /// host calls `provider.app_metadata()` and gets `None` when app metadata is
     /// unsupported.
     pub fn app_metadata(&self) -> Option<Arc<AppMetadata>> {
-        self.inner.app_metadata()
+        self.inner
+            .app_metadata()
+            .inspect(|handle| handle.bind_audit(self.audit.target()))
     }
 
     /// The Accessibility Declarations capability handle, or `None` when this
@@ -318,14 +356,18 @@ impl Provider {
     /// `provider.accessibility_declarations()` and gets `None` when accessibility
     /// declarations are unsupported.
     pub fn accessibility_declarations(&self) -> Option<Arc<AccessibilityDeclarations>> {
-        self.inner.accessibility_declarations()
+        self.inner
+            .accessibility_declarations()
+            .inspect(|handle| handle.bind_audit(self.audit.target()))
     }
 
     /// The Users capability handle, or `None` when this provider does not expose
     /// [`Capability::Users`]. This is the discovery mechanism: the host calls
     /// `provider.users()` and gets `None` when user management is unsupported.
     pub fn users(&self) -> Option<Arc<Users>> {
-        self.inner.users()
+        self.inner
+            .users()
+            .inspect(|handle| handle.bind_audit(self.audit.target()))
     }
 
     /// The Devices capability handle, or `None` when this provider does not
@@ -333,7 +375,9 @@ impl Provider {
     /// calls `provider.devices()` and gets `None` when device management is
     /// unsupported.
     pub fn devices(&self) -> Option<Arc<Devices>> {
-        self.inner.devices()
+        self.inner
+            .devices()
+            .inspect(|handle| handle.bind_audit(self.audit.target()))
     }
 
     /// The BundleIds capability handle, or `None` when this provider does not
@@ -341,7 +385,9 @@ impl Provider {
     /// calls `provider.bundle_ids()` and gets `None` when bundle ID management is
     /// unsupported.
     pub fn bundle_ids(&self) -> Option<Arc<BundleIds>> {
-        self.inner.bundle_ids()
+        self.inner
+            .bundle_ids()
+            .inspect(|handle| handle.bind_audit(self.audit.target()))
     }
 
     /// The Certificates capability handle, or `None` when this provider does not
@@ -349,7 +395,9 @@ impl Provider {
     /// host calls `provider.certificates()` and gets `None` when certificate
     /// management is unsupported.
     pub fn certificates(&self) -> Option<Arc<Certificates>> {
-        self.inner.certificates()
+        self.inner
+            .certificates()
+            .inspect(|handle| handle.bind_audit(self.audit.target()))
     }
 
     /// The Profiles capability handle, or `None` when this provider does not
@@ -357,7 +405,9 @@ impl Provider {
     /// calls `provider.profiles()` and gets `None` when provisioning profile
     /// management is unsupported.
     pub fn profiles(&self) -> Option<Arc<Profiles>> {
-        self.inner.profiles()
+        self.inner
+            .profiles()
+            .inspect(|handle| handle.bind_audit(self.audit.target()))
     }
 
     /// The Analytics capability handle, or `None` when this provider does not
@@ -365,7 +415,9 @@ impl Provider {
     /// calls `provider.analytics()` and gets `None` when analytics reports are
     /// unsupported.
     pub fn analytics(&self) -> Option<Arc<Analytics>> {
-        self.inner.analytics()
+        self.inner
+            .analytics()
+            .inspect(|handle| handle.bind_audit(self.audit.target()))
     }
 
     /// The App Details capability handle, or `None` when this provider does not
@@ -373,7 +425,9 @@ impl Provider {
     /// host calls `provider.app_details()` and gets `None` when app details are
     /// unsupported.
     pub fn app_details(&self) -> Option<Arc<AppDetails>> {
-        self.inner.app_details()
+        self.inner
+            .app_details()
+            .inspect(|handle| handle.bind_audit(self.audit.target()))
     }
 
     /// The Store Listings capability handle, or `None` when this provider does
@@ -381,7 +435,9 @@ impl Provider {
     /// mechanism: the host calls `provider.store_listings()` and gets `None`
     /// when store listings are unsupported.
     pub fn store_listings(&self) -> Option<Arc<StoreListings>> {
-        self.inner.store_listings()
+        self.inner
+            .store_listings()
+            .inspect(|handle| handle.bind_audit(self.audit.target()))
     }
 
     /// The Tracks capability handle, or `None` when this provider does not
@@ -389,7 +445,9 @@ impl Provider {
     /// calls `provider.tracks()` and gets `None` when release tracks are
     /// unsupported.
     pub fn tracks(&self) -> Option<Arc<Tracks>> {
-        self.inner.tracks()
+        self.inner
+            .tracks()
+            .inspect(|handle| handle.bind_audit(self.audit.target()))
     }
 
     /// The App Icons capability handle, or `None` when this provider does not
@@ -397,7 +455,9 @@ impl Provider {
     /// host calls `provider.app_icons()` and gets `None` when app icons are
     /// unsupported.
     pub fn app_icons(&self) -> Option<Arc<AppIcons>> {
-        self.inner.app_icons()
+        self.inner
+            .app_icons()
+            .inspect(|handle| handle.bind_audit(self.audit.target()))
     }
 
     /// The Play Users capability handle, or `None` when this provider does not
@@ -405,7 +465,9 @@ impl Provider {
     /// host calls `provider.play_users()` and gets `None` when Google Play user
     /// management is unsupported.
     pub fn play_users(&self) -> Option<Arc<PlayUsers>> {
-        self.inner.play_users()
+        self.inner
+            .play_users()
+            .inspect(|handle| handle.bind_audit(self.audit.target()))
     }
 }
 
@@ -421,7 +483,9 @@ impl Provider {
     /// [`StackError::Auth`] when the credentials are rejected (including App Store
     /// Connect "pending agreements"), or a transport/decoding error.
     pub async fn validate(&self) -> Result<(), StackError> {
-        self.inner.validate().await
+        self.audit
+            .run("provider.validate", self.inner.validate())
+            .await
     }
 
     /// Lists the apps visible to the connected account.
@@ -430,6 +494,8 @@ impl Provider {
     /// [`StackError::Unsupported`] if the provider lacks [`Capability::Apps`];
     /// otherwise a transport, HTTP, or decoding error.
     pub async fn fetch_apps(&self) -> Result<Vec<AppInfo>, StackError> {
-        self.inner.fetch_apps().await
+        self.audit
+            .run("provider.fetch_apps", self.inner.fetch_apps())
+            .await
     }
 }

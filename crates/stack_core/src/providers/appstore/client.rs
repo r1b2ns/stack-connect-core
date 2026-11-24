@@ -11,6 +11,7 @@ use super::auth::{
     ApiKeyOnly, AppStoreAuth, Authorize, PortalCall, RequestAuth, SessionAuth, SessionHost,
     API_KEY_BASE_URL,
 };
+use crate::audit::{self, NetworkAuditCredentialKind};
 use crate::auth::apple_session::transport::decode_session_body;
 use crate::auth::es256::AppStoreAuthenticator;
 use crate::domain::{
@@ -6087,8 +6088,13 @@ impl AppStoreClient {
             builder = builder.header(&header.name, &header.value);
         }
 
-        // The opt-in trace already has its one redacted line above.
-        let sent = send_unbuffered(builder, |_| {}).await?;
+        // The opt-in trace already has its one redacted line above. A
+        // pre-signed URL carries no credential of the account.
+        let sent = audit::scope::credential(
+            NetworkAuditCredentialKind::Unauthenticated,
+            send_unbuffered(builder, |_| {}),
+        )
+        .await?;
         let status = sent.status();
         let body = sent.text().await?;
 
@@ -7817,7 +7823,11 @@ impl AppStoreClient {
 
         // Pre-signed URL: deliberately NO `bearer_auth`. The host log line
         // carries the path only, never the signed query.
-        let mut response = send_unbuffered(self.presigned_http.get(url), |_| {}).await?;
+        let mut response = audit::scope::credential(
+            NetworkAuditCredentialKind::Unauthenticated,
+            send_unbuffered(self.presigned_http.get(url), |_| {}),
+        )
+        .await?;
         let status = response.status();
 
         if let Some(logger) = &self.debug_logger {
@@ -17371,6 +17381,132 @@ mod tests {
             for secret in [SESSION_COOKIE, CSRF, CSRF_TS, "HSARM-trust-secret"] {
                 assert!(!everything.contains(secret), "{secret} leaked");
             }
+        }
+    }
+
+    /// The network audit of App Store Connect requests: the API key's JWT
+    /// bearer and its expiry, the web session's cookie credential and
+    /// headers, and a pre-signed upload's missing credential.
+    mod audit_hints {
+        use super::*;
+        use crate::audit::scope::operation;
+        use crate::audit::testing::RecordingSink;
+        use crate::audit::{
+            NetworkAuditBodyState, NetworkAuditCredentialKind as Cred, NetworkAuditProvider as Prov,
+        };
+        use wiremock::matchers::header;
+
+        #[tokio::test]
+        async fn an_api_key_request_carries_its_jwt_and_expiry() {
+            let server = MockServer::start().await;
+            Mock::given(method("GET"))
+                .and(path("/v1/apps"))
+                .respond_with(ResponseTemplate::new(200).set_body_string(r#"{"data":[]}"#))
+                .mount(&server)
+                .await;
+            let sink = RecordingSink::new(true);
+            let target = sink.target(Some("asc-1"), Prov::AppleApi);
+            let client = api_key_client(server.uri());
+            operation(Some(&target), "provider.validate", client.validate())
+                .await
+                .unwrap();
+
+            let entries = sink.entries();
+            assert_eq!(entries.len(), 1);
+            let e = &entries[0];
+            assert_eq!(e.credential_kind, Cred::AscJwt);
+            let bearer = e
+                .request_headers
+                .iter()
+                .find(|h| h.name == "authorization")
+                .map(|h| h.value.clone())
+                .unwrap();
+            let token = bearer.strip_prefix("Bearer ").unwrap();
+            // The hint is the token's own `exp`, which App Store Connect caps
+            // at 20 minutes from signing.
+            let exp = e.token_expires_at_ms.unwrap();
+            assert_eq!(Some(exp), crate::audit::credential::jwt_exp_ms(token));
+            let ahead = exp - e.started_at_ms;
+            assert!((0..=20 * 60 * 1000 + 5_000).contains(&ahead), "{ahead}");
+            assert_eq!(e.url, format!("{}/v1/apps?limit=1", server.uri()));
+        }
+
+        #[tokio::test]
+        async fn a_web_session_request_is_a_session_cookie_credential_with_its_headers() {
+            let server = MockServer::start().await;
+            Mock::given(method("GET"))
+                .and(path("/v1/apps"))
+                .and(header("x-csrf-itc", "[asc-ui]"))
+                .respond_with(
+                    ResponseTemplate::new(200)
+                        .insert_header("Set-Cookie", "myacinfo=refreshed; Path=/")
+                        .set_body_string(r#"{"data":[],"links":{}}"#),
+                )
+                .mount(&server)
+                .await;
+            let sink = RecordingSink::new(true);
+            let target = sink.target(Some("asc-web"), Prov::AppleWebSession);
+            let client =
+                session_mode::client_on(&server.uri(), Some(session_mode::TEAM), noop_store());
+            operation(Some(&target), "provider.fetch_apps", client.fetch_apps())
+                .await
+                .unwrap();
+
+            let e = &sink.entries()[0];
+            assert_eq!(e.provider, Prov::AppleWebSession);
+            assert_eq!(e.credential_kind, Cred::AppleSessionCookie);
+            assert_eq!(e.token_expires_at_ms, None);
+            assert!(e
+                .request_headers
+                .iter()
+                .any(|h| h.name == "x-csrf-itc" && h.value == "[asc-ui]"));
+            // The jar adds its cookie below request building: not in the
+            // entry's request headers. The refreshed one is in the response.
+            assert!(!e.request_headers.iter().any(|h| h.name == "cookie"));
+            assert!(e
+                .response_headers
+                .iter()
+                .any(|h| h.name == "set-cookie" && h.value.starts_with("myacinfo=refreshed")));
+        }
+
+        #[tokio::test]
+        async fn a_pre_signed_upload_carries_no_credential_even_with_a_session() {
+            let server = MockServer::start().await;
+            Mock::given(method("PUT"))
+                .and(path("/upload"))
+                .respond_with(ResponseTemplate::new(200))
+                .expect(1)
+                .mount(&server)
+                .await;
+            let sink = RecordingSink::new(true);
+            let target = sink.target(Some("asc-web"), Prov::AppleWebSession);
+            let client =
+                session_mode::client_on(&server.uri(), Some(session_mode::TEAM), noop_store());
+            let op = UploadOperation {
+                method: "PUT".into(),
+                url: format!("{}/upload?X-Amz-Signature=sig", server.uri()),
+                length: 4,
+                offset: 0,
+                request_headers: vec![HttpHeader {
+                    name: "Content-Type".into(),
+                    value: "image/png".into(),
+                }],
+            };
+            operation(
+                Some(&target),
+                "app_metadata.upload_screenshot",
+                client.send_upload(&op, &[0x89, b'P', b'N', b'G']),
+            )
+            .await
+            .unwrap();
+
+            let e = &sink.entries()[0];
+            assert_eq!(e.operation, "app_metadata.upload_screenshot");
+            assert_eq!(e.credential_kind, Cred::Unauthenticated);
+            assert_eq!(e.url, op.url);
+            assert_eq!(e.request_body_state, NetworkAuditBodyState::Binary);
+            assert_eq!(e.request_size_bytes, 4);
+            assert_eq!(e.response_body_state, NetworkAuditBodyState::Empty);
         }
     }
 }

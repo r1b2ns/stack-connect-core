@@ -216,6 +216,23 @@ are masked (`d***@agency.example`). This is separate from `connect`'s opt-in
 `DebugLogger`, which prints unredacted cURLs for debugging. Full reference, examples
 and the redaction rules: [docs/LOGGING.md](docs/LOGGING.md).
 
+## Network audit
+
+For an on-device audit of everything the app sends and receives, the host can pass a
+`NetworkAuditSink` foreign trait (`record(entry)`, `capture_bodies()`) as the optional
+trailing `audit_sink` argument of `connect`, `connect_with_access_token`,
+`connect_with_apple_session` and the `AppleIdSignIn` constructors (Swift:
+`auditSink:`, default `nil`). The core then hands it one structured, **raw**
+`NetworkAuditEntry` per HTTP exchange (each retry attempt and each transport failure
+included): method, full URL, ordered request and response headers (`Set-Cookie`
+included), bodies (decompressed text; binary, oversized or disabled bodies are omitted
+with a state and their size), status, timing, HTTP version, the `operation` that caused
+the call (`reviews.fetch_customer_reviews`, `google.oauth.token`, …), the `provider`,
+the `account_id`, and a credential hint with a JWT's `exp`. The host encrypts entries
+and masks secrets itself; the core logs none of it. Without a sink nothing is captured.
+The Flutter binding does not expose it. Entry fields, body states, credential hints and
+the full list of operation names: [docs/NETWORK_AUDIT.md](docs/NETWORK_AUDIT.md).
+
 ## Layout
 
 ```
@@ -230,11 +247,12 @@ crates/stack_core/                    # the core crate
     apple_id.rs                       # AppleIdSignIn: the exported sign-in object
     crypto.rs                         # .scexport account-export crypto (AES-GCM, v1/v2/v3)
     http_debug.rs                     # shared HTTP send + debug tracing (runnable cURL; capped, body-less variant for HTML pages)
+    audit/                            # network audit (NetworkAuditSink): task-local scope, entry recorder, credential hints
     logging/                          # host log sink (CoreLogger): levels, targets, redaction, HTTP line formats
     domain.rs                         # uniffi::Record value types (AppInfo, ...)
     error.rs                          # StackError (uniffi::Error)
     ports.rs                          # foreign traits: CredentialStore, BlobStore, DebugLogger, CoreLogger,
-                                      #   AccessTokenProvider, SessionStore
+                                      #   AccessTokenProvider, SessionStore, NetworkAuditSink
     facade.rs                         # available_services / credential_schema / connect / connect_with_access_token /
                                       #   connect_with_apple_session / make_sync_service / set_core_logger
     service/
@@ -277,7 +295,7 @@ Rust toolchain **1.96.0** (pinned in `rust-toolchain.toml`). Recipes via [`just`
 
 ```bash
 just                       # list recipes
-just test                  # cargo test -p stack_core (818 lib + 16 facade tests)
+just test                  # cargo test -p stack_core (843 lib + 16 facade tests)
 just test-session-mode     # App Store Connect client tests on an Apple ID web session
 just build-xcframework     # Swift bindings + xcframework (macOS)
 just gen-dart              # Dart FRB bindings into bindings/dart (regenerates frb_generated.rs)

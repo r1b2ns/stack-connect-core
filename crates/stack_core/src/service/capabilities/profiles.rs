@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 
+use crate::audit::{AuditBinding, AuditTarget};
 use crate::domain::ProvisioningProfileInfo;
 use crate::error::StackError;
 
@@ -51,12 +52,23 @@ pub(crate) trait ProfilesImpl: Send + Sync {
 #[derive(uniffi::Object)]
 pub struct Profiles {
     inner: Box<dyn ProfilesImpl>,
+    /// The audit target the provider bound this handle to (see
+    /// [`crate::audit`]).
+    audit: AuditBinding,
 }
 
 impl Profiles {
     /// Wraps a concrete capability impl into the exported handle.
     pub(crate) fn new(inner: Box<dyn ProfilesImpl>) -> Arc<Self> {
-        Arc::new(Self { inner })
+        Arc::new(Self {
+            inner,
+            audit: AuditBinding::default(),
+        })
+    }
+
+    /// Audits this handle's calls into `target` (no-op for `None`).
+    pub(crate) fn bind_audit(&self, target: Option<&AuditTarget>) {
+        self.audit.bind(target);
     }
 }
 
@@ -75,7 +87,9 @@ impl Profiles {
     /// [`StackError::Decode`] on malformed JSON, or [`StackError::Network`] on
     /// transport failure.
     pub async fn fetch_profiles(&self) -> Result<Vec<ProvisioningProfileInfo>, StackError> {
-        self.inner.fetch_profiles().await
+        self.audit
+            .run("profiles.fetch_profiles", self.inner.fetch_profiles())
+            .await
     }
 
     /// Creates a provisioning profile named `name` of `profile_type` (a raw ASC
@@ -102,13 +116,16 @@ impl Profiles {
         certificate_ids: Vec<String>,
         device_ids: Vec<String>,
     ) -> Result<ProvisioningProfileInfo, StackError> {
-        self.inner
-            .create_profile(
-                name,
-                profile_type,
-                bundle_id_id,
-                certificate_ids,
-                device_ids,
+        self.audit
+            .run(
+                "profiles.create_profile",
+                self.inner.create_profile(
+                    name,
+                    profile_type,
+                    bundle_id_id,
+                    certificate_ids,
+                    device_ids,
+                ),
             )
             .await
     }
@@ -120,7 +137,9 @@ impl Profiles {
     /// agreements, [`StackError::Http`] on any other non-2xx response, or
     /// [`StackError::Network`] on transport failure.
     pub async fn delete_profile(&self, id: String) -> Result<(), StackError> {
-        self.inner.delete_profile(id).await
+        self.audit
+            .run("profiles.delete_profile", self.inner.delete_profile(id))
+            .await
     }
 
     /// Fetches the base64-encoded `profileContent` of the profile `id`, returning
@@ -132,6 +151,11 @@ impl Profiles {
     /// [`StackError::Decode`] on malformed JSON, or [`StackError::Network`] on
     /// transport failure.
     pub async fn fetch_profile_content(&self, id: String) -> Result<Option<String>, StackError> {
-        self.inner.fetch_profile_content(id).await
+        self.audit
+            .run(
+                "profiles.fetch_profile_content",
+                self.inner.fetch_profile_content(id),
+            )
+            .await
     }
 }

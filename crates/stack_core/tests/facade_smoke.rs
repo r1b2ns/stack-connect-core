@@ -54,7 +54,13 @@ fn connect_errors_and_queries_store_in_order() {
     let recording = Arc::new(EmptyStore::new());
     let store: Arc<dyn CredentialStore> = recording.clone();
 
-    let result = connect(ServiceKind::AppStoreConnect, "acct-1".into(), store, None);
+    let result = connect(
+        ServiceKind::AppStoreConnect,
+        "acct-1".into(),
+        store,
+        None,
+        None,
+    );
     assert!(matches!(result, Err(StackError::InvalidCredentials { .. })));
 
     let calls = recording.calls.lock().unwrap();
@@ -104,7 +110,7 @@ fn connect_play(private_key: &str) -> Result<Arc<Provider>, StackError> {
         ("privateKeyId", PLAY_KID),
         ("privateKey", private_key),
     ]);
-    connect(ServiceKind::GooglePlay, "acct-1".into(), store, None)
+    connect(ServiceKind::GooglePlay, "acct-1".into(), store, None, None)
 }
 
 #[test]
@@ -124,7 +130,7 @@ fn connect_google_play_queries_client_email_first() {
     let recording = Arc::new(EmptyStore::new());
     let store: Arc<dyn CredentialStore> = recording.clone();
 
-    let result = connect(ServiceKind::GooglePlay, "acct-1".into(), store, None);
+    let result = connect(ServiceKind::GooglePlay, "acct-1".into(), store, None, None);
     assert!(matches!(result, Err(StackError::InvalidCredentials { .. })));
 
     // Fails fast on the first missing key: exactly one lookup.
@@ -293,7 +299,13 @@ impl AccessTokenProvider for FailingTokens {
 }
 
 fn connect_play_with_tokens(tokens: Arc<FailingTokens>) -> Arc<Provider> {
-    match connect_with_access_token(ServiceKind::GooglePlay, "login-1".into(), tokens, None) {
+    match connect_with_access_token(
+        ServiceKind::GooglePlay,
+        "login-1".into(),
+        tokens,
+        None,
+        None,
+    ) {
         Ok(provider) => provider,
         Err(err) => panic!("expected a Google Play provider, got {err:?}"),
     }
@@ -356,12 +368,13 @@ fn connect_with_access_token_rejects_app_store_connect_and_blank_ids() {
             ServiceKind::AppStoreConnect,
             "acct-1".into(),
             tokens(),
+            None,
             None
         ),
         Err(StackError::Unsupported { .. })
     ));
     assert!(matches!(
-        connect_with_access_token(ServiceKind::GooglePlay, " ".into(), tokens(), None),
+        connect_with_access_token(ServiceKind::GooglePlay, " ".into(), tokens(), None, None),
         Err(StackError::InvalidCredentials { .. })
     ));
 }
@@ -378,7 +391,8 @@ impl SessionStore for OneSession {
 
 #[test]
 fn connect_with_apple_session_needs_a_saved_session_the_core_wrote() {
-    let missing = connect_with_apple_session("acct".into(), 1, Arc::new(OneSession(None)), None);
+    let missing =
+        connect_with_apple_session("acct".into(), 1, Arc::new(OneSession(None)), None, None);
     assert!(matches!(
         missing,
         Err(StackError::InvalidCredentials { .. })
@@ -388,13 +402,14 @@ fn connect_with_apple_session_needs_a_saved_session_the_core_wrote() {
         1,
         Arc::new(OneSession(Some(b"{}".to_vec()))),
         None,
+        None,
     );
     assert!(matches!(foreign, Err(StackError::Decode { .. })));
 }
 
 #[tokio::test]
 async fn apple_id_sign_in_is_constructible_offline_and_not_finished() {
-    let sign_in = AppleIdSignIn::new().unwrap();
+    let sign_in = AppleIdSignIn::new(None).unwrap();
     assert!(sign_in.teams().await.is_empty());
     assert!(matches!(
         sign_in.finish().await,

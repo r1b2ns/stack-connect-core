@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 
+use crate::audit::{AuditBinding, AuditTarget};
 use crate::domain::{BundleIdCapabilityInfo, BundleIdInfo};
 use crate::error::StackError;
 
@@ -59,12 +60,23 @@ pub(crate) trait BundleIdsImpl: Send + Sync {
 #[derive(uniffi::Object)]
 pub struct BundleIds {
     inner: Box<dyn BundleIdsImpl>,
+    /// The audit target the provider bound this handle to (see
+    /// [`crate::audit`]).
+    audit: AuditBinding,
 }
 
 impl BundleIds {
     /// Wraps a concrete capability impl into the exported handle.
     pub(crate) fn new(inner: Box<dyn BundleIdsImpl>) -> Arc<Self> {
-        Arc::new(Self { inner })
+        Arc::new(Self {
+            inner,
+            audit: AuditBinding::default(),
+        })
+    }
+
+    /// Audits this handle's calls into `target` (no-op for `None`).
+    pub(crate) fn bind_audit(&self, target: Option<&AuditTarget>) {
+        self.audit.bind(target);
     }
 }
 
@@ -79,7 +91,9 @@ impl BundleIds {
     /// [`StackError::Decode`] on malformed JSON, or [`StackError::Network`] on
     /// transport failure.
     pub async fn fetch_bundle_ids(&self) -> Result<Vec<BundleIdInfo>, StackError> {
-        self.inner.fetch_bundle_ids().await
+        self.audit
+            .run("bundle_ids.fetch_bundle_ids", self.inner.fetch_bundle_ids())
+            .await
     }
 
     /// Registers a new bundle ID with `identifier`, `name`, and ASC `platform` (a
@@ -98,8 +112,11 @@ impl BundleIds {
         name: String,
         platform: String,
     ) -> Result<BundleIdInfo, StackError> {
-        self.inner
-            .create_bundle_id(identifier, name, platform)
+        self.audit
+            .run(
+                "bundle_ids.create_bundle_id",
+                self.inner.create_bundle_id(identifier, name, platform),
+            )
             .await
     }
 
@@ -112,7 +129,12 @@ impl BundleIds {
     /// agreements, [`StackError::Http`] on any other non-2xx response, or
     /// [`StackError::Network`] on transport failure.
     pub async fn update_bundle_id(&self, id: String, name: String) -> Result<(), StackError> {
-        self.inner.update_bundle_id(id, name).await
+        self.audit
+            .run(
+                "bundle_ids.update_bundle_id",
+                self.inner.update_bundle_id(id, name),
+            )
+            .await
     }
 
     /// Deletes the bundle ID `id`. Any 2xx → `Ok(())`.
@@ -122,7 +144,12 @@ impl BundleIds {
     /// agreements, [`StackError::Http`] on any other non-2xx response, or
     /// [`StackError::Network`] on transport failure.
     pub async fn delete_bundle_id(&self, id: String) -> Result<(), StackError> {
-        self.inner.delete_bundle_id(id).await
+        self.audit
+            .run(
+                "bundle_ids.delete_bundle_id",
+                self.inner.delete_bundle_id(id),
+            )
+            .await
     }
 
     /// Lists the capabilities enabled on `bundle_id`, following pagination until
@@ -137,7 +164,12 @@ impl BundleIds {
         &self,
         bundle_id: String,
     ) -> Result<Vec<BundleIdCapabilityInfo>, StackError> {
-        self.inner.fetch_bundle_id_capabilities(bundle_id).await
+        self.audit
+            .run(
+                "bundle_ids.fetch_bundle_id_capabilities",
+                self.inner.fetch_bundle_id_capabilities(bundle_id),
+            )
+            .await
     }
 
     /// Enables `capability_type` (a raw ASC `capabilityType` string, forwarded
@@ -153,8 +185,11 @@ impl BundleIds {
         bundle_id: String,
         capability_type: String,
     ) -> Result<BundleIdCapabilityInfo, StackError> {
-        self.inner
-            .enable_capability(bundle_id, capability_type)
+        self.audit
+            .run(
+                "bundle_ids.enable_capability",
+                self.inner.enable_capability(bundle_id, capability_type),
+            )
             .await
     }
 
@@ -165,6 +200,11 @@ impl BundleIds {
     /// agreements, [`StackError::Http`] on any other non-2xx response, or
     /// [`StackError::Network`] on transport failure.
     pub async fn disable_capability(&self, capability_id: String) -> Result<(), StackError> {
-        self.inner.disable_capability(capability_id).await
+        self.audit
+            .run(
+                "bundle_ids.disable_capability",
+                self.inner.disable_capability(capability_id),
+            )
+            .await
     }
 }

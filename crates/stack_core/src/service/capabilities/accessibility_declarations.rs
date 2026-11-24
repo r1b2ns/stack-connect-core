@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 
+use crate::audit::{AuditBinding, AuditTarget};
 use crate::domain::AccessibilityDeclarationInfo;
 use crate::error::StackError;
 
@@ -63,12 +64,23 @@ pub(crate) trait AccessibilityDeclarationsImpl: Send + Sync {
 #[derive(uniffi::Object)]
 pub struct AccessibilityDeclarations {
     inner: Box<dyn AccessibilityDeclarationsImpl>,
+    /// The audit target the provider bound this handle to (see
+    /// [`crate::audit`]).
+    audit: AuditBinding,
 }
 
 impl AccessibilityDeclarations {
     /// Wraps a concrete capability impl into the exported handle.
     pub(crate) fn new(inner: Box<dyn AccessibilityDeclarationsImpl>) -> Arc<Self> {
-        Arc::new(Self { inner })
+        Arc::new(Self {
+            inner,
+            audit: AuditBinding::default(),
+        })
+    }
+
+    /// Audits this handle's calls into `target` (no-op for `None`).
+    pub(crate) fn bind_audit(&self, target: Option<&AuditTarget>) {
+        self.audit.bind(target);
     }
 }
 
@@ -87,8 +99,11 @@ impl AccessibilityDeclarations {
         app_id: String,
         limit: i64,
     ) -> Result<Vec<AccessibilityDeclarationInfo>, StackError> {
-        self.inner
-            .fetch_accessibility_declarations(app_id, limit)
+        self.audit
+            .run(
+                "accessibility_declarations.fetch_accessibility_declarations",
+                self.inner.fetch_accessibility_declarations(app_id, limit),
+            )
             .await
     }
 
@@ -108,8 +123,12 @@ impl AccessibilityDeclarations {
         app_id: String,
         device_family: String,
     ) -> Result<AccessibilityDeclarationInfo, StackError> {
-        self.inner
-            .create_accessibility_declaration(app_id, device_family)
+        self.audit
+            .run(
+                "accessibility_declarations.create_accessibility_declaration",
+                self.inner
+                    .create_accessibility_declaration(app_id, device_family),
+            )
             .await
     }
 
@@ -138,19 +157,22 @@ impl AccessibilityDeclarations {
         supports_voice_control: bool,
         supports_voiceover: bool,
     ) -> Result<AccessibilityDeclarationInfo, StackError> {
-        self.inner
-            .update_accessibility_declaration(
-                id,
-                publish,
-                supports_audio_descriptions,
-                supports_captions,
-                supports_dark_interface,
-                supports_differentiate_without_color,
-                supports_larger_text,
-                supports_reduced_motion,
-                supports_sufficient_contrast,
-                supports_voice_control,
-                supports_voiceover,
+        self.audit
+            .run(
+                "accessibility_declarations.update_accessibility_declaration",
+                self.inner.update_accessibility_declaration(
+                    id,
+                    publish,
+                    supports_audio_descriptions,
+                    supports_captions,
+                    supports_dark_interface,
+                    supports_differentiate_without_color,
+                    supports_larger_text,
+                    supports_reduced_motion,
+                    supports_sufficient_contrast,
+                    supports_voice_control,
+                    supports_voiceover,
+                ),
             )
             .await
     }
@@ -162,6 +184,11 @@ impl AccessibilityDeclarations {
     /// agreements, [`StackError::Http`] on any other non-2xx response, or
     /// [`StackError::Network`] on transport failure.
     pub async fn delete_accessibility_declaration(&self, id: String) -> Result<(), StackError> {
-        self.inner.delete_accessibility_declaration(id).await
+        self.audit
+            .run(
+                "accessibility_declarations.delete_accessibility_declaration",
+                self.inner.delete_accessibility_declaration(id),
+            )
+            .await
     }
 }

@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 
+use crate::audit::{AuditBinding, AuditTarget};
 use crate::domain::{BetaGroupInfo, BetaTesterInfo};
 use crate::error::StackError;
 
@@ -84,12 +85,23 @@ pub(crate) trait BetaGroupsImpl: Send + Sync {
 #[derive(uniffi::Object)]
 pub struct BetaGroups {
     inner: Box<dyn BetaGroupsImpl>,
+    /// The audit target the provider bound this handle to (see
+    /// [`crate::audit`]).
+    audit: AuditBinding,
 }
 
 impl BetaGroups {
     /// Wraps a concrete capability impl into the exported handle.
     pub(crate) fn new(inner: Box<dyn BetaGroupsImpl>) -> Arc<Self> {
-        Arc::new(Self { inner })
+        Arc::new(Self {
+            inner,
+            audit: AuditBinding::default(),
+        })
+    }
+
+    /// Audits this handle's calls into `target` (no-op for `None`).
+    pub(crate) fn bind_audit(&self, target: Option<&AuditTarget>) {
+        self.audit.bind(target);
     }
 }
 
@@ -105,7 +117,12 @@ impl BetaGroups {
         app_id: String,
         limit: u32,
     ) -> Result<Vec<BetaGroupInfo>, StackError> {
-        self.inner.fetch_beta_groups(app_id, limit).await
+        self.audit
+            .run(
+                "beta_groups.fetch_beta_groups",
+                self.inner.fetch_beta_groups(app_id, limit),
+            )
+            .await
     }
 
     /// Lists the beta testers belonging to `group_id`, up to `limit`.
@@ -118,7 +135,12 @@ impl BetaGroups {
         group_id: String,
         limit: u32,
     ) -> Result<Vec<BetaTesterInfo>, StackError> {
-        self.inner.fetch_beta_testers(group_id, limit).await
+        self.audit
+            .run(
+                "beta_groups.fetch_beta_testers",
+                self.inner.fetch_beta_testers(group_id, limit),
+            )
+            .await
     }
 
     /// Creates a beta group named `name` under `app_id`, returning the created
@@ -140,13 +162,16 @@ impl BetaGroups {
         public_link_enabled: bool,
         has_access_to_all_builds: bool,
     ) -> Result<BetaGroupInfo, StackError> {
-        self.inner
-            .create_beta_group(
-                app_id,
-                name,
-                is_internal,
-                public_link_enabled,
-                has_access_to_all_builds,
+        self.audit
+            .run(
+                "beta_groups.create_beta_group",
+                self.inner.create_beta_group(
+                    app_id,
+                    name,
+                    is_internal,
+                    public_link_enabled,
+                    has_access_to_all_builds,
+                ),
             )
             .await
     }
@@ -168,13 +193,16 @@ impl BetaGroups {
         public_link_limit: Option<i32>,
         feedback_enabled: Option<bool>,
     ) -> Result<BetaGroupInfo, StackError> {
-        self.inner
-            .update_beta_group(
-                group_id,
-                name,
-                public_link_enabled,
-                public_link_limit,
-                feedback_enabled,
+        self.audit
+            .run(
+                "beta_groups.update_beta_group",
+                self.inner.update_beta_group(
+                    group_id,
+                    name,
+                    public_link_enabled,
+                    public_link_limit,
+                    feedback_enabled,
+                ),
             )
             .await
     }
@@ -186,7 +214,12 @@ impl BetaGroups {
     /// agreements, [`StackError::Http`] on any other non-2xx response, or
     /// [`StackError::Network`] on transport failure.
     pub async fn delete_beta_group(&self, group_id: String) -> Result<(), StackError> {
-        self.inner.delete_beta_group(group_id).await
+        self.audit
+            .run(
+                "beta_groups.delete_beta_group",
+                self.inner.delete_beta_group(group_id),
+            )
+            .await
     }
 
     /// Adds a beta tester to `group_id`, creating the tester from `email` and the
@@ -204,8 +237,12 @@ impl BetaGroups {
         first_name: Option<String>,
         last_name: Option<String>,
     ) -> Result<BetaTesterInfo, StackError> {
-        self.inner
-            .add_beta_tester(group_id, email, first_name, last_name)
+        self.audit
+            .run(
+                "beta_groups.add_beta_tester",
+                self.inner
+                    .add_beta_tester(group_id, email, first_name, last_name),
+            )
             .await
     }
 
@@ -221,7 +258,12 @@ impl BetaGroups {
         group_id: String,
         tester_id: String,
     ) -> Result<(), StackError> {
-        self.inner.remove_beta_tester(group_id, tester_id).await
+        self.audit
+            .run(
+                "beta_groups.remove_beta_tester",
+                self.inner.remove_beta_tester(group_id, tester_id),
+            )
+            .await
     }
 
     /// Returns the number of beta testers belonging to `group_id`. Reads the
@@ -234,7 +276,12 @@ impl BetaGroups {
     /// [`StackError::Decode`] on malformed JSON, or [`StackError::Network`] on
     /// transport failure.
     pub async fn fetch_tester_count(&self, group_id: String) -> Result<u32, StackError> {
-        self.inner.fetch_tester_count(group_id).await
+        self.audit
+            .run(
+                "beta_groups.fetch_tester_count",
+                self.inner.fetch_tester_count(group_id),
+            )
+            .await
     }
 
     /// Resends the TestFlight invite for the beta tester `tester_id` on `app_id`.
@@ -244,6 +291,11 @@ impl BetaGroups {
     /// agreements, [`StackError::Http`] on any other non-2xx response, or
     /// [`StackError::Network`] on transport failure.
     pub async fn resend_invite(&self, tester_id: String, app_id: String) -> Result<(), StackError> {
-        self.inner.resend_invite(tester_id, app_id).await
+        self.audit
+            .run(
+                "beta_groups.resend_invite",
+                self.inner.resend_invite(tester_id, app_id),
+            )
+            .await
     }
 }

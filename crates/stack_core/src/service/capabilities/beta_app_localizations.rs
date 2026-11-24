@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 
+use crate::audit::{AuditBinding, AuditTarget};
 use crate::domain::BetaAppLocalizationInfo;
 use crate::error::StackError;
 
@@ -52,12 +53,23 @@ pub(crate) trait BetaAppLocalizationsImpl: Send + Sync {
 #[derive(uniffi::Object)]
 pub struct BetaAppLocalizations {
     inner: Box<dyn BetaAppLocalizationsImpl>,
+    /// The audit target the provider bound this handle to (see
+    /// [`crate::audit`]).
+    audit: AuditBinding,
 }
 
 impl BetaAppLocalizations {
     /// Wraps a concrete capability impl into the exported handle.
     pub(crate) fn new(inner: Box<dyn BetaAppLocalizationsImpl>) -> Arc<Self> {
-        Arc::new(Self { inner })
+        Arc::new(Self {
+            inner,
+            audit: AuditBinding::default(),
+        })
+    }
+
+    /// Audits this handle's calls into `target` (no-op for `None`).
+    pub(crate) fn bind_audit(&self, target: Option<&AuditTarget>) {
+        self.audit.bind(target);
     }
 }
 
@@ -73,7 +85,12 @@ impl BetaAppLocalizations {
         app_id: String,
         limit: u32,
     ) -> Result<Vec<BetaAppLocalizationInfo>, StackError> {
-        self.inner.fetch_beta_app_localizations(app_id, limit).await
+        self.audit
+            .run(
+                "beta_app_localizations.fetch_beta_app_localizations",
+                self.inner.fetch_beta_app_localizations(app_id, limit),
+            )
+            .await
     }
 
     /// Creates a beta app localization for `app_id` in `locale`, returning the
@@ -93,8 +110,16 @@ impl BetaAppLocalizations {
         feedback_email: Option<String>,
         description: Option<String>,
     ) -> Result<BetaAppLocalizationInfo, StackError> {
-        self.inner
-            .create_beta_app_localization(app_id, locale, feedback_email, description)
+        self.audit
+            .run(
+                "beta_app_localizations.create_beta_app_localization",
+                self.inner.create_beta_app_localization(
+                    app_id,
+                    locale,
+                    feedback_email,
+                    description,
+                ),
+            )
             .await
     }
 
@@ -113,8 +138,12 @@ impl BetaAppLocalizations {
         feedback_email: Option<String>,
         description: Option<String>,
     ) -> Result<BetaAppLocalizationInfo, StackError> {
-        self.inner
-            .update_beta_app_localization(id, feedback_email, description)
+        self.audit
+            .run(
+                "beta_app_localizations.update_beta_app_localization",
+                self.inner
+                    .update_beta_app_localization(id, feedback_email, description),
+            )
             .await
     }
 }

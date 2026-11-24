@@ -238,6 +238,18 @@ fn inflate_body(headers: &HeaderMap, raw: Vec<u8>, cap: usize) -> Result<Vec<u8>
     }
 }
 
+/// [`inflate_body`] for the network audit, which has the lowercase
+/// `Content-Encoding` instead of the headers: the inflated body, or `None`
+/// when `raw` is not compressed (or is corrupt, or inflates beyond `cap`).
+pub(crate) fn inflate_by_encoding(encoding: &str, raw: &[u8], cap: usize) -> Option<Vec<u8>> {
+    let gzip_magic = raw.starts_with(&[0x1f, 0x8b]);
+    match encoding {
+        "gzip" | "x-gzip" | "deflate" => inflate(raw, cap).ok(),
+        "" | "identity" if gzip_magic => inflate(raw, cap).ok(),
+        _ => None,
+    }
+}
+
 /// gzip when the body has its magic, else zlib, else raw deflate (servers
 /// disagree on what `deflate` means).
 fn inflate(raw: &[u8], cap: usize) -> Result<Vec<u8>, InflateError> {

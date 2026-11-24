@@ -937,4 +937,93 @@ mod tests {
         assert_eq!(CONNECT_TIMEOUT, Duration::from_secs(10));
         assert_eq!(REQUEST_TIMEOUT, Duration::from_secs(30));
     }
+
+    #[tokio::test]
+    async fn an_audited_provider_binds_its_handles_and_names_their_operations() {
+        use crate::audit::testing::RecordingSink;
+        use crate::audit::NetworkAuditProvider;
+
+        let server = MockServer::start().await;
+        mount_token(&server, "tok-1", 1).await;
+        Mock::given(method("GET"))
+            .and(path("/v1beta1/apps:search"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("{}"))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path(
+                "/androidpublisher/v3/applications/com.example.app/reviews",
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({})))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let sink = RecordingSink::new(false);
+        let target = sink.target(Some("acct-gp"), NetworkAuditProvider::GooglePlay);
+        let provider = GooglePlayProvider {
+            client: Arc::new(client(&server)),
+            store_page: Arc::new(store_page_client(&server)),
+        };
+        let p = Provider::audited(Box::new(provider), Some(target));
+        p.validate().await.unwrap();
+        // A handle fetched from the provider audits into the same sink,
+        // under its own operation name.
+        let reviews = p.reviews().unwrap();
+        reviews
+            .fetch_customer_reviews_page(
+                "com.example.app".into(),
+                "-createdDate".into(),
+                vec![],
+                10,
+                None,
+            )
+            .await
+            .unwrap();
+
+        let ops: Vec<_> = sink
+            .entries()
+            .iter()
+            .map(|e| (e.operation.clone(), e.parent_operation.clone()))
+            .collect();
+        assert_eq!(
+            ops,
+            [
+                (
+                    "google.oauth.token".to_string(),
+                    Some("provider.validate".to_string())
+                ),
+                ("provider.validate".to_string(), None),
+                ("reviews.fetch_customer_reviews_page".to_string(), None),
+            ]
+        );
+        assert!(sink
+            .entries()
+            .iter()
+            .all(|e| e.account_id.as_deref() == Some("acct-gp") && e.response_body.is_none()));
+    }
+
+    #[tokio::test]
+    async fn an_unaudited_provider_records_nothing() {
+        use crate::audit::testing::RecordingSink;
+        use crate::audit::NetworkAuditProvider;
+
+        let server = MockServer::start().await;
+        mount_token(&server, "tok-1", 1).await;
+        Mock::given(method("GET"))
+            .and(path("/v1beta1/apps:search"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("{}"))
+            .mount(&server)
+            .await;
+        // A sink exists, but this provider was never bound to it.
+        let sink = RecordingSink::new(true);
+        let _unused = sink.target(None, NetworkAuditProvider::GooglePlay);
+        let provider = GooglePlayProvider {
+            client: Arc::new(client(&server)),
+            store_page: Arc::new(store_page_client(&server)),
+        };
+        Provider::new(Box::new(provider)).validate().await.unwrap();
+        assert!(sink.entries().is_empty());
+    }
 }

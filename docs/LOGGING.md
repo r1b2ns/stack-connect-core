@@ -17,6 +17,9 @@ logged.
 
 They are independent: installing one does not install the other. Keep
 `DebugLogger` behind a debug launch flag; `CoreLogger` is safe to leave on.
+A third, structured sink for an on-device network audit (raw entries the
+host encrypts and masks) is described in [NETWORK_AUDIT.md](NETWORK_AUDIT.md);
+it is independent of both.
 
 ## API
 

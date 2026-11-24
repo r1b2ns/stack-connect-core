@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 
+use crate::audit::{AuditBinding, AuditTarget};
 use crate::domain::BetaBuildLocalizationInfo;
 use crate::error::StackError;
 
@@ -50,12 +51,23 @@ pub(crate) trait BetaBuildLocalizationsImpl: Send + Sync {
 #[derive(uniffi::Object)]
 pub struct BetaBuildLocalizations {
     inner: Box<dyn BetaBuildLocalizationsImpl>,
+    /// The audit target the provider bound this handle to (see
+    /// [`crate::audit`]).
+    audit: AuditBinding,
 }
 
 impl BetaBuildLocalizations {
     /// Wraps a concrete capability impl into the exported handle.
     pub(crate) fn new(inner: Box<dyn BetaBuildLocalizationsImpl>) -> Arc<Self> {
-        Arc::new(Self { inner })
+        Arc::new(Self {
+            inner,
+            audit: AuditBinding::default(),
+        })
+    }
+
+    /// Audits this handle's calls into `target` (no-op for `None`).
+    pub(crate) fn bind_audit(&self, target: Option<&AuditTarget>) {
+        self.audit.bind(target);
     }
 }
 
@@ -71,8 +83,11 @@ impl BetaBuildLocalizations {
         build_id: String,
         limit: u32,
     ) -> Result<Vec<BetaBuildLocalizationInfo>, StackError> {
-        self.inner
-            .fetch_beta_build_localizations(build_id, limit)
+        self.audit
+            .run(
+                "beta_build_localizations.fetch_beta_build_localizations",
+                self.inner.fetch_beta_build_localizations(build_id, limit),
+            )
             .await
     }
 
@@ -91,8 +106,12 @@ impl BetaBuildLocalizations {
         locale: String,
         whats_new: String,
     ) -> Result<BetaBuildLocalizationInfo, StackError> {
-        self.inner
-            .create_beta_build_localization(build_id, locale, whats_new)
+        self.audit
+            .run(
+                "beta_build_localizations.create_beta_build_localization",
+                self.inner
+                    .create_beta_build_localization(build_id, locale, whats_new),
+            )
             .await
     }
 
@@ -109,8 +128,11 @@ impl BetaBuildLocalizations {
         id: String,
         whats_new: String,
     ) -> Result<BetaBuildLocalizationInfo, StackError> {
-        self.inner
-            .update_beta_build_localization(id, whats_new)
+        self.audit
+            .run(
+                "beta_build_localizations.update_beta_build_localization",
+                self.inner.update_beta_build_localization(id, whats_new),
+            )
             .await
     }
 }

@@ -6,6 +6,7 @@ use tokio::sync::Mutex;
 
 use super::error::{local_rejection, map_google_error, with_request_context, ErrorHints};
 use super::play_auth::PlayAuth;
+use crate::audit;
 use crate::domain::AppInfo;
 use crate::error::StackError;
 use crate::http_debug::{send, HttpReply};
@@ -379,7 +380,7 @@ impl GooglePlayClient {
                     )
                 });
                 self.auth.invalidate().await;
-                reply = self.send_authorized(&build).await?;
+                reply = audit::scope::attempt(2, self.send_authorized(&build)).await?;
             } else {
                 logging::info(target::AUTH, || {
                     format!(
@@ -1479,5 +1480,122 @@ mod tests {
         let client = client.with_debug_logger(Some(logger.clone()));
         client.trace(|| "hello".to_string());
         assert_eq!(logger.messages(), vec!["hello".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn audit_records_every_attempt_of_a_401_retry_with_its_token_exchanges() {
+        use crate::audit::testing::RecordingSink;
+        use crate::audit::{NetworkAuditCredentialKind as Cred, NetworkAuditProvider as Prov};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/token"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "access_token": "tok-1", "expires_in": 3600
+            })))
+            .up_to_n_times(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/token"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "access_token": "tok-2", "expires_in": 3600
+            })))
+            .mount(&server)
+            .await;
+        search()
+            .and(bearer_token("tok-1"))
+            .respond_with(ResponseTemplate::new(401).set_body_string("{}"))
+            .expect(1)
+            .mount(&server)
+            .await;
+        search()
+            .and(bearer_token("tok-2"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "apps": [app("com.example.one", "One")]
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let sink = RecordingSink::new(true);
+        let target = sink.target(Some("acct-9"), Prov::GooglePlay);
+        let client = client(&server);
+        crate::audit::scope::operation(Some(&target), "provider.fetch_apps", client.fetch_apps())
+            .await
+            .unwrap();
+
+        let entries = sink.entries();
+        let summary: Vec<_> = entries
+            .iter()
+            .map(|e| {
+                (
+                    e.operation.as_str(),
+                    e.parent_operation.as_deref(),
+                    e.attempt,
+                    e.provider,
+                    e.credential_kind,
+                    e.response_status,
+                )
+            })
+            .collect();
+        assert_eq!(
+            summary,
+            [
+                (
+                    "google.oauth.token",
+                    Some("provider.fetch_apps"),
+                    1,
+                    Prov::GoogleOauth,
+                    Cred::OauthAssertion,
+                    Some(200)
+                ),
+                (
+                    "provider.fetch_apps",
+                    None,
+                    1,
+                    Prov::GooglePlay,
+                    Cred::GoogleAccessToken,
+                    Some(401)
+                ),
+                (
+                    "google.oauth.token",
+                    Some("provider.fetch_apps"),
+                    1,
+                    Prov::GoogleOauth,
+                    Cred::OauthAssertion,
+                    Some(200)
+                ),
+                (
+                    "provider.fetch_apps",
+                    None,
+                    2,
+                    Prov::GooglePlay,
+                    Cred::GoogleAccessToken,
+                    Some(200)
+                ),
+            ]
+        );
+        // The assertion's `exp` is the signing time plus one hour.
+        let exp = entries[0].token_expires_at_ms.unwrap();
+        let in_an_hour = entries[0].started_at_ms + 3_600_000;
+        assert!((exp - in_an_hour).abs() < 120_000, "{exp} vs {in_an_hour}");
+        // Google's opaque access token has no readable expiry.
+        assert_eq!(entries[1].token_expires_at_ms, None);
+        // The exchange is raw: the assertion goes in the form body, the
+        // access token comes back in the response.
+        assert!(entries[0]
+            .request_body
+            .as_deref()
+            .unwrap()
+            .contains("assertion="));
+        assert!(entries[0]
+            .response_body
+            .as_deref()
+            .unwrap()
+            .contains("tok-1"));
+        assert!(entries
+            .iter()
+            .all(|e| e.account_id.as_deref() == Some("acct-9")));
     }
 }
