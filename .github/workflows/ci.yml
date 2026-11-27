@@ -5,6 +5,14 @@ on:
     branches: [main, master]
   pull_request:
 
+permissions:
+  contents: read
+
+# A newer push to the same branch or PR supersedes the run in progress.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 env:
   CARGO_TERM_COLOR: always
 
@@ -13,12 +21,14 @@ jobs:
     name: fmt · clippy · test
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - name: Install toolchain
         run: |
           rustup show active-toolchain   # installs the version pinned in rust-toolchain.toml
           rustup component add rustfmt clippy
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - name: Format
         run: cargo fmt --all --check
       - name: Clippy
@@ -28,12 +38,23 @@ jobs:
 
   xcframework:
     name: build xcframework (apple)
-    runs-on: macos-14
+    # macos-14 was retired on 2026-11-02 (actions/runner-images#13518); jobs on
+    # it are cancelled before they start. macos-26 is the arm64 Tahoe image.
+    runs-on: macos-26
     needs: rust
+    env:
+      # Same Xcode as local development, rather than the image's moving default.
+      DEVELOPER_DIR: /Applications/Xcode_26.4.1.app/Contents/Developer
     steps:
-      - uses: actions/checkout@v4
-      - name: Install Apple targets
-        run: rustup target add aarch64-apple-ios aarch64-apple-ios-sim x86_64-apple-ios
-      - uses: Swatinem/rust-cache@v2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Show Xcode
+        run: xcodebuild -version
+      - name: Install toolchain and Apple targets
+        run: |
+          rustup show active-toolchain   # installs the version pinned in rust-toolchain.toml
+          rustup target add aarch64-apple-ios aarch64-apple-ios-sim x86_64-apple-ios
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - name: Build XCFramework
         run: ./build/build-xcframework.sh
