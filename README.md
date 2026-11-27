@@ -1,13 +1,18 @@
 # stack-connect-core
 
-Shared Rust core for [stack-connect](../stack-connect), consumed by:
+Shared Rust core of [StackConnect](https://github.com/r1b2ns/stack-connect), the open-source iPhone and iPad app for App Store Connect and Firebase. It holds the networking, authentication, providers and account-export crypto, behind one plugin-based contract, and is exposed to Swift with UniFFI and to Dart with flutter_rust_bridge.
 
-- **iOS** natively via **UniFFI** (`StackCoreRust.xcframework`).
-- **Flutter** (Android + desktop, in the sibling
-  [stack-connect-flutter](../stack-connect-flutter) repo) via **flutter_rust_bridge**
-  (behind the `frb` cargo feature).
+[![CI](https://github.com/r1b2ns/stack-connect-core/actions/workflows/ci.yml/badge.svg)](https://github.com/r1b2ns/stack-connect-core/actions/workflows/ci.yml)
+[![Latest release](https://img.shields.io/github/v/release/r1b2ns/stack-connect-core)](https://github.com/r1b2ns/stack-connect-core/releases/latest)
+![Rust 1.96](https://img.shields.io/badge/rust-1.96-orange)
+[![MIT license](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
-See [RUST_CORE_PLAN.md](RUST_CORE_PLAN.md) for the full plan and roadmap.
+Consumed by:
+
+- **iOS**, natively through **UniFFI**: from 1.1.0 on, each [release](https://github.com/r1b2ns/stack-connect-core/releases) ships a prebuilt `StackCoreFFI.xcframework.zip` that the app downloads as a SwiftPM binary target, so building the app needs no Rust toolchain.
+- **Flutter** (Android and desktop, in [stack-connect-flutter](https://github.com/r1b2ns/stack-connect-flutter)) through **flutter_rust_bridge**, behind the `frb` cargo feature.
+
+See [RUST_CORE_PLAN.md](RUST_CORE_PLAN.md) for the design and roadmap, and [Contributing](#contributing) to get started.
 
 ## Status
 
@@ -311,3 +316,14 @@ The `frb` feature is **off by default**, so the iOS staticlib and the default
 `cargo test` are unaffected by the Flutter binding. UniFFI is pure proc-macro
 (`uniffi::setup_scaffolding!()`); `uniffi-bindgen` is embedded as a crate bin, pinned to
 the same version as the runtime.
+
+
+## Contributing
+
+Issues and pull requests are welcome. Read [CONTRIBUTING.md](CONTRIBUTING.md) first, follow the [Code of Conduct](CODE_OF_CONDUCT.md), and report security issues privately as described in [SECURITY.md](SECURITY.md).
+
+## License
+
+Released under the MIT License. See [LICENSE](LICENSE).
+
+stack-connect-core is an independent project and is not affiliated with, endorsed by or sponsored by Apple Inc. or Google LLC.
