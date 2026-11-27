@@ -4,7 +4,9 @@ edition.workspace = true
 version.workspace = true
 license.workspace = true
 rust-version.workspace = true
+description.workspace = true
 repository.workspace = true
+homepage.workspace = true
 
 [lib]
 name = "stack_core"

@@ -7,7 +7,9 @@ edition = "2021"
 version = "0.1.0"
 license = "MIT"
 rust-version = "1.88"
-repository = "https://github.com/rubensmachion/stack-connect-core"
+description = "Rust core of StackConnect: store API providers, authentication and account-export crypto, with UniFFI (Swift) and flutter_rust_bridge (Dart) bindings"
+repository = "https://github.com/r1b2ns/stack-connect-core"
+homepage = "https://github.com/r1b2ns/stack-connect-core"
 
 [workspace.dependencies]
 uniffi = { version = "0.31", features = ["tokio"] }
